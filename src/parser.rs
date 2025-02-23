@@ -50,11 +50,12 @@ macro_rules! accept {
 macro_rules! expect {
     ($parser:expr, $kind:path) => {
         if !matches!($parser.next.as_ref().unwrap().kind, $kind) {
-            panic!(
+            let msg = format!(
                 "Expected {:?}, but found {:?}",
                 stringify!($kind),
                 $parser.next.as_ref().unwrap().kind
             );
+            return Err(msg);
         } else {
             $parser.advance();
         }
@@ -62,13 +63,32 @@ macro_rules! expect {
 
     ($parser:expr, $kind:path, $_:tt) => {
         if !matches!($parser.next.as_ref().unwrap().kind, $kind(_)) {
-            panic!(
+            let msg = format!(
                 "Expected {:?}, but found {:?}",
                 stringify!($kind),
                 $parser.next.as_ref().unwrap().kind
             );
+            return Err(msg);
         } else {
             $parser.advance();
+        }
+    };
+}
+
+macro_rules! peek {
+    ($parser:expr, $kind:path) => {
+        if matches!($parser.next.as_ref().unwrap().kind, $kind) {
+            true
+        } else {
+            false
+        }
+    };
+
+    ($parser:expr, $kind:path, $_:tt) => {
+        if matches!($parser.next.as_ref().unwrap().kind, $kind(_)) {
+            true
+        } else {
+            false
         }
     };
 }
@@ -86,20 +106,45 @@ macro_rules! yank {
     };
 }
 
+macro_rules! ast_rc {
+    ($variant:ident) => {
+        Rc::new(AST::$variant)
+    };
+
+    ($variant:ident ( $($args:expr),* $(,)? )) => {
+        Rc::new(AST::$variant( $($args),* ))
+    };
+
+    ($variant:ident { $($field:ident : $value:expr),* $(,)? }) => {
+        Rc::new(AST::$variant {
+            $($field: $value),*
+        })
+    };
+}
+
 #[derive(Debug, PartialEq, Clone)]
 pub enum AST {
     ConstInt(i64),
     Int,
     Function {
         name: String,
-        params: Vec<Rc<AST>>,
-        stmts: Vec<Rc<AST>>,
-        rtype: Rc<AST>,
+        params: ASTVec,
+        stmts: ASTVec,
+        rtype: ASTRef,
     },
     Return {
-        expr: Rc<AST>,
+        expr: ASTRef,
+    },
+    Not {
+        expr: ASTRef,
+    },
+    Negate {
+        expr: ASTRef,
     },
 }
+
+type ASTRef = Rc<AST>;
+type ASTVec = Vec<ASTRef>;
 
 #[derive(Debug)]
 pub struct Parser {
@@ -121,12 +166,12 @@ impl Parser {
         return parser;
     }
 
-    pub fn parse(&mut self) -> Result<Vec<Rc<AST>>, String> {
+    pub fn parse(&mut self) -> Result<ASTVec, String> {
         return self.program();
     }
 
-    fn program(&mut self) -> Result<Vec<Rc<AST>>, String> {
-        let mut prog: Vec<Rc<AST>> = vec![];
+    fn program(&mut self) -> Result<ASTVec, String> {
+        let mut prog: ASTVec = vec![];
 
         while !self.eof() {
             prog.push(self.function_def()?);
@@ -135,7 +180,7 @@ impl Parser {
         return Ok(prog);
     }
 
-    fn function_def(&mut self) -> Result<Rc<AST>, String> {
+    fn function_def(&mut self) -> Result<ASTRef, String> {
         let rtype = self.type_decl()?;
         expect!(self, TokenKind::Identifier, _);
         let name = yank!(self, TokenKind::Identifier);
@@ -144,7 +189,7 @@ impl Parser {
         expect!(self, TokenKind::RParen);
         let block = self.block()?;
 
-        return Ok(Rc::new(AST::Function {
+        return Ok(ast_rc!(Function {
             name: name,
             params: vec![],
             stmts: block,
@@ -152,30 +197,58 @@ impl Parser {
         }));
     }
 
-    fn type_decl(&mut self) -> Result<Rc<AST>, String> {
+    fn type_decl(&mut self) -> Result<ASTRef, String> {
         expect!(self, TokenKind::Int);
-        return Ok(Rc::new(AST::Int));
+        return Ok(ast_rc!(Int));
     }
 
-    fn block(&mut self) -> Result<Vec<Rc<AST>>, String> {
+    fn block(&mut self) -> Result<ASTVec, String> {
         expect!(self, TokenKind::LCurly);
         let stmt = self.return_stmt()?;
         expect!(self, TokenKind::RCurly);
         return Ok(vec![stmt]);
     }
 
-    fn return_stmt(&mut self) -> Result<Rc<AST>, String> {
+    fn return_stmt(&mut self) -> Result<ASTRef, String> {
         expect!(self, TokenKind::Return);
         let expr = self.expr()?;
         expect!(self, TokenKind::Semicolon);
-        return Ok(Rc::new(AST::Return { expr: expr }));
+        return Ok(ast_rc!(Return { expr: expr }));
     }
 
-    fn expr(&mut self) -> Result<Rc<AST>, String> {
+    fn expr(&mut self) -> Result<ASTRef, String> {
+        return self.unary_expr();
+    }
+
+    fn const_int(&mut self) -> Result<ASTRef, String> {
         expect!(self, TokenKind::ConstInt, _);
         let value = yank!(self, TokenKind::ConstInt);
-        return Ok(Rc::new(AST::ConstInt(value)));
+        return Ok(ast_rc!(ConstInt(value)));
     }
+
+    fn paren_expr(&mut self) -> Result<ASTRef, String> {
+        expect!(self, TokenKind::LParen);
+        let exp = self.expr();
+        expect!(self, TokenKind::RParen);
+
+        exp
+    }
+
+    fn unary_expr(&mut self) -> Result<ASTRef, String> {
+        if accept!(self, TokenKind::Tilde) {
+            return Ok(ast_rc!(Not { expr: self.expr()? }));
+        } else if accept!(self, TokenKind::Minus) {
+            return Ok(ast_rc!(Negate { expr: self.expr()? }));
+        } else if peek!(self, TokenKind::LParen) {
+            return self.paren_expr();
+        } else {
+            return self.const_int();
+        }
+    }
+
+    //fn oops(&self, why: &str) -> Result<ASTRef, String> {
+    //    return Err(why.to_string());
+    //}
 
     fn eof(&self) -> bool {
         return matches!(self.next.as_ref().unwrap().kind, TokenKind::EOF);
@@ -186,7 +259,7 @@ impl Parser {
         self.next = self.lexer.lex();
 
         if self.next.as_ref().unwrap().kind == TokenKind::Bad {
-            panic!("Invalid token found");
+            panic!("invalid token found");
         }
     }
 }

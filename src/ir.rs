@@ -22,20 +22,75 @@
  */
 
 use std::rc::Rc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::parser::AST;
 
-#[derive(Debug, PartialEq, Clone)]
-pub enum TAC {
-    Function { name: String, code: Vec<Rc<TAC>> },
-    ConstInt(i64),
-    Return(Rc<TAC>),
+macro_rules! tac_rc {
+    ($variant:ident) => {
+        Rc::new(TAC::$variant)
+    };
+
+    ($variant:ident ( $($args:expr),* $(,)? )) => {
+        Rc::new(TAC::$variant( $($args),* ))
+    };
+
+    ($variant:ident { $($field:ident : $value:expr),* $(,)? }) => {
+        Rc::new(TAC::$variant {
+            $($field: $value),*
+        })
+    };
 }
 
-fn transform_expr(expr: Rc<AST>, _tac_code: &mut Vec<Rc<TAC>>) -> Rc<TAC> {
+#[derive(Debug, PartialEq, Clone)]
+pub enum TAC {
+    Function { name: String, code: TACVec },
+    ConstInt(i64),
+    Var(usize),
+    Not { src: TACRef, dst: TACRef },
+    Neg { src: TACRef, dst: TACRef },
+    Return(TACRef),
+}
+
+type TACRef = Rc<TAC>;
+type TACVec = Vec<Rc<TAC>>;
+
+static VAR_INDEX: AtomicUsize = AtomicUsize::new(0);
+
+fn incr_var_index() -> usize {
+    VAR_INDEX.fetch_add(1, Ordering::SeqCst)
+}
+
+fn reset_var_index() {
+    VAR_INDEX.store(0, Ordering::SeqCst)
+}
+
+fn transform_expr(expr: Rc<AST>, tac_code: &mut TACVec) -> TACRef {
     match &*expr {
         AST::ConstInt(val) => {
-            return Rc::new(TAC::ConstInt(*val));
+            return tac_rc!(ConstInt(*val));
+        }
+
+        AST::Not { expr } => {
+            let src = transform_expr(expr.clone(), tac_code);
+            let var_idx = incr_var_index();
+            let dst = tac_rc!(Var(var_idx));
+            tac_code.push(tac_rc!(Not {
+                src: src,
+                dst: dst.clone(),
+            }));
+            return dst;
+        }
+
+        AST::Negate { expr } => {
+            let src = transform_expr(expr.clone(), tac_code);
+            let var_idx = incr_var_index();
+            let dst = tac_rc!(Var(var_idx));
+            tac_code.push(tac_rc!(Neg {
+                src: src,
+                dst: dst.clone(),
+            }));
+            return dst;
         }
 
         _ => {
@@ -44,7 +99,7 @@ fn transform_expr(expr: Rc<AST>, _tac_code: &mut Vec<Rc<TAC>>) -> Rc<TAC> {
     }
 }
 
-fn transform(node: Rc<AST>, tac_code: &mut Vec<Rc<TAC>>) {
+fn transform(node: Rc<AST>, tac_code: &mut TACVec) {
     match &*node {
         AST::Function {
             name,
@@ -52,25 +107,26 @@ fn transform(node: Rc<AST>, tac_code: &mut Vec<Rc<TAC>>) {
             stmts,
             rtype: _,
         } => {
-            let mut func_code: Vec<Rc<TAC>> = vec![];
+            let mut func_code: TACVec = vec![];
+            reset_var_index();
 
             for stmt in stmts {
                 transform(stmt.clone(), &mut func_code);
             }
 
-            tac_code.push(Rc::new(TAC::Function {
+            tac_code.push(tac_rc!(Function {
                 name: name.clone(),
                 code: func_code,
             }));
         }
 
         AST::ConstInt(val) => {
-            tac_code.push(Rc::new(TAC::ConstInt(*val)));
+            tac_code.push(tac_rc!(ConstInt(*val)));
         }
 
         AST::Return { expr } => {
             let e = transform_expr(expr.clone(), tac_code);
-            tac_code.push(Rc::new(TAC::Return(e)));
+            tac_code.push(tac_rc!(Return(e)));
         }
 
         _ => {
@@ -79,8 +135,8 @@ fn transform(node: Rc<AST>, tac_code: &mut Vec<Rc<TAC>>) {
     }
 }
 
-pub fn generate(ast: Vec<Rc<AST>>) -> Vec<Rc<TAC>> {
-    let mut code: Vec<Rc<TAC>> = vec![];
+pub fn generate(ast: Vec<Rc<AST>>) -> TACVec {
+    let mut code: TACVec = vec![];
 
     for node in ast {
         transform(node, &mut code);

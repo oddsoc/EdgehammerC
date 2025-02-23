@@ -220,7 +220,9 @@ fn codegen_translation(translation: &Translation, arguments: &[Argument]) {
         println!("ASM: {:#?}", asm);
     }
 
-    if arguments.iter().any(|i| matches!(i, Argument::OutputTo(_))) {
+    if arguments.iter().any(|i| matches!(i, Argument::OutputAsm))
+        || arguments.iter().any(|i| matches!(i, Argument::OutputTo(_)))
+    {
         let asm_filename = translation.s_file.to_str().unwrap();
         x86_64::emit(asm_filename, asm);
     }

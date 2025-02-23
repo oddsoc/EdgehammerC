@@ -38,6 +38,13 @@ pub enum TokenKind {
     LCurly,
     RCurly,
     Semicolon,
+    Tilde,
+    Minus,
+    MinusEq,
+    Plus,
+    PlusEq,
+    Decr,
+    Incr,
     Void,
     Int,
     Return,
@@ -295,6 +302,66 @@ impl Lexer {
                         line: self.line,
                         column: self.column - 1,
                     });
+                }
+                b'~' => {
+                    self.consume();
+                    return Some(Token {
+                        kind: TokenKind::Tilde,
+                        line: self.line,
+                        column: self.column - 1,
+                    });
+                }
+                b'-' => {
+                    self.consume();
+                    match self.peek() {
+                        Some(b'-') => {
+                            return Some(Token {
+                                kind: TokenKind::Decr,
+                                line: self.line,
+                                column: self.column - 1,
+                            });
+                        }
+                        Some(b'=') => {
+                            return Some(Token {
+                                kind: TokenKind::MinusEq,
+                                line: self.line,
+                                column: self.column - 1,
+                            });
+                        }
+                        _ => {
+                            return Some(Token {
+                                kind: TokenKind::Minus,
+                                line: self.line,
+                                column: self.column - 1,
+                            });
+                        }
+                    }
+                }
+                b'+' => {
+                    self.consume();
+                    match self.peek() {
+                        Some(b'+') => {
+                            return Some(Token {
+                                kind: TokenKind::Incr,
+                                line: self.line,
+                                column: self.column - 1,
+                            });
+                        }
+                        Some(b'=') => {
+                            return Some(Token {
+                                kind: TokenKind::PlusEq,
+                                line: self.line,
+                                column: self.column - 1,
+                            });
+                        }
+                        _ => {
+                            return Some(Token {
+                                kind: TokenKind::Plus,
+                                line: self.line,
+                                column: self.column - 1,
+                            });
+                        }
+                    }
                 }
                 b'0'..=b'9' => {
                     return self.const_integer();
