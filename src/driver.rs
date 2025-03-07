@@ -25,11 +25,11 @@ use std::env;
 use std::path::PathBuf;
 use std::process::Command;
 
-use crate::codegen;
 use crate::ir;
 use crate::lexer;
 use crate::parser;
-use crate::x86_64;
+use crate::x64::codegen;
+use crate::x64::out;
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum Argument {
@@ -224,7 +224,7 @@ fn codegen_translation(translation: &Translation, arguments: &[Argument]) {
         || arguments.iter().any(|i| matches!(i, Argument::OutputTo(_)))
     {
         let asm_filename = translation.s_file.to_str().unwrap();
-        x86_64::emit(asm_filename, asm);
+        out::emit(asm_filename, asm);
     }
 }
 

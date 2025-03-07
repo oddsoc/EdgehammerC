@@ -43,6 +43,31 @@ pub enum TokenKind {
     MinusEq,
     Plus,
     PlusEq,
+    Mult,
+    MultEq,
+    Div,
+    DivEq,
+    Mod,
+    ModEq,
+    LShift,
+    RShift,
+    LThan,
+    LThanEq,
+    GThan,
+    GThanEq,
+    Eq,
+    NotEq,
+    Assign,
+    And,
+    AndEq,
+    Or,
+    OrEq,
+    Xor,
+    XorEq,
+    LAnd,
+    LOr,
+    Not,
+    InvEq,
     Decr,
     Incr,
     Void,
@@ -244,8 +269,8 @@ impl Lexer {
             };
 
             match byte {
-                // skip whitespace
                 b' ' | b'\t' | b'\n' => {
+                    // skip whitespace
                     self.consume();
                 }
                 b'/' => {
@@ -254,9 +279,17 @@ impl Lexer {
                         Some(b'/') | Some(b'*') => {
                             self.skip_comment().unwrap();
                         }
+                        Some(b'=') => {
+                            self.consume();
+                            return Some(Token {
+                                kind: TokenKind::DivEq,
+                                line: self.line,
+                                column: self.column - 1,
+                            });
+                        }
                         _ => {
                             return Some(Token {
-                                kind: TokenKind::Bad,
+                                kind: TokenKind::Div,
                                 line: self.line,
                                 column: self.column - 1,
                             });
@@ -305,16 +338,29 @@ impl Lexer {
                 }
                 b'~' => {
                     self.consume();
-                    return Some(Token {
-                        kind: TokenKind::Tilde,
-                        line: self.line,
-                        column: self.column - 1,
-                    });
+                    match self.peek() {
+                        Some(b'=') => {
+                            self.consume();
+                            return Some(Token {
+                                kind: TokenKind::InvEq,
+                                line: self.line,
+                                column: self.column - 1,
+                            });
+                        }
+                        _ => {
+                            return Some(Token {
+                                kind: TokenKind::Tilde,
+                                line: self.line,
+                                column: self.column - 1,
+                            });
+                        }
+                    }
                 }
                 b'-' => {
                     self.consume();
                     match self.peek() {
                         Some(b'-') => {
+                            self.consume();
                             return Some(Token {
                                 kind: TokenKind::Decr,
                                 line: self.line,
@@ -322,6 +368,7 @@ impl Lexer {
                             });
                         }
                         Some(b'=') => {
+                            self.consume();
                             return Some(Token {
                                 kind: TokenKind::MinusEq,
                                 line: self.line,
@@ -341,6 +388,7 @@ impl Lexer {
                     self.consume();
                     match self.peek() {
                         Some(b'+') => {
+                            self.consume();
                             return Some(Token {
                                 kind: TokenKind::Incr,
                                 line: self.line,
@@ -348,6 +396,7 @@ impl Lexer {
                             });
                         }
                         Some(b'=') => {
+                            self.consume();
                             return Some(Token {
                                 kind: TokenKind::PlusEq,
                                 line: self.line,
@@ -357,6 +406,218 @@ impl Lexer {
                         _ => {
                             return Some(Token {
                                 kind: TokenKind::Plus,
+                                line: self.line,
+                                column: self.column - 1,
+                            });
+                        }
+                    }
+                }
+                b'*' => {
+                    self.consume();
+                    match self.peek() {
+                        Some(b'=') => {
+                            self.consume();
+                            return Some(Token {
+                                kind: TokenKind::MultEq,
+                                line: self.line,
+                                column: self.column - 1,
+                            });
+                        }
+                        _ => {
+                            return Some(Token {
+                                kind: TokenKind::Mult,
+                                line: self.line,
+                                column: self.column - 1,
+                            });
+                        }
+                    }
+                }
+                b'%' => {
+                    self.consume();
+                    match self.peek() {
+                        Some(b'=') => {
+                            self.consume();
+                            return Some(Token {
+                                kind: TokenKind::ModEq,
+                                line: self.line,
+                                column: self.column - 1,
+                            });
+                        }
+                        _ => {
+                            return Some(Token {
+                                kind: TokenKind::Mod,
+                                line: self.line,
+                                column: self.column - 1,
+                            });
+                        }
+                    }
+                }
+                b'<' => {
+                    self.consume();
+                    match self.peek() {
+                        Some(b'<') => {
+                            self.consume();
+                            return Some(Token {
+                                kind: TokenKind::LShift,
+                                line: self.line,
+                                column: self.column - 1,
+                            });
+                        }
+                        Some(b'=') => {
+                            self.consume();
+                            return Some(Token {
+                                kind: TokenKind::LThanEq,
+                                line: self.line,
+                                column: self.column - 1,
+                            });
+                        }
+                        _ => {
+                            return Some(Token {
+                                kind: TokenKind::LThan,
+                                line: self.line,
+                                column: self.column - 1,
+                            });
+                        }
+                    }
+                }
+                b'>' => {
+                    self.consume();
+                    match self.peek() {
+                        Some(b'>') => {
+                            self.consume();
+                            return Some(Token {
+                                kind: TokenKind::RShift,
+                                line: self.line,
+                                column: self.column - 1,
+                            });
+                        }
+                        Some(b'=') => {
+                            self.consume();
+                            return Some(Token {
+                                kind: TokenKind::GThanEq,
+                                line: self.line,
+                                column: self.column - 1,
+                            });
+                        }
+                        _ => {
+                            return Some(Token {
+                                kind: TokenKind::GThan,
+                                line: self.line,
+                                column: self.column - 1,
+                            });
+                        }
+                    }
+                }
+                b'=' => {
+                    self.consume();
+                    match self.peek() {
+                        Some(b'=') => {
+                            self.consume();
+                            return Some(Token {
+                                kind: TokenKind::Eq,
+                                line: self.line,
+                                column: self.column - 1,
+                            });
+                        }
+                        _ => {
+                            return Some(Token {
+                                kind: TokenKind::Assign,
+                                line: self.line,
+                                column: self.column - 1,
+                            });
+                        }
+                    }
+                }
+                b'!' => {
+                    self.consume();
+                    match self.peek() {
+                        Some(b'=') => {
+                            self.consume();
+                            return Some(Token {
+                                kind: TokenKind::NotEq,
+                                line: self.line,
+                                column: self.column - 1,
+                            });
+                        }
+                        _ => {
+                            return Some(Token {
+                                kind: TokenKind::Not,
+                                line: self.line,
+                                column: self.column - 1,
+                            });
+                        }
+                    }
+                }
+                b'&' => {
+                    self.consume();
+                    match self.peek() {
+                        Some(b'=') => {
+                            self.consume();
+                            return Some(Token {
+                                kind: TokenKind::AndEq,
+                                line: self.line,
+                                column: self.column - 1,
+                            });
+                        }
+                        Some(b'&') => {
+                            self.consume();
+                            return Some(Token {
+                                kind: TokenKind::LAnd,
+                                line: self.line,
+                                column: self.column - 1,
+                            });
+                        }
+                        _ => {
+                            return Some(Token {
+                                kind: TokenKind::And,
+                                line: self.line,
+                                column: self.column - 1,
+                            });
+                        }
+                    }
+                }
+                b'^' => {
+                    self.consume();
+                    match self.peek() {
+                        Some(b'=') => {
+                            self.consume();
+                            return Some(Token {
+                                kind: TokenKind::XorEq,
+                                line: self.line,
+                                column: self.column - 1,
+                            });
+                        }
+                        _ => {
+                            return Some(Token {
+                                kind: TokenKind::Xor,
+                                line: self.line,
+                                column: self.column - 1,
+                            });
+                        }
+                    }
+                }
+                b'|' => {
+                    self.consume();
+                    match self.peek() {
+                        Some(b'=') => {
+                            self.consume();
+                            return Some(Token {
+                                kind: TokenKind::OrEq,
+                                line: self.line,
+                                column: self.column - 1,
+                            });
+                        }
+                        Some(b'|') => {
+                            self.consume();
+                            return Some(Token {
+                                kind: TokenKind::LOr,
+                                line: self.line,
+                                column: self.column - 1,
+                            });
+                        }
+                        _ => {
+                            return Some(Token {
+                                kind: TokenKind::Or,
                                 line: self.line,
                                 column: self.column - 1,
                             });

@@ -21,27 +21,5 @@
  *  DEALINGS IN THE SOFTWARE.
  */
 
-use std::env;
-
-mod driver;
-mod ir;
-mod lexer;
-mod parser;
-mod x64;
-
-fn main() -> Result<(), ()> {
-    let args: Vec<String> = env::args().collect();
-
-    if args.len() < 2 {
-        eprintln!(
-            "Usage: {} [--lex|--parse|--codegen] [-S] [-o <output>] <c-file> [<c-file> ...]",
-            args[0]
-        );
-        std::process::exit(1);
-    }
-
-    let (translations, arguments) = driver::process_args(&args);
-    driver::run(&translations, &arguments);
-
-    Ok(())
-}
+pub mod codegen;
+pub mod out;

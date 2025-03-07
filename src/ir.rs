@@ -24,6 +24,8 @@
 use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use crate::parser::ASTRef;
+use crate::parser::ASTVec;
 use crate::parser::AST;
 
 macro_rules! tac_rc {
@@ -44,11 +46,70 @@ macro_rules! tac_rc {
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum TAC {
-    Function { name: String, code: TACVec },
+    Function {
+        name: String,
+        code: TACVec,
+    },
     ConstInt(i64),
-    Var(usize),
-    Not { src: TACRef, dst: TACRef },
-    Neg { src: TACRef, dst: TACRef },
+    Var(usize, usize),
+    Not {
+        src: TACRef,
+        dst: TACRef,
+    },
+    Neg {
+        src: TACRef,
+        dst: TACRef,
+    },
+    Mul {
+        lhs: TACRef,
+        rhs: TACRef,
+        dst: TACRef,
+    },
+    IDiv {
+        lhs: TACRef,
+        rhs: TACRef,
+        dst: TACRef,
+    },
+    Mod {
+        lhs: TACRef,
+        rhs: TACRef,
+        dst: TACRef,
+    },
+    Add {
+        lhs: TACRef,
+        rhs: TACRef,
+        dst: TACRef,
+    },
+    Sub {
+        lhs: TACRef,
+        rhs: TACRef,
+        dst: TACRef,
+    },
+    LShift {
+        lhs: TACRef,
+        rhs: TACRef,
+        dst: TACRef,
+    },
+    RShift {
+        lhs: TACRef,
+        rhs: TACRef,
+        dst: TACRef,
+    },
+    And {
+        lhs: TACRef,
+        rhs: TACRef,
+        dst: TACRef,
+    },
+    Or {
+        lhs: TACRef,
+        rhs: TACRef,
+        dst: TACRef,
+    },
+    Xor {
+        lhs: TACRef,
+        rhs: TACRef,
+        dst: TACRef,
+    },
     Return(TACRef),
 }
 
@@ -65,8 +126,8 @@ fn reset_var_index() {
     VAR_INDEX.store(0, Ordering::SeqCst)
 }
 
-fn transform_expr(expr: Rc<AST>, tac_code: &mut TACVec) -> TACRef {
-    match &*expr {
+fn transform_expr(expr: ASTRef, tac_code: &mut TACVec) -> TACRef {
+    match &*expr.borrow() {
         AST::ConstInt(val) => {
             return tac_rc!(ConstInt(*val));
         }
@@ -74,7 +135,7 @@ fn transform_expr(expr: Rc<AST>, tac_code: &mut TACVec) -> TACRef {
         AST::Not { expr } => {
             let src = transform_expr(expr.clone(), tac_code);
             let var_idx = incr_var_index();
-            let dst = tac_rc!(Var(var_idx));
+            let dst = tac_rc!(Var(var_idx, 4));
             tac_code.push(tac_rc!(Not {
                 src: src,
                 dst: dst.clone(),
@@ -85,10 +146,140 @@ fn transform_expr(expr: Rc<AST>, tac_code: &mut TACVec) -> TACRef {
         AST::Negate { expr } => {
             let src = transform_expr(expr.clone(), tac_code);
             let var_idx = incr_var_index();
-            let dst = tac_rc!(Var(var_idx));
+            let dst = tac_rc!(Var(var_idx, 4));
             tac_code.push(tac_rc!(Neg {
                 src: src,
                 dst: dst.clone(),
+            }));
+            return dst;
+        }
+
+        AST::Multiply { left, right } => {
+            let x = transform_expr(left.clone(), tac_code);
+            let y = transform_expr(right.clone(), tac_code);
+            let var_idx = incr_var_index();
+            let dst = tac_rc!(Var(var_idx, 4));
+            tac_code.push(tac_rc!(Mul {
+                lhs: x,
+                rhs: y,
+                dst: dst.clone()
+            }));
+            return dst;
+        }
+
+        AST::Divide { left, right } => {
+            let x = transform_expr(left.clone(), tac_code);
+            let y = transform_expr(right.clone(), tac_code);
+            let var_idx = incr_var_index();
+            let dst = tac_rc!(Var(var_idx, 4));
+            tac_code.push(tac_rc!(IDiv {
+                lhs: x,
+                rhs: y,
+                dst: dst.clone()
+            }));
+            return dst;
+        }
+
+        AST::Modulo { left, right } => {
+            let x = transform_expr(left.clone(), tac_code);
+            let y = transform_expr(right.clone(), tac_code);
+            let var_idx = incr_var_index();
+            let dst = tac_rc!(Var(var_idx, 4));
+            tac_code.push(tac_rc!(Mod {
+                lhs: x,
+                rhs: y,
+                dst: dst.clone()
+            }));
+            return dst;
+        }
+
+        AST::Add { left, right } => {
+            let x = transform_expr(left.clone(), tac_code);
+            let y = transform_expr(right.clone(), tac_code);
+            let var_idx = incr_var_index();
+            let dst = tac_rc!(Var(var_idx, 4));
+            tac_code.push(tac_rc!(Add {
+                lhs: x,
+                rhs: y,
+                dst: dst.clone()
+            }));
+            return dst;
+        }
+
+        AST::Subtract { left, right } => {
+            let x = transform_expr(left.clone(), tac_code);
+            let y = transform_expr(right.clone(), tac_code);
+            let var_idx = incr_var_index();
+            let dst = tac_rc!(Var(var_idx, 4));
+            tac_code.push(tac_rc!(Sub {
+                lhs: x,
+                rhs: y,
+                dst: dst.clone()
+            }));
+            return dst;
+        }
+
+        AST::LShift { left, right } => {
+            let x = transform_expr(left.clone(), tac_code);
+            let y = transform_expr(right.clone(), tac_code);
+            let var_idx = incr_var_index();
+            let dst = tac_rc!(Var(var_idx, 4));
+            tac_code.push(tac_rc!(LShift {
+                lhs: x,
+                rhs: y,
+                dst: dst.clone()
+            }));
+            return dst;
+        }
+
+        AST::RShift { left, right } => {
+            let x = transform_expr(left.clone(), tac_code);
+            let y = transform_expr(right.clone(), tac_code);
+            let var_idx = incr_var_index();
+            let dst = tac_rc!(Var(var_idx, 4));
+            tac_code.push(tac_rc!(RShift {
+                lhs: x,
+                rhs: y,
+                dst: dst.clone()
+            }));
+            return dst;
+        }
+
+        AST::And { left, right } => {
+            let x = transform_expr(left.clone(), tac_code);
+            let y = transform_expr(right.clone(), tac_code);
+            let var_idx = incr_var_index();
+            let dst = tac_rc!(Var(var_idx, 4));
+            tac_code.push(tac_rc!(And {
+                lhs: x,
+                rhs: y,
+                dst: dst.clone()
+            }));
+            return dst;
+        }
+
+        AST::Or { left, right } => {
+            let x = transform_expr(left.clone(), tac_code);
+            let y = transform_expr(right.clone(), tac_code);
+            let var_idx = incr_var_index();
+            let dst = tac_rc!(Var(var_idx, 4));
+            tac_code.push(tac_rc!(Or {
+                lhs: x,
+                rhs: y,
+                dst: dst.clone()
+            }));
+            return dst;
+        }
+
+        AST::Xor { left, right } => {
+            let x = transform_expr(left.clone(), tac_code);
+            let y = transform_expr(right.clone(), tac_code);
+            let var_idx = incr_var_index();
+            let dst = tac_rc!(Var(var_idx, 4));
+            tac_code.push(tac_rc!(Xor {
+                lhs: x,
+                rhs: y,
+                dst: dst.clone()
             }));
             return dst;
         }
@@ -99,8 +290,8 @@ fn transform_expr(expr: Rc<AST>, tac_code: &mut TACVec) -> TACRef {
     }
 }
 
-fn transform(node: Rc<AST>, tac_code: &mut TACVec) {
-    match &*node {
+fn transform(node: ASTRef, tac_code: &mut TACVec) {
+    match &*node.borrow() {
         AST::Function {
             name,
             params: _,
@@ -120,10 +311,6 @@ fn transform(node: Rc<AST>, tac_code: &mut TACVec) {
             }));
         }
 
-        AST::ConstInt(val) => {
-            tac_code.push(tac_rc!(ConstInt(*val)));
-        }
-
         AST::Return { expr } => {
             let e = transform_expr(expr.clone(), tac_code);
             tac_code.push(tac_rc!(Return(e)));
@@ -135,7 +322,7 @@ fn transform(node: Rc<AST>, tac_code: &mut TACVec) {
     }
 }
 
-pub fn generate(ast: Vec<Rc<AST>>) -> TACVec {
+pub fn generate(ast: ASTVec) -> TACVec {
     let mut code: TACVec = vec![];
 
     for node in ast {
