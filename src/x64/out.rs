@@ -27,10 +27,25 @@ use std::rc::Rc;
 
 use crate::x64::codegen::Asm;
 
+use super::codegen::CondCode;
+
+fn cc_to_str(cc: &CondCode) -> String {
+    match cc {
+        CondCode::E => "e",
+        CondCode::NE => "ne",
+        CondCode::L => "l",
+        CondCode::LE => "le",
+        CondCode::G => "g",
+        CondCode::GE => "ge",
+    }
+    .to_string()
+}
+
 fn asm_to_str(asm: Rc<RefCell<Asm>>) -> String {
     match &*asm.borrow() {
         Asm::Imm(val) => format!("${}", val),
         Asm::Stack(idx, _size) => format!("-{}(%rbp)", idx),
+        Asm::Label(idx) => format!(".L{}", idx),
         Asm::Al => format!("%al"),
         Asm::Ax => format!("%ax"),
         Asm::Eax => format!("%eax"),
@@ -228,6 +243,38 @@ fn emit_op(file: &mut std::fs::File, instr: Rc<RefCell<Asm>>) {
             writeln!(file, "\tmovq\t%rbp, %rsp").unwrap();
             writeln!(file, "\tpopq\t%rbp").unwrap();
             writeln!(file, "\tret").unwrap();
+        }
+
+        Asm::Cmpl(src, dst) => {
+            write!(file, "\tcmpl\t").unwrap();
+            emit_operand(file, src.clone());
+            write!(file, ", ").unwrap();
+            emit_operand(file, dst.clone());
+            writeln!(file, "").unwrap();
+        }
+
+        Asm::Jmp(label) => {
+            write!(file, "\tjmp\t").unwrap();
+            emit_operand(file, label.clone());
+            writeln!(file, "").unwrap();
+        }
+
+        Asm::JmpCC { cond, label } => {
+            let cc = cc_to_str(cond);
+            write!(file, "\tj{} \t", cc).unwrap();
+            emit_operand(file, label.clone());
+            writeln!(file, "").unwrap();
+        }
+
+        Asm::SetCC { cond, dst } => {
+            let cc = cc_to_str(cond);
+            write!(file, "\tset{}\t", cc).unwrap();
+            emit_operand(file, dst.clone());
+            writeln!(file, "").unwrap();
+        }
+
+        Asm::Label(idx) => {
+            writeln!(file, ".L{}:", *idx).unwrap();
         }
 
         _ => {

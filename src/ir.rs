@@ -52,11 +52,15 @@ pub enum TAC {
     },
     ConstInt(i64),
     Var(usize, usize),
-    Not {
+    Inv {
         src: TACRef,
         dst: TACRef,
     },
     Neg {
+        src: TACRef,
+        dst: TACRef,
+    },
+    Not {
         src: TACRef,
         dst: TACRef,
     },
@@ -110,13 +114,62 @@ pub enum TAC {
         rhs: TACRef,
         dst: TACRef,
     },
+    Equal {
+        lhs: TACRef,
+        rhs: TACRef,
+        dst: TACRef,
+    },
+    NotEq {
+        lhs: TACRef,
+        rhs: TACRef,
+        dst: TACRef,
+    },
+    LessThan {
+        lhs: TACRef,
+        rhs: TACRef,
+        dst: TACRef,
+    },
+    LessOrEq {
+        lhs: TACRef,
+        rhs: TACRef,
+        dst: TACRef,
+    },
+    GreaterThan {
+        lhs: TACRef,
+        rhs: TACRef,
+        dst: TACRef,
+    },
+    GreaterOrEq {
+        lhs: TACRef,
+        rhs: TACRef,
+        dst: TACRef,
+    },
+    Copy {
+        src: TACRef,
+        dst: TACRef,
+    },
+    Jump(TACRef),
+    JumpOnZero {
+        expr: TACRef,
+        label: TACRef,
+    },
+    JumpOnNotZero {
+        expr: TACRef,
+        label: TACRef,
+    },
+    Label(usize),
     Return(TACRef),
 }
 
 type TACRef = Rc<TAC>;
 type TACVec = Vec<Rc<TAC>>;
 
+static LABEL_INDEX: AtomicUsize = AtomicUsize::new(0);
 static VAR_INDEX: AtomicUsize = AtomicUsize::new(0);
+
+fn incr_label_index() -> usize {
+    LABEL_INDEX.fetch_add(1, Ordering::SeqCst)
+}
 
 fn incr_var_index() -> usize {
     VAR_INDEX.fetch_add(1, Ordering::SeqCst)
@@ -132,11 +185,11 @@ fn transform_expr(expr: ASTRef, tac_code: &mut TACVec) -> TACRef {
             return tac_rc!(ConstInt(*val));
         }
 
-        AST::Not { expr } => {
+        AST::Complement { expr } => {
             let src = transform_expr(expr.clone(), tac_code);
             let var_idx = incr_var_index();
             let dst = tac_rc!(Var(var_idx, 4));
-            tac_code.push(tac_rc!(Not {
+            tac_code.push(tac_rc!(Inv {
                 src: src,
                 dst: dst.clone(),
             }));
@@ -148,6 +201,17 @@ fn transform_expr(expr: ASTRef, tac_code: &mut TACVec) -> TACRef {
             let var_idx = incr_var_index();
             let dst = tac_rc!(Var(var_idx, 4));
             tac_code.push(tac_rc!(Neg {
+                src: src,
+                dst: dst.clone(),
+            }));
+            return dst;
+        }
+
+        AST::Not { expr } => {
+            let src = transform_expr(expr.clone(), tac_code);
+            let var_idx = incr_var_index();
+            let dst = tac_rc!(Var(var_idx, 4));
+            tac_code.push(tac_rc!(Not {
                 src: src,
                 dst: dst.clone(),
             }));
@@ -277,6 +341,150 @@ fn transform_expr(expr: ASTRef, tac_code: &mut TACVec) -> TACRef {
             let var_idx = incr_var_index();
             let dst = tac_rc!(Var(var_idx, 4));
             tac_code.push(tac_rc!(Xor {
+                lhs: x,
+                rhs: y,
+                dst: dst.clone()
+            }));
+            return dst;
+        }
+
+        AST::LogicAnd { left, right } => {
+            let false_label = tac_rc!(Label(incr_label_index()));
+            let end_label = tac_rc!(Label(incr_label_index()));
+            let x = transform_expr(left.clone(), tac_code);
+            let mut jmp = tac_rc!(JumpOnZero {
+                expr: x,
+                label: false_label.clone()
+            });
+            tac_code.push(jmp.clone());
+            let y = transform_expr(right.clone(), tac_code);
+            jmp = tac_rc!(JumpOnZero {
+                expr: y,
+                label: false_label.clone()
+            });
+            tac_code.push(jmp.clone());
+            let dst = tac_rc!(Var(incr_var_index(), 4));
+            let mut cpy = tac_rc!(Copy {
+                src: tac_rc!(ConstInt(1)),
+                dst: dst.clone()
+            });
+            tac_code.push(cpy.clone());
+            tac_code.push(tac_rc!(Jump(end_label.clone())));
+            tac_code.push(false_label.clone());
+            cpy = tac_rc!(Copy {
+                src: tac_rc!(ConstInt(0)),
+                dst: dst.clone()
+            });
+            tac_code.push(cpy.clone());
+            tac_code.push(end_label.clone());
+
+            return dst;
+        }
+
+        AST::LogicOr { left, right } => {
+            let true_label = tac_rc!(Label(incr_label_index()));
+            let end_label = tac_rc!(Label(incr_label_index()));
+            let x = transform_expr(left.clone(), tac_code);
+            let mut jmp = tac_rc!(JumpOnNotZero {
+                expr: x,
+                label: true_label.clone()
+            });
+            tac_code.push(jmp.clone());
+            let y = transform_expr(right.clone(), tac_code);
+            jmp = tac_rc!(JumpOnNotZero {
+                expr: y,
+                label: true_label.clone()
+            });
+            tac_code.push(jmp.clone());
+            let dst = tac_rc!(Var(incr_var_index(), 4));
+            let mut cpy = tac_rc!(Copy {
+                src: tac_rc!(ConstInt(0)),
+                dst: dst.clone()
+            });
+            tac_code.push(cpy.clone());
+            tac_code.push(tac_rc!(Jump(end_label.clone())));
+            tac_code.push(true_label.clone());
+            cpy = tac_rc!(Copy {
+                src: tac_rc!(ConstInt(1)),
+                dst: dst.clone()
+            });
+            tac_code.push(cpy.clone());
+            tac_code.push(end_label.clone());
+
+            return dst;
+        }
+
+        AST::Equal { left, right } => {
+            let x = transform_expr(left.clone(), tac_code);
+            let y = transform_expr(right.clone(), tac_code);
+            let var_idx = incr_var_index();
+            let dst = tac_rc!(Var(var_idx, 4));
+            tac_code.push(tac_rc!(Equal {
+                lhs: x,
+                rhs: y,
+                dst: dst.clone()
+            }));
+            return dst;
+        }
+
+        AST::NotEq { left, right } => {
+            let x = transform_expr(left.clone(), tac_code);
+            let y = transform_expr(right.clone(), tac_code);
+            let var_idx = incr_var_index();
+            let dst = tac_rc!(Var(var_idx, 4));
+            tac_code.push(tac_rc!(NotEq {
+                lhs: x,
+                rhs: y,
+                dst: dst.clone()
+            }));
+            return dst;
+        }
+
+        AST::LessThan { left, right } => {
+            let x = transform_expr(left.clone(), tac_code);
+            let y = transform_expr(right.clone(), tac_code);
+            let var_idx = incr_var_index();
+            let dst = tac_rc!(Var(var_idx, 4));
+            tac_code.push(tac_rc!(LessThan {
+                lhs: x,
+                rhs: y,
+                dst: dst.clone()
+            }));
+            return dst;
+        }
+
+        AST::LessOrEq { left, right } => {
+            let x = transform_expr(left.clone(), tac_code);
+            let y = transform_expr(right.clone(), tac_code);
+            let var_idx = incr_var_index();
+            let dst = tac_rc!(Var(var_idx, 4));
+            tac_code.push(tac_rc!(LessOrEq {
+                lhs: x,
+                rhs: y,
+                dst: dst.clone()
+            }));
+            return dst;
+        }
+
+        AST::GreaterThan { left, right } => {
+            let x = transform_expr(left.clone(), tac_code);
+            let y = transform_expr(right.clone(), tac_code);
+            let var_idx = incr_var_index();
+            let dst = tac_rc!(Var(var_idx, 4));
+            tac_code.push(tac_rc!(GreaterThan {
+                lhs: x,
+                rhs: y,
+                dst: dst.clone()
+            }));
+            return dst;
+        }
+
+        AST::GreaterOrEq { left, right } => {
+            let x = transform_expr(left.clone(), tac_code);
+            let y = transform_expr(right.clone(), tac_code);
+            let var_idx = incr_var_index();
+            let dst = tac_rc!(Var(var_idx, 4));
+            tac_code.push(tac_rc!(GreaterOrEq {
                 lhs: x,
                 rhs: y,
                 dst: dst.clone()

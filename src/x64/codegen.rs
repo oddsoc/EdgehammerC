@@ -46,6 +46,17 @@ macro_rules! asm_rc {
 
 #[derive(Debug, PartialEq, Clone)]
 #[allow(dead_code)]
+pub enum CondCode {
+    E,
+    NE,
+    L,
+    LE,
+    G,
+    GE,
+}
+
+#[derive(Debug, PartialEq, Clone)]
+#[allow(dead_code)]
 pub enum Asm {
     Function {
         name: String,
@@ -68,9 +79,20 @@ pub enum Asm {
     Andl(AsmRef, AsmRef),
     Orl(AsmRef, AsmRef),
     Xorl(AsmRef, AsmRef),
+    Cmpl(AsmRef, AsmRef),
     Imm(i64),
     Var(usize, usize),
+    Label(usize),
     Stack(usize, usize),
+    Jmp(AsmRef),
+    JmpCC {
+        cond: CondCode,
+        label: AsmRef,
+    },
+    SetCC {
+        cond: CondCode,
+        dst: AsmRef,
+    },
     Cdq,
     Al,
     Ax,
@@ -141,6 +163,7 @@ pub enum Asm {
 type AsmRef = Rc<RefCell<Asm>>;
 type AsmVec = Vec<AsmRef>;
 type VarMap = HashMap<usize, AsmRef>;
+type LabelMap = HashMap<usize, AsmRef>;
 
 static STACK_POS: AtomicUsize = AtomicUsize::new(0);
 
@@ -160,6 +183,13 @@ fn create_var(idx: usize, var_map: &mut VarMap) -> AsmRef {
         .clone()
 }
 
+fn create_label(idx: usize, label_map: &mut LabelMap) -> AsmRef {
+    label_map
+        .entry(idx)
+        .or_insert_with(|| asm_rc!(Label(idx)))
+        .clone()
+}
+
 fn is_immediate(asm: &AsmRef) -> bool {
     matches!(*asm.borrow(), Asm::Imm(_))
 }
@@ -169,6 +199,7 @@ fn is_variable(asm: &AsmRef) -> bool {
     matches!(*asm.borrow(), Asm::Var(_, _))
 }
 
+#[allow(dead_code)]
 fn is_register(asm: &AsmRef) -> bool {
     match *asm.borrow() {
         Asm::Al
@@ -293,23 +324,6 @@ fn binop_fixup(
     return dst;
 }
 
-fn create_mov(src: AsmRef, dst: AsmRef, asm_vec: &mut AsmVec) -> AsmRef {
-    if is_register(&src)
-        || is_register(&dst)
-        || is_immediate(&src)
-        || is_immediate(&dst)
-    {
-        let mov = asm_rc!(Movl(src, dst.clone(),));
-        return mov;
-    } else {
-        let tmp = asm_rc!(R10d);
-        let mut mov = asm_rc!(Movl(src, tmp.clone(),));
-        asm_vec.push(mov);
-        mov = asm_rc!(Movl(tmp, dst));
-        return mov;
-    }
-}
-
 fn mov_op(src: AsmRef, dst: AsmRef) -> AsmRef {
     match *dst.borrow() {
         Asm::Cl => {
@@ -339,11 +353,20 @@ where
         Rc::new(RefCell::new(op_constructor(src.clone(), dst.clone())));
 
     if dst != *final_dst {
-        asm_vec.push(op);
-        op = mov_op(dst.clone(), final_dst.clone());
+        match *final_dst.borrow() {
+            Asm::Imm(_) => {}
+            _ => {
+                asm_vec.push(op);
+                op = mov_op(dst.clone(), final_dst.clone());
+            }
+        }
     }
 
     return op;
+}
+
+fn create_mov(src: &mut AsmRef, dst: &AsmRef, asm_vec: &mut AsmVec) -> AsmRef {
+    create_binop(Asm::Movl, src, dst, Asm::R10d, None, None, asm_vec)
 }
 
 fn create_addl(src: &mut AsmRef, dst: &AsmRef, asm_vec: &mut AsmVec) -> AsmRef {
@@ -372,6 +395,10 @@ fn create_or(src: &mut AsmRef, dst: &AsmRef, asm_vec: &mut AsmVec) -> AsmRef {
 
 fn create_xor(src: &mut AsmRef, dst: &AsmRef, asm_vec: &mut AsmVec) -> AsmRef {
     create_binop(Asm::Xorl, src, dst, Asm::R10d, None, None, asm_vec)
+}
+
+fn create_cmpl(src: &mut AsmRef, dst: &AsmRef, asm_vec: &mut AsmVec) -> AsmRef {
+    create_binop(Asm::Cmpl, src, dst, Asm::R10d, None, None, asm_vec)
 }
 
 fn create_imull(
@@ -404,6 +431,7 @@ fn create_idiv(src: AsmRef, asm_vec: &mut AsmVec) -> AsmRef {
 fn transform_expr(
     node: Rc<TAC>,
     var_map: &mut VarMap,
+    label_map: &mut LabelMap,
     asm_vec: &mut AsmVec,
 ) -> AsmRef {
     match &*node {
@@ -415,120 +443,286 @@ fn transform_expr(
             return create_var(*idx, var_map);
         }
 
-        TAC::Not { src, dst } => {
-            let src = transform_expr(src.clone(), var_map, asm_vec);
-            let dst = transform_expr(dst.clone(), var_map, asm_vec);
-            let mov = create_mov(src, dst.clone(), asm_vec);
+        TAC::Inv { src, dst } => {
+            let src = transform_expr(src.clone(), var_map, label_map, asm_vec);
+            let dst = transform_expr(dst.clone(), var_map, label_map, asm_vec);
+            let mov = create_mov(&mut src.clone(), &dst, asm_vec);
             asm_vec.push(mov);
             return asm_rc!(Notl(dst.clone()));
         }
 
         TAC::Neg { src, dst } => {
-            let src = transform_expr(src.clone(), var_map, asm_vec);
-            let dst = transform_expr(dst.clone(), var_map, asm_vec);
-            let mov = create_mov(src, dst.clone(), asm_vec);
+            let src = transform_expr(src.clone(), var_map, label_map, asm_vec);
+            let dst = transform_expr(dst.clone(), var_map, label_map, asm_vec);
+            let mov = create_mov(&mut src.clone(), &dst, asm_vec);
             asm_vec.push(mov);
             return asm_rc!(Negl(dst.clone()));
         }
 
-        TAC::Mul { lhs, rhs, dst } => {
-            let x = transform_expr(lhs.clone(), var_map, asm_vec);
-            let dst = transform_expr(dst.clone(), var_map, asm_vec);
-            let mov = create_mov(x, dst.clone(), asm_vec);
+        TAC::Not { src, dst } => {
+            let x = transform_expr(src.clone(), var_map, label_map, asm_vec);
+            let imm = asm_rc!(Imm(0));
+            let cmp = create_cmpl(&mut imm.clone(), &x, asm_vec);
+            asm_vec.push(cmp);
+            let dst = transform_expr(dst.clone(), var_map, label_map, asm_vec);
+            let mov = create_mov(&mut imm.clone(), &dst, asm_vec);
             asm_vec.push(mov);
-            let mut y = transform_expr(rhs.clone(), var_map, asm_vec);
+
+            return asm_rc!(SetCC {
+                cond: CondCode::E,
+                dst: dst.clone(),
+            });
+        }
+
+        TAC::Mul { lhs, rhs, dst } => {
+            let mut x =
+                transform_expr(lhs.clone(), var_map, label_map, asm_vec);
+            let dst = transform_expr(dst.clone(), var_map, label_map, asm_vec);
+            let mov = create_mov(&mut x, &dst, asm_vec);
+            asm_vec.push(mov);
+            let mut y =
+                transform_expr(rhs.clone(), var_map, label_map, asm_vec);
             return create_imull(&mut y, &dst, asm_vec);
         }
 
         TAC::IDiv { lhs, rhs, dst } => {
-            let x = transform_expr(lhs.clone(), var_map, asm_vec);
+            let mut x =
+                transform_expr(lhs.clone(), var_map, label_map, asm_vec);
             let reg = asm_rc!(Eax);
-            let mov = create_mov(x, reg, asm_vec);
+            let mov = create_mov(&mut x, &reg, asm_vec);
             asm_vec.push(mov);
             let cdq = asm_rc!(Cdq);
             asm_vec.push(cdq);
-            let y = transform_expr(rhs.clone(), var_map, asm_vec);
+            let y = transform_expr(rhs.clone(), var_map, label_map, asm_vec);
             let idiv = create_idiv(y, asm_vec);
             asm_vec.push(idiv);
-            let dst = transform_expr(dst.clone(), var_map, asm_vec);
-            return create_mov(asm_rc!(Eax), dst, asm_vec);
+            let dst = transform_expr(dst.clone(), var_map, label_map, asm_vec);
+            return create_mov(&mut asm_rc!(Eax), &dst, asm_vec);
         }
 
         TAC::Mod { lhs, rhs, dst } => {
-            let x = transform_expr(lhs.clone(), var_map, asm_vec);
+            let mut x =
+                transform_expr(lhs.clone(), var_map, label_map, asm_vec);
             let reg = asm_rc!(Eax);
-            let mov = create_mov(x, reg, asm_vec);
+            let mov = create_mov(&mut x, &reg, asm_vec);
             asm_vec.push(mov);
             let cdq = asm_rc!(Cdq);
             asm_vec.push(cdq);
-            let y = transform_expr(rhs.clone(), var_map, asm_vec);
+            let y = transform_expr(rhs.clone(), var_map, label_map, asm_vec);
             let idiv = create_idiv(y, asm_vec);
             asm_vec.push(idiv);
-            let dst = transform_expr(dst.clone(), var_map, asm_vec);
-            return create_mov(asm_rc!(Edx), dst, asm_vec);
+            let dst = transform_expr(dst.clone(), var_map, label_map, asm_vec);
+            return create_mov(&mut asm_rc!(Edx), &dst, asm_vec);
         }
 
         TAC::Add { lhs, rhs, dst } => {
-            let x = transform_expr(lhs.clone(), var_map, asm_vec);
-            let dst = transform_expr(dst.clone(), var_map, asm_vec);
-            let mov = create_mov(x, dst.clone(), asm_vec);
+            let mut x =
+                transform_expr(lhs.clone(), var_map, label_map, asm_vec);
+            let dst = transform_expr(dst.clone(), var_map, label_map, asm_vec);
+            let mov = create_mov(&mut x, &dst, asm_vec);
             asm_vec.push(mov);
-            let mut y = transform_expr(rhs.clone(), var_map, asm_vec);
+            let mut y =
+                transform_expr(rhs.clone(), var_map, label_map, asm_vec);
             return create_addl(&mut y, &dst, asm_vec);
         }
 
         TAC::Sub { lhs, rhs, dst } => {
-            let x = transform_expr(lhs.clone(), var_map, asm_vec);
-            let dst = transform_expr(dst.clone(), var_map, asm_vec);
-            let mov = create_mov(x, dst.clone(), asm_vec);
+            let mut x =
+                transform_expr(lhs.clone(), var_map, label_map, asm_vec);
+            let dst = transform_expr(dst.clone(), var_map, label_map, asm_vec);
+            let mov = create_mov(&mut x, &dst, asm_vec);
             asm_vec.push(mov);
-            let mut y = transform_expr(rhs.clone(), var_map, asm_vec);
+            let mut y =
+                transform_expr(rhs.clone(), var_map, label_map, asm_vec);
             return create_subl(&mut y, &dst, asm_vec);
         }
 
         TAC::LShift { lhs, rhs, dst } => {
-            let x = transform_expr(lhs.clone(), var_map, asm_vec);
-            let dst = transform_expr(dst.clone(), var_map, asm_vec);
-            let mov = create_mov(x, dst.clone(), asm_vec);
+            let mut x =
+                transform_expr(lhs.clone(), var_map, label_map, asm_vec);
+            let dst = transform_expr(dst.clone(), var_map, label_map, asm_vec);
+            let mov = create_mov(&mut x, &dst, asm_vec);
             asm_vec.push(mov);
-            let mut y = transform_expr(rhs.clone(), var_map, asm_vec);
+            let mut y =
+                transform_expr(rhs.clone(), var_map, label_map, asm_vec);
             return create_shll(&mut y, &dst, asm_vec);
         }
 
         TAC::RShift { lhs, rhs, dst } => {
-            let x = transform_expr(lhs.clone(), var_map, asm_vec);
-            let dst = transform_expr(dst.clone(), var_map, asm_vec);
-            let mov = create_mov(x, dst.clone(), asm_vec);
+            let mut x =
+                transform_expr(lhs.clone(), var_map, label_map, asm_vec);
+            let dst = transform_expr(dst.clone(), var_map, label_map, asm_vec);
+            let mov = create_mov(&mut x, &dst, asm_vec);
             asm_vec.push(mov);
-            let mut y = transform_expr(rhs.clone(), var_map, asm_vec);
+            let mut y =
+                transform_expr(rhs.clone(), var_map, label_map, asm_vec);
             return create_sarl(&mut y, &dst, asm_vec);
         }
 
         TAC::And { lhs, rhs, dst } => {
-            let x = transform_expr(lhs.clone(), var_map, asm_vec);
-            let dst = transform_expr(dst.clone(), var_map, asm_vec);
-            let mov = create_mov(x, dst.clone(), asm_vec);
+            let mut x =
+                transform_expr(lhs.clone(), var_map, label_map, asm_vec);
+            let dst = transform_expr(dst.clone(), var_map, label_map, asm_vec);
+            let mov = create_mov(&mut x, &dst, asm_vec);
             asm_vec.push(mov);
-            let mut y = transform_expr(rhs.clone(), var_map, asm_vec);
+            let mut y =
+                transform_expr(rhs.clone(), var_map, label_map, asm_vec);
             return create_and(&mut y, &dst, asm_vec);
         }
 
         TAC::Or { lhs, rhs, dst } => {
-            let x = transform_expr(lhs.clone(), var_map, asm_vec);
-            let dst = transform_expr(dst.clone(), var_map, asm_vec);
-            let mov = create_mov(x, dst.clone(), asm_vec);
+            let mut x =
+                transform_expr(lhs.clone(), var_map, label_map, asm_vec);
+            let dst = transform_expr(dst.clone(), var_map, label_map, asm_vec);
+            let mov = create_mov(&mut x, &dst, asm_vec);
             asm_vec.push(mov);
-            let mut y = transform_expr(rhs.clone(), var_map, asm_vec);
+            let mut y =
+                transform_expr(rhs.clone(), var_map, label_map, asm_vec);
             return create_or(&mut y, &dst, asm_vec);
         }
 
         TAC::Xor { lhs, rhs, dst } => {
-            let x = transform_expr(lhs.clone(), var_map, asm_vec);
-            let dst = transform_expr(dst.clone(), var_map, asm_vec);
-            let mov = create_mov(x, dst.clone(), asm_vec);
+            let mut x =
+                transform_expr(lhs.clone(), var_map, label_map, asm_vec);
+            let dst = transform_expr(dst.clone(), var_map, label_map, asm_vec);
+            let mov = create_mov(&mut x, &dst, asm_vec);
             asm_vec.push(mov);
-            let mut y = transform_expr(rhs.clone(), var_map, asm_vec);
+            let mut y =
+                transform_expr(rhs.clone(), var_map, label_map, asm_vec);
             return create_xor(&mut y, &dst, asm_vec);
+        }
+
+        TAC::LessThan { lhs, rhs, dst } => {
+            let x = transform_expr(lhs.clone(), var_map, label_map, asm_vec);
+            let y = transform_expr(rhs.clone(), var_map, label_map, asm_vec);
+            let cmp = create_cmpl(&mut y.clone(), &x, asm_vec);
+            let dst = transform_expr(dst.clone(), var_map, label_map, asm_vec);
+            asm_vec.push(cmp);
+            let mut imm = asm_rc!(Imm(0));
+            let mov = create_mov(&mut imm, &dst, asm_vec);
+            asm_vec.push(mov);
+            return asm_rc!(SetCC {
+                cond: CondCode::L,
+                dst: dst.clone(),
+            });
+        }
+
+        TAC::LessOrEq { lhs, rhs, dst } => {
+            let x = transform_expr(lhs.clone(), var_map, label_map, asm_vec);
+            let y = transform_expr(rhs.clone(), var_map, label_map, asm_vec);
+            let cmp = create_cmpl(&mut y.clone(), &x, asm_vec);
+            let dst = transform_expr(dst.clone(), var_map, label_map, asm_vec);
+            asm_vec.push(cmp);
+            let mut imm = asm_rc!(Imm(0));
+            let mov = create_mov(&mut imm, &dst, asm_vec);
+            asm_vec.push(mov);
+            return asm_rc!(SetCC {
+                cond: CondCode::LE,
+                dst: dst.clone(),
+            });
+        }
+
+        TAC::GreaterThan { lhs, rhs, dst } => {
+            let x = transform_expr(lhs.clone(), var_map, label_map, asm_vec);
+            let y = transform_expr(rhs.clone(), var_map, label_map, asm_vec);
+            let cmp = create_cmpl(&mut y.clone(), &x, asm_vec);
+            let dst = transform_expr(dst.clone(), var_map, label_map, asm_vec);
+            asm_vec.push(cmp);
+            let mut imm = asm_rc!(Imm(0));
+            let mov = create_mov(&mut imm, &dst, asm_vec);
+            asm_vec.push(mov);
+            return asm_rc!(SetCC {
+                cond: CondCode::G,
+                dst: dst.clone(),
+            });
+        }
+
+        TAC::GreaterOrEq { lhs, rhs, dst } => {
+            let x = transform_expr(lhs.clone(), var_map, label_map, asm_vec);
+            let y = transform_expr(rhs.clone(), var_map, label_map, asm_vec);
+            let cmp = create_cmpl(&mut y.clone(), &x, asm_vec);
+            let dst = transform_expr(dst.clone(), var_map, label_map, asm_vec);
+            asm_vec.push(cmp);
+            let mut imm = asm_rc!(Imm(0));
+            let mov = create_mov(&mut imm, &dst, asm_vec);
+            asm_vec.push(mov);
+            return asm_rc!(SetCC {
+                cond: CondCode::GE,
+                dst: dst.clone(),
+            });
+        }
+
+        TAC::Equal { lhs, rhs, dst } => {
+            let x = transform_expr(lhs.clone(), var_map, label_map, asm_vec);
+            let y = transform_expr(rhs.clone(), var_map, label_map, asm_vec);
+            let cmp = create_cmpl(&mut y.clone(), &x, asm_vec);
+            asm_vec.push(cmp);
+            let dst = transform_expr(dst.clone(), var_map, label_map, asm_vec);
+            let mut imm = asm_rc!(Imm(0));
+            let mov = create_mov(&mut imm, &dst, asm_vec);
+            asm_vec.push(mov);
+            return asm_rc!(SetCC {
+                cond: CondCode::E,
+                dst: dst.clone(),
+            });
+        }
+
+        TAC::NotEq { lhs, rhs, dst } => {
+            let x = transform_expr(lhs.clone(), var_map, label_map, asm_vec);
+            let y = transform_expr(rhs.clone(), var_map, label_map, asm_vec);
+            let cmp = create_cmpl(&mut y.clone(), &x, asm_vec);
+            let dst = transform_expr(dst.clone(), var_map, label_map, asm_vec);
+            asm_vec.push(cmp);
+            let mut imm = asm_rc!(Imm(0));
+            let mov = create_mov(&mut imm, &dst, asm_vec);
+            asm_vec.push(mov);
+            return asm_rc!(SetCC {
+                cond: CondCode::NE,
+                dst: dst.clone(),
+            });
+        }
+
+        TAC::Copy { src, dst } => {
+            let mut src =
+                transform_expr(src.clone(), var_map, label_map, asm_vec);
+            let dst = transform_expr(dst.clone(), var_map, label_map, asm_vec);
+            return create_mov(&mut src, &dst, asm_vec);
+        }
+
+        TAC::Jump(label) => {
+            let label =
+                transform_expr(label.clone(), var_map, label_map, asm_vec);
+            return asm_rc!(Jmp(label));
+        }
+
+        TAC::JumpOnZero { expr, label } => {
+            let src = transform_expr(expr.clone(), var_map, label_map, asm_vec);
+            let imm = asm_rc!(Imm(0));
+            let cmp = create_cmpl(&mut imm.clone(), &src, asm_vec);
+            asm_vec.push(cmp);
+            let label =
+                transform_expr(label.clone(), var_map, label_map, asm_vec);
+            return asm_rc!(JmpCC {
+                cond: CondCode::E,
+                label: label,
+            });
+        }
+
+        TAC::JumpOnNotZero { expr, label } => {
+            let src = transform_expr(expr.clone(), var_map, label_map, asm_vec);
+            let imm = asm_rc!(Imm(0));
+            let cmp = create_cmpl(&mut imm.clone(), &src, asm_vec);
+            asm_vec.push(cmp);
+            let label =
+                transform_expr(label.clone(), var_map, label_map, asm_vec);
+            return asm_rc!(JmpCC {
+                cond: CondCode::NE,
+                label: label,
+            });
+        }
+
+        TAC::Label(idx) => {
+            return create_label(*idx, label_map);
         }
 
         _ => {
@@ -537,13 +731,18 @@ fn transform_expr(
     }
 }
 
-fn transform(node: Rc<TAC>, var_map: &mut VarMap, asm_vec: &mut AsmVec) {
+fn transform(
+    node: Rc<TAC>,
+    var_map: &mut VarMap,
+    label_map: &mut LabelMap,
+    asm_vec: &mut AsmVec,
+) {
     match &*node {
         TAC::Function { name, code } => {
             let mut func_asm_vec: AsmVec = vec![];
 
             for op in code {
-                transform(op.clone(), var_map, &mut func_asm_vec);
+                transform(op.clone(), var_map, label_map, &mut func_asm_vec);
             }
 
             asm_vec.push(asm_rc!(Function {
@@ -553,108 +752,101 @@ fn transform(node: Rc<TAC>, var_map: &mut VarMap, asm_vec: &mut AsmVec) {
             }));
         }
 
-        TAC::Not { src: _, dst: _ } => {
-            let not = transform_expr(node.clone(), var_map, asm_vec);
-            asm_vec.push(not);
-        }
-
-        TAC::Neg { src: _, dst: _ } => {
-            let neg = transform_expr(node.clone(), var_map, asm_vec);
-            asm_vec.push(neg);
-        }
-
-        TAC::Mul {
+        TAC::Inv { src: _, dst: _ }
+        | TAC::Neg { src: _, dst: _ }
+        | TAC::Not { src: _, dst: _ }
+        | TAC::Mul {
             lhs: _,
             rhs: _,
             dst: _,
-        } => {
-            let mul = transform_expr(node.clone(), var_map, asm_vec);
-            asm_vec.push(mul);
         }
-
-        TAC::IDiv {
+        | TAC::IDiv {
             lhs: _,
             rhs: _,
             dst: _,
-        } => {
-            let div = transform_expr(node.clone(), var_map, asm_vec);
-            asm_vec.push(div);
         }
-
-        TAC::Mod {
+        | TAC::Mod {
             lhs: _,
             rhs: _,
             dst: _,
-        } => {
-            let mod_ = transform_expr(node.clone(), var_map, asm_vec);
-            asm_vec.push(mod_);
         }
-
-        TAC::Add {
+        | TAC::Add {
             lhs: _,
             rhs: _,
             dst: _,
-        } => {
-            let add = transform_expr(node.clone(), var_map, asm_vec);
-            asm_vec.push(add);
         }
-
-        TAC::Sub {
+        | TAC::Sub {
             lhs: _,
             rhs: _,
             dst: _,
-        } => {
-            let sub = transform_expr(node.clone(), var_map, asm_vec);
-            asm_vec.push(sub);
         }
-
-        TAC::LShift {
+        | TAC::LShift {
             lhs: _,
             rhs: _,
             dst: _,
-        } => {
-            let lsh = transform_expr(node.clone(), var_map, asm_vec);
-            asm_vec.push(lsh);
         }
-
-        TAC::RShift {
+        | TAC::RShift {
             lhs: _,
             rhs: _,
             dst: _,
-        } => {
-            let rsh = transform_expr(node.clone(), var_map, asm_vec);
-            asm_vec.push(rsh);
         }
-
-        TAC::And {
+        | TAC::And {
             lhs: _,
             rhs: _,
             dst: _,
-        } => {
-            let and = transform_expr(node.clone(), var_map, asm_vec);
-            asm_vec.push(and);
         }
-
-        TAC::Or {
+        | TAC::Or {
             lhs: _,
             rhs: _,
             dst: _,
-        } => {
-            let or = transform_expr(node.clone(), var_map, asm_vec);
-            asm_vec.push(or);
         }
-
-        TAC::Xor {
+        | TAC::Xor {
             lhs: _,
             rhs: _,
             dst: _,
-        } => {
-            let xor = transform_expr(node.clone(), var_map, asm_vec);
-            asm_vec.push(xor);
+        }
+        | TAC::LessThan {
+            lhs: _,
+            rhs: _,
+            dst: _,
+        }
+        | TAC::LessOrEq {
+            lhs: _,
+            rhs: _,
+            dst: _,
+        }
+        | TAC::GreaterThan {
+            lhs: _,
+            rhs: _,
+            dst: _,
+        }
+        | TAC::GreaterOrEq {
+            lhs: _,
+            rhs: _,
+            dst: _,
+        }
+        | TAC::Equal {
+            lhs: _,
+            rhs: _,
+            dst: _,
+        }
+        | TAC::NotEq {
+            lhs: _,
+            rhs: _,
+            dst: _,
+        }
+        | TAC::Copy { src: _, dst: _ }
+        | TAC::Jump(_)
+        | TAC::JumpOnZero { expr: _, label: _ }
+        | TAC::JumpOnNotZero { expr: _, label: _ }
+        | TAC::Label(_) => {
+            let expr =
+                transform_expr(node.clone(), var_map, label_map, asm_vec);
+            asm_vec.push(expr);
         }
 
         TAC::Return(expr) => {
-            let src = transform_expr(expr.clone(), var_map, asm_vec);
+            let src = transform_expr(expr.clone(), var_map, label_map, asm_vec);
             let dst = asm_rc!(Eax);
 
             if src != dst {
@@ -665,7 +857,7 @@ fn transform(node: Rc<TAC>, var_map: &mut VarMap, asm_vec: &mut AsmVec) {
         }
 
         _ => {
-            unreachable!();
+            unreachable!()
         }
     }
 }
@@ -687,17 +879,15 @@ fn fixup(asm: AsmRef, var_map: &mut VarMap) {
             *stack = incr_stack_pos(0);
         }
 
-        Asm::IMull(src, dst) => {
-            fixup(src.clone(), var_map);
-            fixup(dst.clone(), var_map);
-        }
-
-        Asm::Addl(src, dst) => {
-            fixup(src.clone(), var_map);
-            fixup(dst.clone(), var_map);
-        }
-
-        Asm::Subl(src, dst) => {
+        Asm::IMull(src, dst)
+        | Asm::Addl(src, dst)
+        | Asm::Subl(src, dst)
+        | Asm::Shll(src, dst)
+        | Asm::Sarl(src, dst)
+        | Asm::Andl(src, dst)
+        | Asm::Orl(src, dst)
+        | Asm::Xorl(src, dst)
+        | Asm::Cmpl(src, dst) => {
             fixup(src.clone(), var_map);
             fixup(dst.clone(), var_map);
         }
@@ -706,39 +896,28 @@ fn fixup(asm: AsmRef, var_map: &mut VarMap) {
             fixup(src.clone(), var_map);
         }
 
-        Asm::Movl(src, dst) => {
+        Asm::Movb(src, dst)
+        | Asm::Movw(src, dst)
+        | Asm::Movl(src, dst)
+        | Asm::Movq(src, dst) => {
             fixup(src.clone(), var_map);
             fixup(dst.clone(), var_map);
         }
 
-        Asm::Notl(dst) => {
+        Asm::Notl(dst) | Asm::Negl(dst) => {
             fixup(dst.clone(), var_map);
         }
 
-        Asm::Negl(dst) => {
+        Asm::SetCC { dst, .. } => {
             fixup(dst.clone(), var_map);
         }
 
-        Asm::Shll(src, dst) => {
-            fixup(src.clone(), var_map);
-            fixup(dst.clone(), var_map);
+        Asm::Jmp(label) => {
+            fixup(label.clone(), var_map);
         }
 
-        Asm::Sarl(src, dst) => {
-            fixup(src.clone(), var_map);
-            fixup(dst.clone(), var_map);
-        }
-        Asm::Andl(src, dst) => {
-            fixup(src.clone(), var_map);
-            fixup(dst.clone(), var_map);
-        }
-        Asm::Orl(src, dst) => {
-            fixup(src.clone(), var_map);
-            fixup(dst.clone(), var_map);
-        }
-        Asm::Xorl(src, dst) => {
-            fixup(src.clone(), var_map);
-            fixup(dst.clone(), var_map);
+        Asm::JmpCC { label, .. } => {
+            fixup(label.clone(), var_map);
         }
 
         Asm::Var(_idx, size) => {
@@ -752,9 +931,10 @@ fn fixup(asm: AsmRef, var_map: &mut VarMap) {
 pub fn generate(tac_asm: Vec<Rc<TAC>>) -> AsmVec {
     let mut asm_vec: AsmVec = vec![];
     let mut var_map = VarMap::new();
+    let mut label_map = LabelMap::new();
 
     for tac in tac_asm {
-        transform(tac.clone(), &mut var_map, &mut asm_vec);
+        transform(tac.clone(), &mut var_map, &mut label_map, &mut asm_vec);
     }
 
     for asm in &asm_vec {

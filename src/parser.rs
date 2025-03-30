@@ -142,10 +142,13 @@ pub enum AST {
     Return {
         expr: ASTRef,
     },
-    Not {
+    Complement {
         expr: ASTRef,
     },
     Negate {
+        expr: ASTRef,
+    },
+    Not {
         expr: ASTRef,
     },
     Add {
@@ -185,6 +188,38 @@ pub enum AST {
         right: ASTRef,
     },
     Xor {
+        left: ASTRef,
+        right: ASTRef,
+    },
+    LogicAnd {
+        left: ASTRef,
+        right: ASTRef,
+    },
+    LogicOr {
+        left: ASTRef,
+        right: ASTRef,
+    },
+    Equal {
+        left: ASTRef,
+        right: ASTRef,
+    },
+    NotEq {
+        left: ASTRef,
+        right: ASTRef,
+    },
+    LessThan {
+        left: ASTRef,
+        right: ASTRef,
+    },
+    LessOrEq {
+        left: ASTRef,
+        right: ASTRef,
+    },
+    GreaterThan {
+        left: ASTRef,
+        right: ASTRef,
+    },
+    GreaterOrEq {
         left: ASTRef,
         right: ASTRef,
     },
@@ -255,13 +290,13 @@ impl Parser {
         let mut prog: ASTVec = vec![];
 
         while !self.eof() {
-            prog.push(self.function_def()?);
+            prog.push(self.function()?);
         }
 
         return Ok(prog);
     }
 
-    fn function_def(&mut self) -> Result<ASTRef, String> {
+    fn function(&mut self) -> Result<ASTRef, String> {
         let rtype = self.type_decl()?;
         expect!(self, TokenKind::Identifier, _);
         let name = yank!(self, TokenKind::Identifier);
@@ -322,6 +357,7 @@ impl Parser {
             | TokenKind::Or
             | TokenKind::Xor
             | TokenKind::LAnd
+            | TokenKind::LOr
             | TokenKind::Eq
             | TokenKind::NotEq
             | TokenKind::LThan
@@ -393,6 +429,54 @@ impl Parser {
                 left: left,
                 right: right
             }));
+        } else if accept!(self, TokenKind::LAnd) {
+            let right = self.expr(prec + 1)?;
+            return Ok(ast_rc!(LogicAnd {
+                left: left,
+                right: right
+            }));
+        } else if accept!(self, TokenKind::LOr) {
+            let right = self.expr(prec + 1)?;
+            return Ok(ast_rc!(LogicOr {
+                left: left,
+                right: right
+            }));
+        } else if accept!(self, TokenKind::Eq) {
+            let right = self.expr(prec + 1)?;
+            return Ok(ast_rc!(Equal {
+                left: left,
+                right: right
+            }));
+        } else if accept!(self, TokenKind::NotEq) {
+            let right = self.expr(prec + 1)?;
+            return Ok(ast_rc!(NotEq {
+                left: left,
+                right: right
+            }));
+        } else if accept!(self, TokenKind::LThan) {
+            let right = self.expr(prec + 1)?;
+            return Ok(ast_rc!(LessThan {
+                left: left,
+                right: right
+            }));
+        } else if accept!(self, TokenKind::LThanEq) {
+            let right = self.expr(prec + 1)?;
+            return Ok(ast_rc!(LessOrEq {
+                left: left,
+                right: right
+            }));
+        } else if accept!(self, TokenKind::GThan) {
+            let right = self.expr(prec + 1)?;
+            return Ok(ast_rc!(GreaterThan {
+                left: left,
+                right: right
+            }));
+        } else if accept!(self, TokenKind::GThanEq) {
+            let right = self.expr(prec + 1)?;
+            return Ok(ast_rc!(GreaterOrEq {
+                left: left,
+                right: right
+            }));
         } else {
             return self.oops("malformed binary expression");
         }
@@ -402,11 +486,15 @@ impl Parser {
         if peek!(self, TokenKind::ConstInt, _) {
             return self.const_int();
         } else if accept!(self, TokenKind::Tilde) {
-            return Ok(ast_rc!(Not {
+            return Ok(ast_rc!(Complement {
                 expr: self.factor()?
             }));
         } else if accept!(self, TokenKind::Minus) {
             return Ok(ast_rc!(Negate {
+                expr: self.factor()?
+            }));
+        } else if accept!(self, TokenKind::Not) {
+            return Ok(ast_rc!(Not {
                 expr: self.factor()?
             }));
         } else if accept!(self, TokenKind::LParen) {
