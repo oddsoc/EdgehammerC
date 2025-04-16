@@ -24,7 +24,6 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::ir::TAC;
 
@@ -164,17 +163,6 @@ type AsmRef = Rc<RefCell<Asm>>;
 type AsmVec = Vec<AsmRef>;
 type VarMap = HashMap<usize, AsmRef>;
 type LabelMap = HashMap<usize, AsmRef>;
-
-static STACK_POS: AtomicUsize = AtomicUsize::new(0);
-
-fn incr_stack_pos(by: usize) -> usize {
-    STACK_POS.fetch_add(by, Ordering::SeqCst);
-    STACK_POS.load(Ordering::SeqCst)
-}
-
-fn reset_stack_pos() {
-    STACK_POS.store(0, Ordering::SeqCst)
-}
 
 fn create_var(idx: usize, var_map: &mut VarMap) -> AsmRef {
     var_map
@@ -738,16 +726,22 @@ fn transform(
     asm_vec: &mut AsmVec,
 ) {
     match &*node {
-        TAC::Function { name, code } => {
+        TAC::Function { name, code, depth } => {
             let mut func_asm_vec: AsmVec = vec![];
+            let mut func_var_map = VarMap::new();
 
             for op in code {
-                transform(op.clone(), var_map, label_map, &mut func_asm_vec);
+                transform(
+                    op.clone(),
+                    &mut func_var_map,
+                    label_map,
+                    &mut func_asm_vec,
+                );
             }
 
             asm_vec.push(asm_rc!(Function {
                 name: name.clone(),
-                stack: 0, // we do not know this until fixup pass
+                stack: *depth,
                 asm: func_asm_vec,
             }));
         }
@@ -867,16 +861,12 @@ fn fixup(asm: AsmRef, var_map: &mut VarMap) {
     match op {
         Asm::Function {
             name: _,
-            stack,
+            stack: _,
             asm,
         } => {
-            reset_stack_pos();
-
             for op in asm {
                 fixup(op.clone(), var_map);
             }
-
-            *stack = incr_stack_pos(0);
         }
 
         Asm::IMull(src, dst)
@@ -920,8 +910,8 @@ fn fixup(asm: AsmRef, var_map: &mut VarMap) {
             fixup(label.clone(), var_map);
         }
 
-        Asm::Var(_idx, size) => {
-            *op = Asm::Stack(incr_stack_pos(*size), *size).try_into().unwrap();
+        Asm::Var(idx, size) => {
+            *op = Asm::Stack(*idx, *size).try_into().unwrap();
         }
 
         _ => {}

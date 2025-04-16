@@ -24,9 +24,11 @@
 use std::env;
 
 mod driver;
+mod expr;
 mod ir;
 mod lexer;
 mod parser;
+mod scope;
 mod x64;
 
 fn main() -> Result<(), ()> {

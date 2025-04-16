@@ -35,6 +35,7 @@ use crate::x64::out;
 pub enum Argument {
     Lex,
     Parse,
+    Validate,
     Codegen,
     OutputAsm,
     OutputTo(PathBuf),
@@ -115,6 +116,9 @@ pub fn process_args(args: &[String]) -> (Vec<Translation>, Vec<Argument>) {
             "--parse" => {
                 arguments.push(Argument::Parse);
             }
+            "--validate" => {
+                arguments.push(Argument::Validate);
+            }
             "--codegen" => {
                 arguments.push(Argument::Codegen);
                 codegen_arg = true;
@@ -185,12 +189,15 @@ fn lex(translations: &[Translation], arguments: &[Argument]) {
     }
 }
 
-fn parse_translation(translation: &Translation, _arguments: &[Argument]) {
+fn parse_translation(translation: &Translation, arguments: &[Argument]) {
     let c_file = translation.c_file.to_str().unwrap();
     let i_file = translation.i_file.to_str().unwrap();
     preprocess_gcc(c_file, i_file);
 
-    let mut parser = parser::Parser::new(i_file);
+    let mut parser = parser::Parser::new(
+        i_file,
+        arguments.iter().any(|i| matches!(i, Argument::Validate)),
+    );
     let ast = parser.parse().unwrap();
     println!("{:#?}", ast);
 }
@@ -206,7 +213,7 @@ fn codegen_translation(translation: &Translation, arguments: &[Argument]) {
     let i_file = translation.i_file.to_str().unwrap();
     preprocess_gcc(c_file, i_file);
 
-    let mut parser = parser::Parser::new(i_file);
+    let mut parser = parser::Parser::new(i_file, true);
     let ast = parser.parse().unwrap();
     let ir = ir::generate(ast);
 
@@ -277,6 +284,8 @@ fn assemble_gcc(s_files: &Vec<String>, o_file: &str) {
 pub fn run(translations: &[Translation], arguments: &[Argument]) {
     if arguments.iter().any(|i| matches!(i, Argument::Codegen)) {
         codegen(translations, arguments);
+    } else if arguments.iter().any(|i| matches!(i, Argument::Validate)) {
+        parse(translations, arguments);
     } else if arguments.iter().any(|i| matches!(i, Argument::Parse)) {
         parse(translations, arguments);
     } else if arguments.iter().any(|i| matches!(i, Argument::Lex)) {

@@ -23,10 +23,13 @@
 
 use std::fs::File;
 use std::io::Read;
+use std::str;
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct Token {
     pub kind: TokenKind,
+    pos: usize,
+    len: usize,
     pub line: usize,
     pub column: usize,
 }
@@ -50,7 +53,9 @@ pub enum TokenKind {
     Mod,
     ModEq,
     LShift,
+    LShiftEq,
     RShift,
+    RShiftEq,
     LThan,
     LThanEq,
     GThan,
@@ -100,6 +105,28 @@ impl Lexer {
         }
     }
 
+    fn new_tok(
+        &self,
+        kind: TokenKind,
+        pos: usize,
+        column: usize,
+    ) -> Option<Token> {
+        let len = self.position - pos;
+        return Some(Token {
+            kind: kind,
+            pos: pos,
+            len: len,
+            line: self.line,
+            column: column,
+        });
+    }
+
+    #[allow(dead_code)]
+    pub fn as_str<'a>(&'a self, token: &Token) -> &'a str {
+        let utf8 = str::from_utf8(&self.buffer).expect("not utf8!");
+        return &utf8[token.pos..token.len];
+    }
+
     fn peek(&self) -> Option<u8> {
         if self.position < self.buffer.len() {
             Some(self.buffer[self.position])
@@ -107,26 +134,6 @@ impl Lexer {
             None
         }
     }
-    /*
-        fn peek_a(&self, b: u8) -> bool {
-            let c = self.peek();
-
-            if c.is_some() && c == Some(b) {
-                return true;
-            }
-
-            false
-        }
-
-        fn consume_if(&mut self, b: u8) -> bool {
-            if self.peek_a(b) {
-                self.consume();
-                return true;
-            }
-
-            false
-        }
-    */
 
     fn consume(&mut self) -> Option<u8> {
         let byte = self.peek()?;
@@ -182,6 +189,7 @@ impl Lexer {
     }
 
     fn const_integer(&mut self) -> Option<Token> {
+        let pos = self.position;
         let start = self.column;
         let mut lexeme = String::new();
         let mut byte = self.peek().unwrap();
@@ -195,25 +203,22 @@ impl Lexer {
                 if byte.is_ascii_digit() {
                     lexeme.push(self.consume().unwrap() as char);
                 } else if byte.is_ascii_alphabetic() || byte == b'_' {
-                    return Some(Token {
-                        kind: TokenKind::Bad,
-                        line: self.line,
-                        column: start,
-                    });
+                    return self.new_tok(TokenKind::Bad, pos, start);
                 } else {
                     break;
                 }
             }
         }
 
-        Some(Token {
-            kind: TokenKind::ConstInt(lexeme.parse::<i64>().unwrap()),
-            line: self.line,
-            column: start,
-        })
+        self.new_tok(
+            TokenKind::ConstInt(lexeme.parse::<i64>().unwrap()),
+            pos,
+            start,
+        )
     }
 
     fn identifier_or_keyword(&mut self) -> Option<Token> {
+        let pos = self.position;
         let start = self.column;
         let mut lexeme = String::new();
         lexeme.push(self.consume().unwrap() as char);
@@ -230,38 +235,23 @@ impl Lexer {
 
         match lexeme.as_str() {
             "return" => {
-                return Some(Token {
-                    kind: TokenKind::Return,
-                    line: self.line,
-                    column: start,
-                })
+                return self.new_tok(TokenKind::Return, pos, start);
             }
             "void" => {
-                return Some(Token {
-                    kind: TokenKind::Void,
-                    line: self.line,
-                    column: start,
-                })
+                return self.new_tok(TokenKind::Void, pos, start);
             }
             "int" => {
-                return Some(Token {
-                    kind: TokenKind::Int,
-                    line: self.line,
-                    column: start,
-                })
+                return self.new_tok(TokenKind::Int, pos, start);
             }
             _ => {}
         }
 
-        Some(Token {
-            kind: TokenKind::Identifier(lexeme),
-            line: self.line,
-            column: start,
-        })
+        self.new_tok(TokenKind::Identifier(lexeme), pos, start)
     }
 
     pub fn lex(&mut self) -> Option<Token> {
         while self.position < self.buffer.len() {
+            let start = self.position;
             let byte = if self.peek().is_some() {
                 self.peek().unwrap()
             } else {
@@ -281,78 +271,78 @@ impl Lexer {
                         }
                         Some(b'=') => {
                             self.consume();
-                            return Some(Token {
-                                kind: TokenKind::DivEq,
-                                line: self.line,
-                                column: self.column - 1,
-                            });
+                            return self.new_tok(
+                                TokenKind::DivEq,
+                                start,
+                                self.column - 1,
+                            );
                         }
                         _ => {
-                            return Some(Token {
-                                kind: TokenKind::Div,
-                                line: self.line,
-                                column: self.column - 1,
-                            });
+                            return self.new_tok(
+                                TokenKind::Div,
+                                start,
+                                self.column - 1,
+                            );
                         }
                     }
                 }
                 b'(' => {
                     self.consume();
-                    return Some(Token {
-                        kind: TokenKind::LParen,
-                        line: self.line,
-                        column: self.column - 1,
-                    });
+                    return self.new_tok(
+                        TokenKind::LParen,
+                        start,
+                        self.column - 1,
+                    );
                 }
                 b')' => {
                     self.consume();
-                    return Some(Token {
-                        kind: TokenKind::RParen,
-                        line: self.line,
-                        column: self.column - 1,
-                    });
+                    return self.new_tok(
+                        TokenKind::RParen,
+                        start,
+                        self.column - 1,
+                    );
                 }
                 b'{' => {
                     self.consume();
-                    return Some(Token {
-                        kind: TokenKind::LCurly,
-                        line: self.line,
-                        column: self.column - 1,
-                    });
+                    return self.new_tok(
+                        TokenKind::LCurly,
+                        start,
+                        self.column - 1,
+                    );
                 }
                 b'}' => {
                     self.consume();
-                    return Some(Token {
-                        kind: TokenKind::RCurly,
-                        line: self.line,
-                        column: self.column - 1,
-                    });
+                    return self.new_tok(
+                        TokenKind::RCurly,
+                        start,
+                        self.column - 1,
+                    );
                 }
                 b';' => {
                     self.consume();
-                    return Some(Token {
-                        kind: TokenKind::Semicolon,
-                        line: self.line,
-                        column: self.column - 1,
-                    });
+                    return self.new_tok(
+                        TokenKind::Semicolon,
+                        start,
+                        self.column - 1,
+                    );
                 }
                 b'~' => {
                     self.consume();
                     match self.peek() {
                         Some(b'=') => {
                             self.consume();
-                            return Some(Token {
-                                kind: TokenKind::InvEq,
-                                line: self.line,
-                                column: self.column - 1,
-                            });
+                            return self.new_tok(
+                                TokenKind::InvEq,
+                                start,
+                                self.column - 1,
+                            );
                         }
                         _ => {
-                            return Some(Token {
-                                kind: TokenKind::Tilde,
-                                line: self.line,
-                                column: self.column - 1,
-                            });
+                            return self.new_tok(
+                                TokenKind::Tilde,
+                                start,
+                                self.column - 1,
+                            );
                         }
                     }
                 }
@@ -361,26 +351,26 @@ impl Lexer {
                     match self.peek() {
                         Some(b'-') => {
                             self.consume();
-                            return Some(Token {
-                                kind: TokenKind::Decr,
-                                line: self.line,
-                                column: self.column - 1,
-                            });
+                            return self.new_tok(
+                                TokenKind::Decr,
+                                start,
+                                self.column - 1,
+                            );
                         }
                         Some(b'=') => {
                             self.consume();
-                            return Some(Token {
-                                kind: TokenKind::MinusEq,
-                                line: self.line,
-                                column: self.column - 1,
-                            });
+                            return self.new_tok(
+                                TokenKind::MinusEq,
+                                start,
+                                self.column - 1,
+                            );
                         }
                         _ => {
-                            return Some(Token {
-                                kind: TokenKind::Minus,
-                                line: self.line,
-                                column: self.column - 1,
-                            });
+                            return self.new_tok(
+                                TokenKind::Minus,
+                                start,
+                                self.column - 1,
+                            );
                         }
                     }
                 }
@@ -389,26 +379,26 @@ impl Lexer {
                     match self.peek() {
                         Some(b'+') => {
                             self.consume();
-                            return Some(Token {
-                                kind: TokenKind::Incr,
-                                line: self.line,
-                                column: self.column - 1,
-                            });
+                            return self.new_tok(
+                                TokenKind::Incr,
+                                start,
+                                self.column - 1,
+                            );
                         }
                         Some(b'=') => {
                             self.consume();
-                            return Some(Token {
-                                kind: TokenKind::PlusEq,
-                                line: self.line,
-                                column: self.column - 1,
-                            });
+                            return self.new_tok(
+                                TokenKind::PlusEq,
+                                start,
+                                self.column - 1,
+                            );
                         }
                         _ => {
-                            return Some(Token {
-                                kind: TokenKind::Plus,
-                                line: self.line,
-                                column: self.column - 1,
-                            });
+                            return self.new_tok(
+                                TokenKind::Plus,
+                                start,
+                                self.column - 1,
+                            );
                         }
                     }
                 }
@@ -417,18 +407,18 @@ impl Lexer {
                     match self.peek() {
                         Some(b'=') => {
                             self.consume();
-                            return Some(Token {
-                                kind: TokenKind::MultEq,
-                                line: self.line,
-                                column: self.column - 1,
-                            });
+                            return self.new_tok(
+                                TokenKind::MultEq,
+                                start,
+                                self.column - 1,
+                            );
                         }
                         _ => {
-                            return Some(Token {
-                                kind: TokenKind::Mult,
-                                line: self.line,
-                                column: self.column - 1,
-                            });
+                            return self.new_tok(
+                                TokenKind::Mult,
+                                start,
+                                self.column - 1,
+                            );
                         }
                     }
                 }
@@ -437,18 +427,18 @@ impl Lexer {
                     match self.peek() {
                         Some(b'=') => {
                             self.consume();
-                            return Some(Token {
-                                kind: TokenKind::ModEq,
-                                line: self.line,
-                                column: self.column - 1,
-                            });
+                            return self.new_tok(
+                                TokenKind::ModEq,
+                                start,
+                                self.column - 1,
+                            );
                         }
                         _ => {
-                            return Some(Token {
-                                kind: TokenKind::Mod,
-                                line: self.line,
-                                column: self.column - 1,
-                            });
+                            return self.new_tok(
+                                TokenKind::Mod,
+                                start,
+                                self.column - 1,
+                            );
                         }
                     }
                 }
@@ -457,26 +447,38 @@ impl Lexer {
                     match self.peek() {
                         Some(b'<') => {
                             self.consume();
-                            return Some(Token {
-                                kind: TokenKind::LShift,
-                                line: self.line,
-                                column: self.column - 1,
-                            });
+                            match self.peek() {
+                                Some(b'=') => {
+                                    self.consume();
+                                    return self.new_tok(
+                                        TokenKind::LShiftEq,
+                                        start,
+                                        self.column - 1,
+                                    );
+                                }
+                                _ => {
+                                    return self.new_tok(
+                                        TokenKind::LShift,
+                                        start,
+                                        self.column - 1,
+                                    );
+                                }
+                            }
                         }
                         Some(b'=') => {
                             self.consume();
-                            return Some(Token {
-                                kind: TokenKind::LThanEq,
-                                line: self.line,
-                                column: self.column - 1,
-                            });
+                            return self.new_tok(
+                                TokenKind::LThanEq,
+                                start,
+                                self.column - 1,
+                            );
                         }
                         _ => {
-                            return Some(Token {
-                                kind: TokenKind::LThan,
-                                line: self.line,
-                                column: self.column - 1,
-                            });
+                            return self.new_tok(
+                                TokenKind::LThan,
+                                start,
+                                self.column - 1,
+                            );
                         }
                     }
                 }
@@ -485,26 +487,38 @@ impl Lexer {
                     match self.peek() {
                         Some(b'>') => {
                             self.consume();
-                            return Some(Token {
-                                kind: TokenKind::RShift,
-                                line: self.line,
-                                column: self.column - 1,
-                            });
+                            match self.peek() {
+                                Some(b'=') => {
+                                    self.consume();
+                                    return self.new_tok(
+                                        TokenKind::RShiftEq,
+                                        start,
+                                        self.column - 1,
+                                    );
+                                }
+                                _ => {
+                                    return self.new_tok(
+                                        TokenKind::RShift,
+                                        start,
+                                        self.column - 1,
+                                    );
+                                }
+                            }
                         }
                         Some(b'=') => {
                             self.consume();
-                            return Some(Token {
-                                kind: TokenKind::GThanEq,
-                                line: self.line,
-                                column: self.column - 1,
-                            });
+                            return self.new_tok(
+                                TokenKind::GThanEq,
+                                start,
+                                self.column - 1,
+                            );
                         }
                         _ => {
-                            return Some(Token {
-                                kind: TokenKind::GThan,
-                                line: self.line,
-                                column: self.column - 1,
-                            });
+                            return self.new_tok(
+                                TokenKind::GThan,
+                                start,
+                                self.column - 1,
+                            );
                         }
                     }
                 }
@@ -513,18 +527,18 @@ impl Lexer {
                     match self.peek() {
                         Some(b'=') => {
                             self.consume();
-                            return Some(Token {
-                                kind: TokenKind::Eq,
-                                line: self.line,
-                                column: self.column - 1,
-                            });
+                            return self.new_tok(
+                                TokenKind::Eq,
+                                start,
+                                self.column - 1,
+                            );
                         }
                         _ => {
-                            return Some(Token {
-                                kind: TokenKind::Assign,
-                                line: self.line,
-                                column: self.column - 1,
-                            });
+                            return self.new_tok(
+                                TokenKind::Assign,
+                                start,
+                                self.column - 1,
+                            );
                         }
                     }
                 }
@@ -533,18 +547,18 @@ impl Lexer {
                     match self.peek() {
                         Some(b'=') => {
                             self.consume();
-                            return Some(Token {
-                                kind: TokenKind::NotEq,
-                                line: self.line,
-                                column: self.column - 1,
-                            });
+                            return self.new_tok(
+                                TokenKind::NotEq,
+                                start,
+                                self.column - 1,
+                            );
                         }
                         _ => {
-                            return Some(Token {
-                                kind: TokenKind::Not,
-                                line: self.line,
-                                column: self.column - 1,
-                            });
+                            return self.new_tok(
+                                TokenKind::Not,
+                                start,
+                                self.column - 1,
+                            );
                         }
                     }
                 }
@@ -553,26 +567,26 @@ impl Lexer {
                     match self.peek() {
                         Some(b'=') => {
                             self.consume();
-                            return Some(Token {
-                                kind: TokenKind::AndEq,
-                                line: self.line,
-                                column: self.column - 1,
-                            });
+                            return self.new_tok(
+                                TokenKind::AndEq,
+                                start,
+                                self.column - 1,
+                            );
                         }
                         Some(b'&') => {
                             self.consume();
-                            return Some(Token {
-                                kind: TokenKind::LAnd,
-                                line: self.line,
-                                column: self.column - 1,
-                            });
+                            return self.new_tok(
+                                TokenKind::LAnd,
+                                start,
+                                self.column - 1,
+                            );
                         }
                         _ => {
-                            return Some(Token {
-                                kind: TokenKind::And,
-                                line: self.line,
-                                column: self.column - 1,
-                            });
+                            return self.new_tok(
+                                TokenKind::And,
+                                start,
+                                self.column - 1,
+                            );
                         }
                     }
                 }
@@ -581,18 +595,18 @@ impl Lexer {
                     match self.peek() {
                         Some(b'=') => {
                             self.consume();
-                            return Some(Token {
-                                kind: TokenKind::XorEq,
-                                line: self.line,
-                                column: self.column - 1,
-                            });
+                            return self.new_tok(
+                                TokenKind::XorEq,
+                                start,
+                                self.column - 1,
+                            );
                         }
                         _ => {
-                            return Some(Token {
-                                kind: TokenKind::Xor,
-                                line: self.line,
-                                column: self.column - 1,
-                            });
+                            return self.new_tok(
+                                TokenKind::Xor,
+                                start,
+                                self.column - 1,
+                            );
                         }
                     }
                 }
@@ -601,26 +615,26 @@ impl Lexer {
                     match self.peek() {
                         Some(b'=') => {
                             self.consume();
-                            return Some(Token {
-                                kind: TokenKind::OrEq,
-                                line: self.line,
-                                column: self.column - 1,
-                            });
+                            return self.new_tok(
+                                TokenKind::OrEq,
+                                start,
+                                self.column - 1,
+                            );
                         }
                         Some(b'|') => {
                             self.consume();
-                            return Some(Token {
-                                kind: TokenKind::LOr,
-                                line: self.line,
-                                column: self.column - 1,
-                            });
+                            return self.new_tok(
+                                TokenKind::LOr,
+                                start,
+                                self.column - 1,
+                            );
                         }
                         _ => {
-                            return Some(Token {
-                                kind: TokenKind::Or,
-                                line: self.line,
-                                column: self.column - 1,
-                            });
+                            return self.new_tok(
+                                TokenKind::Or,
+                                start,
+                                self.column - 1,
+                            );
                         }
                     }
                 }
@@ -630,20 +644,10 @@ impl Lexer {
                 b'A'..=b'Z' | b'a'..=b'z' | b'_' => {
                     return self.identifier_or_keyword();
                 }
-                _ => {
-                    return Some(Token {
-                        kind: TokenKind::Bad,
-                        line: self.line,
-                        column: self.column,
-                    })
-                }
+                _ => return self.new_tok(TokenKind::Bad, start, self.column),
             }
         }
 
-        Some(Token {
-            kind: TokenKind::EOF,
-            line: self.line,
-            column: self.column,
-        })
+        self.new_tok(TokenKind::EOF, self.position, self.column)
     }
 }

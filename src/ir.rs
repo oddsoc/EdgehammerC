@@ -24,11 +24,10 @@
 use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::parser::ASTRef;
-use crate::parser::ASTVec;
-use crate::parser::AST;
+use crate::parser::{ASTKind, ASTRef, ASTVec};
+use crate::scope::Scope;
 
-macro_rules! tac_rc {
+macro_rules! new_node {
     ($variant:ident) => {
         Rc::new(TAC::$variant)
     };
@@ -49,6 +48,7 @@ pub enum TAC {
     Function {
         name: String,
         code: TACVec,
+        depth: usize,
     },
     ConstInt(i64),
     Var(usize, usize),
@@ -165,363 +165,494 @@ type TACRef = Rc<TAC>;
 type TACVec = Vec<Rc<TAC>>;
 
 static LABEL_INDEX: AtomicUsize = AtomicUsize::new(0);
-static VAR_INDEX: AtomicUsize = AtomicUsize::new(0);
 
 fn incr_label_index() -> usize {
     LABEL_INDEX.fetch_add(1, Ordering::SeqCst)
 }
 
-fn incr_var_index() -> usize {
-    VAR_INDEX.fetch_add(1, Ordering::SeqCst)
+fn create_tmp_var(scope: &mut Scope) -> TACRef {
+    let off = scope.add_tmp(4, 4);
+    new_node!(Var(off, 4))
 }
 
-fn reset_var_index() {
-    VAR_INDEX.store(0, Ordering::SeqCst)
+fn get_var(name: &str, scope: &mut Scope) -> TACRef {
+    let off = scope.find_off(name).unwrap();
+    new_node!(Var(off, 4))
 }
 
 fn transform_expr(expr: ASTRef, tac_code: &mut TACVec) -> TACRef {
-    match &*expr.borrow() {
-        AST::ConstInt(val) => {
-            return tac_rc!(ConstInt(*val));
+    let binding = expr.borrow();
+
+    match &binding.kind {
+        ASTKind::ConstInt(val) => new_node!(ConstInt(*val)),
+
+        ASTKind::Complement { expr: inner } => {
+            let src = transform_expr(inner.clone(), tac_code);
+            let scope: &mut Scope = &mut binding.scope.borrow_mut();
+            let dst = create_tmp_var(scope);
+            tac_code.push(new_node!(Inv {
+                src: src,
+                dst: dst.clone()
+            }));
+            dst
         }
 
-        AST::Complement { expr } => {
-            let src = transform_expr(expr.clone(), tac_code);
-            let var_idx = incr_var_index();
-            let dst = tac_rc!(Var(var_idx, 4));
-            tac_code.push(tac_rc!(Inv {
+        ASTKind::Negate { expr: inner } => {
+            let src = transform_expr(inner.clone(), tac_code);
+            let scope: &mut Scope = &mut binding.scope.borrow_mut();
+            let dst = create_tmp_var(scope);
+            tac_code.push(new_node!(Neg {
                 src: src,
+                dst: dst.clone()
+            }));
+            dst
+        }
+
+        ASTKind::Not { expr: inner } => {
+            let src = transform_expr(inner.clone(), tac_code);
+            let scope: &mut Scope = &mut binding.scope.borrow_mut();
+            let dst = create_tmp_var(scope);
+            tac_code.push(new_node!(Not {
+                src: src,
+                dst: dst.clone()
+            }));
+            dst
+        }
+
+        ASTKind::PreIncr { expr: inner } => {
+            let src = transform_expr(inner.clone(), tac_code);
+            let scope: &mut Scope = &mut binding.scope.borrow_mut();
+            let dst = create_tmp_var(scope);
+            let tmp = create_tmp_var(scope);
+            tac_code.push(new_node!(Copy {
+                src: new_node!(ConstInt(1)),
+                dst: tmp.clone()
+            }));
+            tac_code.push(new_node!(Add {
+                lhs: tmp.clone(),
+                rhs: src.clone(),
+                dst: dst.clone()
+            }));
+            tac_code.push(new_node!(Copy {
+                src: dst.clone(),
+                dst: src.clone()
+            }));
+
+            src
+        }
+
+        ASTKind::PreDecr { expr: inner } => {
+            let src = transform_expr(inner.clone(), tac_code);
+            let scope: &mut Scope = &mut binding.scope.borrow_mut();
+            let dst = create_tmp_var(scope);
+            let tmp = create_tmp_var(scope);
+            tac_code.push(new_node!(Copy {
+                src: new_node!(ConstInt(1)),
+                dst: tmp.clone()
+            }));
+            tac_code.push(new_node!(Sub {
+                lhs: src.clone(),
+                rhs: tmp.clone(),
+                dst: dst.clone()
+            }));
+            tac_code.push(new_node!(Copy {
+                src: dst.clone(),
+                dst: src.clone()
+            }));
+
+            src
+        }
+
+        ASTKind::PostIncr { expr: inner } => {
+            let src = transform_expr(inner.clone(), tac_code);
+            let scope: &mut Scope = &mut binding.scope.borrow_mut();
+            let dst = create_tmp_var(scope);
+            let tmp = create_tmp_var(scope);
+            tac_code.push(new_node!(Copy {
+                src: src.clone(),
+                dst: tmp.clone()
+            }));
+
+            tac_code.push(new_node!(Add {
+                lhs: new_node!(ConstInt(1)),
+                rhs: tmp.clone(),
+                dst: dst.clone()
+            }));
+            tac_code.push(new_node!(Copy {
+                src: dst.clone(),
+                dst: src.clone()
+            }));
+
+            tmp
+        }
+
+        ASTKind::PostDecr { expr: inner } => {
+            let src = transform_expr(inner.clone(), tac_code);
+            let scope: &mut Scope = &mut binding.scope.borrow_mut();
+            let dst = create_tmp_var(scope);
+            let tmp = create_tmp_var(scope);
+            let res = create_tmp_var(scope);
+            tac_code.push(new_node!(Copy {
+                src: src.clone(),
+                dst: res.clone()
+            }));
+            tac_code.push(new_node!(Copy {
+                src: new_node!(ConstInt(1)),
+                dst: tmp.clone()
+            }));
+            tac_code.push(new_node!(Sub {
+                lhs: src.clone(),
+                rhs: tmp.clone(),
                 dst: dst.clone(),
             }));
-            return dst;
-        }
-
-        AST::Negate { expr } => {
-            let src = transform_expr(expr.clone(), tac_code);
-            let var_idx = incr_var_index();
-            let dst = tac_rc!(Var(var_idx, 4));
-            tac_code.push(tac_rc!(Neg {
-                src: src,
-                dst: dst.clone(),
+            tac_code.push(new_node!(Copy {
+                src: dst.clone(),
+                dst: src.clone()
             }));
-            return dst;
+
+            res
         }
 
-        AST::Not { expr } => {
-            let src = transform_expr(expr.clone(), tac_code);
-            let var_idx = incr_var_index();
-            let dst = tac_rc!(Var(var_idx, 4));
-            tac_code.push(tac_rc!(Not {
-                src: src,
-                dst: dst.clone(),
-            }));
-            return dst;
-        }
-
-        AST::Multiply { left, right } => {
-            let x = transform_expr(left.clone(), tac_code);
-            let y = transform_expr(right.clone(), tac_code);
-            let var_idx = incr_var_index();
-            let dst = tac_rc!(Var(var_idx, 4));
-            tac_code.push(tac_rc!(Mul {
-                lhs: x,
-                rhs: y,
+        ASTKind::Multiply { left, right } => {
+            let lhs = transform_expr(left.clone(), tac_code);
+            let rhs = transform_expr(right.clone(), tac_code);
+            let scope: &mut Scope = &mut binding.scope.borrow_mut();
+            let dst = create_tmp_var(scope);
+            tac_code.push(new_node!(Mul {
+                lhs: lhs,
+                rhs: rhs,
                 dst: dst.clone()
             }));
-            return dst;
+            dst
         }
 
-        AST::Divide { left, right } => {
-            let x = transform_expr(left.clone(), tac_code);
-            let y = transform_expr(right.clone(), tac_code);
-            let var_idx = incr_var_index();
-            let dst = tac_rc!(Var(var_idx, 4));
-            tac_code.push(tac_rc!(IDiv {
-                lhs: x,
-                rhs: y,
+        ASTKind::Divide { left, right } => {
+            let lhs = transform_expr(left.clone(), tac_code);
+            let rhs = transform_expr(right.clone(), tac_code);
+            let scope: &mut Scope = &mut binding.scope.borrow_mut();
+            let dst = create_tmp_var(scope);
+            tac_code.push(new_node!(IDiv {
+                lhs: lhs,
+                rhs: rhs,
                 dst: dst.clone()
             }));
-            return dst;
+            dst
         }
 
-        AST::Modulo { left, right } => {
-            let x = transform_expr(left.clone(), tac_code);
-            let y = transform_expr(right.clone(), tac_code);
-            let var_idx = incr_var_index();
-            let dst = tac_rc!(Var(var_idx, 4));
-            tac_code.push(tac_rc!(Mod {
-                lhs: x,
-                rhs: y,
+        ASTKind::Modulo { left, right } => {
+            let lhs = transform_expr(left.clone(), tac_code);
+            let rhs = transform_expr(right.clone(), tac_code);
+            let scope: &mut Scope = &mut binding.scope.borrow_mut();
+            let dst = create_tmp_var(scope);
+            tac_code.push(new_node!(Mod {
+                lhs: lhs,
+                rhs: rhs,
                 dst: dst.clone()
             }));
-            return dst;
+            dst
         }
 
-        AST::Add { left, right } => {
-            let x = transform_expr(left.clone(), tac_code);
-            let y = transform_expr(right.clone(), tac_code);
-            let var_idx = incr_var_index();
-            let dst = tac_rc!(Var(var_idx, 4));
-            tac_code.push(tac_rc!(Add {
-                lhs: x,
-                rhs: y,
+        ASTKind::Add { left, right } => {
+            let lhs = transform_expr(left.clone(), tac_code);
+            let rhs = transform_expr(right.clone(), tac_code);
+            let scope: &mut Scope = &mut binding.scope.borrow_mut();
+            let dst = create_tmp_var(scope);
+            tac_code.push(new_node!(Add {
+                lhs: lhs,
+                rhs: rhs,
                 dst: dst.clone()
             }));
-            return dst;
+            dst
         }
 
-        AST::Subtract { left, right } => {
-            let x = transform_expr(left.clone(), tac_code);
-            let y = transform_expr(right.clone(), tac_code);
-            let var_idx = incr_var_index();
-            let dst = tac_rc!(Var(var_idx, 4));
-            tac_code.push(tac_rc!(Sub {
-                lhs: x,
-                rhs: y,
+        ASTKind::Subtract { left, right } => {
+            let lhs = transform_expr(left.clone(), tac_code);
+            let rhs = transform_expr(right.clone(), tac_code);
+            let scope: &mut Scope = &mut binding.scope.borrow_mut();
+            let dst = create_tmp_var(scope);
+            tac_code.push(new_node!(Sub {
+                lhs: lhs,
+                rhs: rhs,
                 dst: dst.clone()
             }));
-            return dst;
+            dst
         }
 
-        AST::LShift { left, right } => {
-            let x = transform_expr(left.clone(), tac_code);
-            let y = transform_expr(right.clone(), tac_code);
-            let var_idx = incr_var_index();
-            let dst = tac_rc!(Var(var_idx, 4));
-            tac_code.push(tac_rc!(LShift {
-                lhs: x,
-                rhs: y,
+        ASTKind::LShift { left, right } => {
+            let lhs = transform_expr(left.clone(), tac_code);
+            let rhs = transform_expr(right.clone(), tac_code);
+            let scope: &mut Scope = &mut binding.scope.borrow_mut();
+            let dst = create_tmp_var(scope);
+            tac_code.push(new_node!(LShift {
+                lhs: lhs,
+                rhs: rhs,
                 dst: dst.clone()
             }));
-            return dst;
+            dst
         }
 
-        AST::RShift { left, right } => {
-            let x = transform_expr(left.clone(), tac_code);
-            let y = transform_expr(right.clone(), tac_code);
-            let var_idx = incr_var_index();
-            let dst = tac_rc!(Var(var_idx, 4));
-            tac_code.push(tac_rc!(RShift {
-                lhs: x,
-                rhs: y,
+        ASTKind::RShift { left, right } => {
+            let lhs = transform_expr(left.clone(), tac_code);
+            let rhs = transform_expr(right.clone(), tac_code);
+            let scope: &mut Scope = &mut binding.scope.borrow_mut();
+            let dst = create_tmp_var(scope);
+            tac_code.push(new_node!(RShift {
+                lhs: lhs,
+                rhs: rhs,
                 dst: dst.clone()
             }));
-            return dst;
+            dst
         }
 
-        AST::And { left, right } => {
-            let x = transform_expr(left.clone(), tac_code);
-            let y = transform_expr(right.clone(), tac_code);
-            let var_idx = incr_var_index();
-            let dst = tac_rc!(Var(var_idx, 4));
-            tac_code.push(tac_rc!(And {
-                lhs: x,
-                rhs: y,
+        ASTKind::And { left, right } => {
+            let lhs = transform_expr(left.clone(), tac_code);
+            let rhs = transform_expr(right.clone(), tac_code);
+            let scope: &mut Scope = &mut binding.scope.borrow_mut();
+            let dst = create_tmp_var(scope);
+            tac_code.push(new_node!(And {
+                lhs: lhs,
+                rhs: rhs,
                 dst: dst.clone()
             }));
-            return dst;
+            dst
         }
 
-        AST::Or { left, right } => {
-            let x = transform_expr(left.clone(), tac_code);
-            let y = transform_expr(right.clone(), tac_code);
-            let var_idx = incr_var_index();
-            let dst = tac_rc!(Var(var_idx, 4));
-            tac_code.push(tac_rc!(Or {
-                lhs: x,
-                rhs: y,
+        ASTKind::Or { left, right } => {
+            let lhs = transform_expr(left.clone(), tac_code);
+            let rhs = transform_expr(right.clone(), tac_code);
+            let scope: &mut Scope = &mut binding.scope.borrow_mut();
+            let dst = create_tmp_var(scope);
+            tac_code.push(new_node!(Or {
+                lhs: lhs,
+                rhs: rhs,
                 dst: dst.clone()
             }));
-            return dst;
+            dst
         }
 
-        AST::Xor { left, right } => {
-            let x = transform_expr(left.clone(), tac_code);
-            let y = transform_expr(right.clone(), tac_code);
-            let var_idx = incr_var_index();
-            let dst = tac_rc!(Var(var_idx, 4));
-            tac_code.push(tac_rc!(Xor {
-                lhs: x,
-                rhs: y,
+        ASTKind::Xor { left, right } => {
+            let lhs = transform_expr(left.clone(), tac_code);
+            let rhs = transform_expr(right.clone(), tac_code);
+            let scope: &mut Scope = &mut binding.scope.borrow_mut();
+            let dst = create_tmp_var(scope);
+            tac_code.push(new_node!(Xor {
+                lhs: lhs,
+                rhs: rhs,
                 dst: dst.clone()
             }));
-            return dst;
+            dst
         }
 
-        AST::LogicAnd { left, right } => {
-            let false_label = tac_rc!(Label(incr_label_index()));
-            let end_label = tac_rc!(Label(incr_label_index()));
+        ASTKind::Equal { left, right } => {
+            let lhs = transform_expr(left.clone(), tac_code);
+            let rhs = transform_expr(right.clone(), tac_code);
+            let scope: &mut Scope = &mut binding.scope.borrow_mut();
+            let dst = create_tmp_var(scope);
+            tac_code.push(new_node!(Equal {
+                lhs: lhs,
+                rhs: rhs,
+                dst: dst.clone()
+            }));
+            dst
+        }
+
+        ASTKind::NotEq { left, right } => {
+            let lhs = transform_expr(left.clone(), tac_code);
+            let rhs = transform_expr(right.clone(), tac_code);
+            let scope: &mut Scope = &mut binding.scope.borrow_mut();
+            let dst = create_tmp_var(scope);
+            tac_code.push(new_node!(NotEq {
+                lhs: lhs,
+                rhs: rhs,
+                dst: dst.clone()
+            }));
+            dst
+        }
+
+        ASTKind::LessThan { left, right } => {
+            let lhs = transform_expr(left.clone(), tac_code);
+            let rhs = transform_expr(right.clone(), tac_code);
+            let scope: &mut Scope = &mut binding.scope.borrow_mut();
+            let dst = create_tmp_var(scope);
+            tac_code.push(new_node!(LessThan {
+                lhs: lhs,
+                rhs: rhs,
+                dst: dst.clone()
+            }));
+
+            dst
+        }
+
+        ASTKind::LessOrEq { left, right } => {
+            let lhs = transform_expr(left.clone(), tac_code);
+            let rhs = transform_expr(right.clone(), tac_code);
+            let scope: &mut Scope = &mut binding.scope.borrow_mut();
+            let dst = create_tmp_var(scope);
+            tac_code.push(new_node!(LessOrEq {
+                lhs: lhs,
+                rhs: rhs,
+                dst: dst.clone()
+            }));
+            dst
+        }
+
+        ASTKind::GreaterThan { left, right } => {
+            let lhs = transform_expr(left.clone(), tac_code);
+            let rhs = transform_expr(right.clone(), tac_code);
+            let scope: &mut Scope = &mut binding.scope.borrow_mut();
+            let dst = create_tmp_var(scope);
+            tac_code.push(new_node!(GreaterThan {
+                lhs: lhs,
+                rhs: rhs,
+                dst: dst.clone()
+            }));
+            dst
+        }
+
+        ASTKind::GreaterOrEq { left, right } => {
+            let lhs = transform_expr(left.clone(), tac_code);
+            let rhs = transform_expr(right.clone(), tac_code);
+            let scope: &mut Scope = &mut binding.scope.borrow_mut();
+            let dst = create_tmp_var(scope);
+            tac_code.push(new_node!(GreaterOrEq {
+                lhs: lhs,
+                rhs: rhs,
+                dst: dst.clone()
+            }));
+            dst
+        }
+
+        ASTKind::LogicAnd { left, right } => {
+            let false_label = new_node!(Label(incr_label_index()));
+            let end_label = new_node!(Label(incr_label_index()));
             let x = transform_expr(left.clone(), tac_code);
-            let mut jmp = tac_rc!(JumpOnZero {
+            tac_code.push(new_node!(JumpOnZero {
                 expr: x,
                 label: false_label.clone()
-            });
-            tac_code.push(jmp.clone());
+            }));
             let y = transform_expr(right.clone(), tac_code);
-            jmp = tac_rc!(JumpOnZero {
+            tac_code.push(new_node!(JumpOnZero {
                 expr: y,
                 label: false_label.clone()
-            });
-            tac_code.push(jmp.clone());
-            let dst = tac_rc!(Var(incr_var_index(), 4));
-            let mut cpy = tac_rc!(Copy {
-                src: tac_rc!(ConstInt(1)),
+            }));
+            let scope: &mut Scope = &mut binding.scope.borrow_mut();
+            let dst = create_tmp_var(scope);
+            tac_code.push(new_node!(Copy {
+                src: new_node!(ConstInt(1)),
                 dst: dst.clone()
-            });
-            tac_code.push(cpy.clone());
-            tac_code.push(tac_rc!(Jump(end_label.clone())));
-            tac_code.push(false_label.clone());
-            cpy = tac_rc!(Copy {
-                src: tac_rc!(ConstInt(0)),
+            }));
+            tac_code.push(new_node!(Jump(end_label.clone())));
+            tac_code.push(false_label);
+            tac_code.push(new_node!(Copy {
+                src: new_node!(ConstInt(0)),
                 dst: dst.clone()
-            });
-            tac_code.push(cpy.clone());
-            tac_code.push(end_label.clone());
-
-            return dst;
+            }));
+            tac_code.push(end_label);
+            dst
         }
 
-        AST::LogicOr { left, right } => {
-            let true_label = tac_rc!(Label(incr_label_index()));
-            let end_label = tac_rc!(Label(incr_label_index()));
+        ASTKind::LogicOr { left, right } => {
+            let true_label = new_node!(Label(incr_label_index()));
+            let end_label = new_node!(Label(incr_label_index()));
             let x = transform_expr(left.clone(), tac_code);
-            let mut jmp = tac_rc!(JumpOnNotZero {
+            tac_code.push(new_node!(JumpOnNotZero {
                 expr: x,
                 label: true_label.clone()
-            });
-            tac_code.push(jmp.clone());
+            }));
             let y = transform_expr(right.clone(), tac_code);
-            jmp = tac_rc!(JumpOnNotZero {
+            tac_code.push(new_node!(JumpOnNotZero {
                 expr: y,
                 label: true_label.clone()
-            });
-            tac_code.push(jmp.clone());
-            let dst = tac_rc!(Var(incr_var_index(), 4));
-            let mut cpy = tac_rc!(Copy {
-                src: tac_rc!(ConstInt(0)),
-                dst: dst.clone()
-            });
-            tac_code.push(cpy.clone());
-            tac_code.push(tac_rc!(Jump(end_label.clone())));
-            tac_code.push(true_label.clone());
-            cpy = tac_rc!(Copy {
-                src: tac_rc!(ConstInt(1)),
-                dst: dst.clone()
-            });
-            tac_code.push(cpy.clone());
-            tac_code.push(end_label.clone());
-
-            return dst;
-        }
-
-        AST::Equal { left, right } => {
-            let x = transform_expr(left.clone(), tac_code);
-            let y = transform_expr(right.clone(), tac_code);
-            let var_idx = incr_var_index();
-            let dst = tac_rc!(Var(var_idx, 4));
-            tac_code.push(tac_rc!(Equal {
-                lhs: x,
-                rhs: y,
+            }));
+            let scope: &mut Scope = &mut binding.scope.borrow_mut();
+            let dst = create_tmp_var(scope);
+            tac_code.push(new_node!(Copy {
+                src: new_node!(ConstInt(0)),
                 dst: dst.clone()
             }));
-            return dst;
-        }
-
-        AST::NotEq { left, right } => {
-            let x = transform_expr(left.clone(), tac_code);
-            let y = transform_expr(right.clone(), tac_code);
-            let var_idx = incr_var_index();
-            let dst = tac_rc!(Var(var_idx, 4));
-            tac_code.push(tac_rc!(NotEq {
-                lhs: x,
-                rhs: y,
+            tac_code.push(new_node!(Jump(end_label.clone())));
+            tac_code.push(true_label);
+            tac_code.push(new_node!(Copy {
+                src: new_node!(ConstInt(1)),
                 dst: dst.clone()
             }));
-            return dst;
+            tac_code.push(end_label);
+            dst
         }
 
-        AST::LessThan { left, right } => {
-            let x = transform_expr(left.clone(), tac_code);
-            let y = transform_expr(right.clone(), tac_code);
-            let var_idx = incr_var_index();
-            let dst = tac_rc!(Var(var_idx, 4));
-            tac_code.push(tac_rc!(LessThan {
-                lhs: x,
-                rhs: y,
+        ASTKind::Assign { left, right } => {
+            let exp = transform_expr(right.clone(), tac_code);
+            let dst = transform_expr(left.clone(), tac_code);
+            tac_code.push(new_node!(Copy {
+                src: exp,
                 dst: dst.clone()
             }));
-            return dst;
+            dst
         }
 
-        AST::LessOrEq { left, right } => {
-            let x = transform_expr(left.clone(), tac_code);
-            let y = transform_expr(right.clone(), tac_code);
-            let var_idx = incr_var_index();
-            let dst = tac_rc!(Var(var_idx, 4));
-            tac_code.push(tac_rc!(LessOrEq {
-                lhs: x,
-                rhs: y,
-                dst: dst.clone()
-            }));
-            return dst;
+        ASTKind::Identifier { name } => {
+            let scope: &mut Scope = &mut binding.scope.borrow_mut();
+            get_var(&name, scope)
         }
 
-        AST::GreaterThan { left, right } => {
-            let x = transform_expr(left.clone(), tac_code);
-            let y = transform_expr(right.clone(), tac_code);
-            let var_idx = incr_var_index();
-            let dst = tac_rc!(Var(var_idx, 4));
-            tac_code.push(tac_rc!(GreaterThan {
-                lhs: x,
-                rhs: y,
-                dst: dst.clone()
-            }));
-            return dst;
-        }
-
-        AST::GreaterOrEq { left, right } => {
-            let x = transform_expr(left.clone(), tac_code);
-            let y = transform_expr(right.clone(), tac_code);
-            let var_idx = incr_var_index();
-            let dst = tac_rc!(Var(var_idx, 4));
-            tac_code.push(tac_rc!(GreaterOrEq {
-                lhs: x,
-                rhs: y,
-                dst: dst.clone()
-            }));
-            return dst;
-        }
-
-        _ => {
-            unreachable!();
-        }
+        _ => unreachable!(),
     }
 }
 
 fn transform(node: ASTRef, tac_code: &mut TACVec) {
-    match &*node.borrow() {
-        AST::Function {
+    let binding = node.borrow();
+
+    match &binding.kind {
+        ASTKind::Function {
             name,
             params: _,
-            stmts,
+            block,
             rtype: _,
+            scope,
         } => {
             let mut func_code: TACVec = vec![];
-            reset_var_index();
 
-            for stmt in stmts {
-                transform(stmt.clone(), &mut func_code);
+            match &block.clone().unwrap().borrow().kind {
+                ASTKind::Block { body } => {
+                    for stmt in body {
+                        transform(stmt.clone(), &mut func_code);
+                    }
+                }
+                _ => {}
             }
 
-            tac_code.push(tac_rc!(Function {
+            func_code.push(new_node!(Return(new_node!(ConstInt(0)))));
+
+            tac_code.push(new_node!(Function {
                 name: name.clone(),
                 code: func_code,
+                depth: scope.borrow().depth,
             }));
         }
 
-        AST::Return { expr } => {
+        ASTKind::Block { body } => {
+            for stmt in body {
+                transform(stmt.clone(), tac_code);
+            }
+        }
+
+        ASTKind::Return { expr } => {
             let e = transform_expr(expr.clone(), tac_code);
-            tac_code.push(tac_rc!(Return(e)));
+            tac_code.push(new_node!(Return(e)));
+        }
+
+        ASTKind::ExprStmt { expr } => {
+            _ = transform_expr(expr.clone(), tac_code);
+        }
+
+        ASTKind::Variable { name, typ: _, init } => {
+            if init.is_some() {
+                let e =
+                    transform_expr(init.as_ref().unwrap().clone(), tac_code);
+                let scope = binding.scope.borrow_mut();
+                let v = new_node!(Var(scope.find_off(&name).unwrap(), 4));
+                tac_code.push(new_node!(Copy { src: e, dst: v }));
+            }
         }
 
         _ => {
