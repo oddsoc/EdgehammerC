@@ -28,6 +28,7 @@ use std::process::Command;
 use crate::ir;
 use crate::lexer;
 use crate::parser;
+use crate::semantics::*;
 use crate::x64::codegen;
 use crate::x64::out;
 
@@ -194,11 +195,18 @@ fn parse_translation(translation: &Translation, arguments: &[Argument]) {
     let i_file = translation.i_file.to_str().unwrap();
     preprocess_gcc(c_file, i_file);
 
-    let mut parser = parser::Parser::new(
-        i_file,
-        arguments.iter().any(|i| matches!(i, Argument::Validate)),
-    );
+    let validate = arguments.iter().any(|i| matches!(i, Argument::Validate));
+
+    let mut parser = parser::Parser::new(i_file, validate);
+
     let ast = parser.parse().unwrap();
+
+    if validate {
+        if analyse(&ast).is_err() {
+            panic!("semantic analysis failure");
+        }
+    }
+
     println!("{:#?}", ast);
 }
 
@@ -215,6 +223,11 @@ fn codegen_translation(translation: &Translation, arguments: &[Argument]) {
 
     let mut parser = parser::Parser::new(i_file, true);
     let ast = parser.parse().unwrap();
+
+    if analyse(&ast).is_err() {
+        panic!("semantic analysis failure");
+    }
+
     let ir = ir::generate(ast);
 
     if arguments.iter().any(|i| matches!(i, Argument::Codegen)) {

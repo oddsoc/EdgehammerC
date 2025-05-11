@@ -24,30 +24,43 @@
 use crate::as_a;
 use crate::parser::{ASTKind, ASTRef};
 
-pub fn eval(expr: ASTRef) -> Option<ASTRef> {
+fn is_lvalue(expr: ASTRef) -> bool {
+    let node = expr.borrow();
+
+    match &node.kind {
+        ASTKind::Identifier { .. } => true,
+        _ => false,
+    }
+}
+
+pub fn eval(expr: ASTRef) -> Result<ASTRef, ()> {
     let node = expr.borrow();
     let scope = node.scope.clone();
 
     match &node.kind {
-        ASTKind::Identifier { name } => {
-            scope.borrow().find_sym(name).and_then(|outer_rc| {
+        ASTKind::Identifier { name, sym: _ } => {
+            let s = scope.borrow().find_sym(name).and_then(|outer_rc| {
                 outer_rc
                     .downcast::<ASTRef>()
                     .ok()
                     .map(|inner_rc| (*inner_rc).clone())
-            })
+            });
+
+            if s.is_some() {
+                Ok(expr.clone())
+            } else {
+                Err(())
+            }
         }
 
         ASTKind::Assign { left, right } => {
-            as_a!(Some(left), ASTKind::Identifier {
-                name: _
-            } => {
-                if eval(left.clone()).is_some() && eval(right.clone()).is_some() {
-                    return Some(expr.clone());
+            if is_lvalue(left.clone()) {
+                if eval(left.clone()).is_ok() && eval(right.clone()).is_ok() {
+                    return Ok(expr.clone());
                 }
-            });
+            };
 
-            return None;
+            return Err(());
         }
 
         ASTKind::Add { left, right }
@@ -68,20 +81,36 @@ pub fn eval(expr: ASTRef) -> Option<ASTRef> {
         | ASTKind::LessOrEq { left, right }
         | ASTKind::GreaterThan { left, right }
         | ASTKind::GreaterOrEq { left, right } => {
-            if eval(left.clone()).is_some() && eval(right.clone()).is_some() {
-                Some(expr.clone())
+            if eval(left.clone()).is_ok() && eval(right.clone()).is_ok() {
+                Ok(expr.clone())
             } else {
-                None
+                Err(())
+            }
+        }
+
+        ASTKind::Conditional {
+            left,
+            middle,
+            right,
+        } => {
+            if eval(left.clone()).is_err() {
+                Err(())
+            } else if eval(middle.clone()).is_err() {
+                Err(())
+            } else if eval(right.clone()).is_err() {
+                Err(())
+            } else {
+                Ok(expr.clone())
             }
         }
 
         ASTKind::Negate { expr }
         | ASTKind::Complement { expr }
         | ASTKind::Not { expr } => {
-            if eval(expr.clone()).is_some() {
-                Some(expr.clone())
+            if eval(expr.clone()).is_ok() {
+                Ok(expr.clone())
             } else {
-                None
+                Err(())
             }
         }
 
@@ -89,25 +118,26 @@ pub fn eval(expr: ASTRef) -> Option<ASTRef> {
         | ASTKind::PreDecr { expr }
         | ASTKind::PostIncr { expr }
         | ASTKind::PostDecr { expr } => {
-            if eval(expr.clone()).is_some() {
+            if eval(expr.clone()).is_ok() {
                 as_a!(Some(expr), ASTKind::Identifier {
-                    name: _
+                    name: _,
+                    sym: _
                 } => {
-                    if eval(expr.clone()).is_some() {
-                        return Some(expr.clone());
+                    if eval(expr.clone()).is_ok() {
+                        return Ok(expr.clone());
                     } else {
-                        return None;
+                        return Err(());
                     }
                 } else {
-                    None
+                    Err(())
                 })
             } else {
-                None
+                Err(())
             }
         }
 
-        ASTKind::ConstInt(_) => Some(expr.clone()),
+        ASTKind::ConstInt(_) => Ok(expr.clone()),
 
-        _ => None,
+        _ => Err(()),
     }
 }

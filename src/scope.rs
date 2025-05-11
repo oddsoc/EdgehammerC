@@ -31,6 +31,8 @@ pub struct Scope {
     parent: Option<ScopeRef>,
     offset: usize,
     pub depth: usize,
+
+    labels: HashMap<String, Rc<dyn Any>>,
     symbols: HashMap<String, (usize, Rc<dyn Any>)>,
 }
 
@@ -46,6 +48,7 @@ impl Scope {
                 0
             },
             depth: 0,
+            labels: HashMap::new(),
             symbols: HashMap::new(),
         }))
     }
@@ -97,6 +100,49 @@ impl Scope {
         self.symbols.insert(name.to_string(), (offset, symbol));
 
         Ok(())
+    }
+
+    pub fn add_label(
+        &mut self,
+        name: &str,
+        stmt: Rc<dyn Any>,
+    ) -> Result<(), ()> {
+        if self.parent.is_some()
+            && self.parent.as_ref().unwrap().borrow().parent.is_some()
+        {
+            return self
+                .parent
+                .as_ref()
+                .unwrap()
+                .borrow_mut()
+                .add_label(name, stmt.clone());
+        } else if self.labels.contains_key(name) {
+            Err(())
+        } else {
+            self.labels.insert(name.to_string(), stmt);
+            Ok(())
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn find_label(&self, name: &str) -> Option<Rc<dyn Any>> {
+        let mut parent = self.parent.clone();
+
+        if let Some(stmt) = self.labels.get(name) {
+            return Some(stmt.clone());
+        }
+
+        while parent.is_some() {
+            if let Some(stmt) =
+                parent.clone().unwrap().as_ref().borrow().labels.get(name)
+            {
+                return Some(stmt.clone());
+            }
+
+            parent = parent.unwrap().as_ref().borrow().parent.clone();
+        }
+
+        None
     }
 
     pub fn find(&self, name: &str) -> Option<(usize, Rc<dyn Any>)> {

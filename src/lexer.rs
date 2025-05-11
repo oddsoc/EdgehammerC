@@ -40,7 +40,9 @@ pub enum TokenKind {
     RParen,
     LCurly,
     RCurly,
+    Colon,
     Semicolon,
+    QMark,
     Tilde,
     Minus,
     MinusEq,
@@ -77,8 +79,12 @@ pub enum TokenKind {
     Incr,
     Void,
     Int,
+    GoTo,
     Return,
+    If,
+    Else,
     Identifier(String),
+    Label(String),
     ConstInt(i64),
     Bad,
     EOF,
@@ -90,6 +96,7 @@ pub struct Lexer {
     position: usize,
     line: usize,
     column: usize,
+    expr_depth: usize,
 }
 
 impl Lexer {
@@ -102,6 +109,7 @@ impl Lexer {
             position: 0,
             line: 1,
             column: 1,
+            expr_depth: 0,
         }
     }
 
@@ -119,6 +127,15 @@ impl Lexer {
             line: self.line,
             column: column,
         });
+    }
+
+    pub fn push_expr(&mut self) {
+        self.expr_depth += 1;
+    }
+
+    pub fn pop_expr(&mut self) {
+        assert!(self.expr_depth > 0);
+        self.expr_depth -= 1;
     }
 
     #[allow(dead_code)]
@@ -196,6 +213,10 @@ impl Lexer {
 
         if byte == b'0' {
             lexeme.push(self.consume().unwrap() as char);
+            byte = self.peek().unwrap();
+            if byte.is_ascii_alphabetic() || byte == b'_' {
+                return self.new_tok(TokenKind::Bad, pos, start);
+            }
         } else {
             while self.position < self.buffer.len() {
                 byte = self.peek().unwrap();
@@ -234,6 +255,15 @@ impl Lexer {
         }
 
         match lexeme.as_str() {
+            "if" => {
+                return self.new_tok(TokenKind::If, pos, start);
+            }
+            "else" => {
+                return self.new_tok(TokenKind::Else, pos, start);
+            }
+            "goto" => {
+                return self.new_tok(TokenKind::GoTo, pos, start);
+            }
             "return" => {
                 return self.new_tok(TokenKind::Return, pos, start);
             }
@@ -244,6 +274,27 @@ impl Lexer {
                 return self.new_tok(TokenKind::Int, pos, start);
             }
             _ => {}
+        }
+
+        if self.expr_depth == 0 {
+            let mut byte = self.peek().unwrap();
+            loop {
+                match byte {
+                    b' ' | b'\t' | b'\n' => {
+                        // skip whitespace
+                        self.consume();
+                    }
+
+                    _ => break,
+                }
+                byte = self.peek().unwrap();
+            }
+
+            if byte == b':' {
+                let tok = self.new_tok(TokenKind::Label(lexeme), pos, start);
+                self.consume();
+                return tok;
+            }
         }
 
         self.new_tok(TokenKind::Identifier(lexeme), pos, start)
@@ -318,10 +369,26 @@ impl Lexer {
                         self.column - 1,
                     );
                 }
+                b':' => {
+                    self.consume();
+                    return self.new_tok(
+                        TokenKind::Colon,
+                        start,
+                        self.column - 1,
+                    );
+                }
                 b';' => {
                     self.consume();
                     return self.new_tok(
                         TokenKind::Semicolon,
+                        start,
+                        self.column - 1,
+                    );
+                }
+                b'?' => {
+                    self.consume();
+                    return self.new_tok(
+                        TokenKind::QMark,
                         start,
                         self.column - 1,
                     );

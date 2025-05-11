@@ -21,8 +21,11 @@
  *  DEALINGS IN THE SOFTWARE.
  */
 
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
+use std::sync::OnceLock;
 
 use crate::parser::{ASTKind, ASTRef, ASTVec};
 use crate::scope::Scope;
@@ -164,6 +167,25 @@ pub enum TAC {
 type TACRef = Rc<TAC>;
 type TACVec = Vec<Rc<TAC>>;
 
+fn get_label_map() -> &'static Mutex<HashMap<String, usize>> {
+    static LABEL_MAP: OnceLock<Mutex<HashMap<String, usize>>> = OnceLock::new();
+    LABEL_MAP.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn add_named_label(name: &str) {
+    let map = get_label_map();
+    let mut map_guard = map.lock().unwrap();
+    map_guard
+        .entry(name.to_string())
+        .or_insert(incr_label_index());
+}
+
+fn get_named_label(name: &str) -> Option<usize> {
+    let map = get_label_map();
+    let map_guard = map.lock().unwrap();
+    map_guard.get(name).cloned()
+}
+
 static LABEL_INDEX: AtomicUsize = AtomicUsize::new(0);
 
 fn incr_label_index() -> usize {
@@ -172,11 +194,6 @@ fn incr_label_index() -> usize {
 
 fn create_tmp_var(scope: &mut Scope) -> TACRef {
     let off = scope.add_tmp(4, 4);
-    new_node!(Var(off, 4))
-}
-
-fn get_var(name: &str, scope: &mut Scope) -> TACRef {
-    let off = scope.find_off(name).unwrap();
     new_node!(Var(off, 4))
 }
 
@@ -590,9 +607,39 @@ fn transform_expr(expr: ASTRef, tac_code: &mut TACVec) -> TACRef {
             dst
         }
 
-        ASTKind::Identifier { name } => {
-            let scope: &mut Scope = &mut binding.scope.borrow_mut();
-            get_var(&name, scope)
+        ASTKind::Conditional {
+            left,
+            middle,
+            right,
+        } => {
+            let e2_label = new_node!(Label(incr_label_index()));
+            let c = transform_expr(left.clone(), tac_code);
+            tac_code.push(new_node!(JumpOnZero {
+                expr: c,
+                label: e2_label.clone()
+            }));
+            let e1 = transform_expr(middle.clone(), tac_code);
+            let res = create_tmp_var(&mut binding.scope.borrow_mut());
+            tac_code.push(new_node!(Copy {
+                src: e1.clone(),
+                dst: res.clone()
+            }));
+            let end_label = new_node!(Label(incr_label_index()));
+            tac_code.push(new_node!(Jump(end_label.clone())));
+            tac_code.push(e2_label.clone());
+            let e2 = transform_expr(right.clone(), tac_code);
+            tac_code.push(new_node!(Copy {
+                src: e2.clone(),
+                dst: res.clone()
+            }));
+
+            tac_code.push(end_label.clone());
+
+            res
+        }
+
+        ASTKind::Identifier { name: _, sym } => {
+            new_node!(Var(sym.0, 4))
         }
 
         _ => unreachable!(),
@@ -636,9 +683,56 @@ fn transform(node: ASTRef, tac_code: &mut TACVec) {
             }
         }
 
+        ASTKind::If {
+            cond,
+            then,
+            otherwise,
+        } => {
+            let else_label = if otherwise.is_some() {
+                Some(new_node!(Label(incr_label_index())))
+            } else {
+                None
+            };
+            let end_label = new_node!(Label(incr_label_index()));
+            let c = transform_expr(cond.clone(), tac_code);
+            tac_code.push(new_node!(JumpOnZero {
+                expr: c,
+                label: if else_label.is_some() {
+                    else_label.as_ref().unwrap().clone()
+                } else {
+                    end_label.clone()
+                }
+            }));
+
+            transform(then.clone(), tac_code);
+
+            if otherwise.is_some() {
+                tac_code.push(new_node!(Jump(end_label.clone())));
+                tac_code.push(else_label.unwrap());
+                transform(otherwise.as_ref().unwrap().clone(), tac_code);
+            }
+
+            tac_code.push(end_label);
+        }
+
         ASTKind::Return { expr } => {
             let e = transform_expr(expr.clone(), tac_code);
             tac_code.push(new_node!(Return(e)));
+        }
+
+        ASTKind::GoTo { label } => {
+            add_named_label(label);
+            let idx = get_named_label(label);
+            let l = new_node!(Label(idx.unwrap()));
+            tac_code.push(new_node!(Jump(l.clone())));
+        }
+
+        ASTKind::Label { name, stmt } => {
+            add_named_label(name);
+            let idx = get_named_label(name);
+            let l = new_node!(Label(idx.unwrap()));
+            tac_code.push(l);
+            transform(stmt.clone(), tac_code);
         }
 
         ASTKind::ExprStmt { expr } => {
@@ -654,6 +748,8 @@ fn transform(node: ASTRef, tac_code: &mut TACVec) {
                 tac_code.push(new_node!(Copy { src: e, dst: v }));
             }
         }
+
+        ASTKind::EmptyStmt => {}
 
         _ => {
             unreachable!();

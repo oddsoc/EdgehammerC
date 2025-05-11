@@ -25,7 +25,6 @@ use std::any::Any;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::expr::*;
 use crate::lexer::Lexer;
 use crate::lexer::Token;
 use crate::lexer::TokenKind;
@@ -219,12 +218,31 @@ pub enum ASTKind {
     },
     Identifier {
         name: String,
+        sym: (usize, Rc<dyn Any>),
     },
     Return {
         expr: ASTRef,
     },
+    If {
+        cond: ASTRef,
+        then: ASTRef,
+        otherwise: Option<ASTRef>,
+    },
     ExprStmt {
         expr: ASTRef,
+    },
+    GoTo {
+        label: String,
+    },
+    Label {
+        name: String,
+        stmt: ASTRef,
+    },
+    EmptyStmt,
+    Conditional {
+        left: ASTRef,
+        middle: ASTRef,
+        right: ASTRef,
     },
     Complement {
         expr: ASTRef,
@@ -339,34 +357,29 @@ pub struct Parser {
 
 fn precedence_of(kind: &TokenKind) -> i32 {
     return match kind {
-        TokenKind::Mult => 55,
-        TokenKind::Div => 55,
-        TokenKind::Mod => 55,
-        TokenKind::Plus => 50,
-        TokenKind::Minus => 50,
-        TokenKind::LShift => 45,
-        TokenKind::RShift => 45,
-        TokenKind::LThan => 40,
-        TokenKind::LThanEq => 40,
-        TokenKind::GThan => 40,
-        TokenKind::GThanEq => 40,
-        TokenKind::Eq => 35,
-        TokenKind::NotEq => 35,
-        TokenKind::And => 30,
-        TokenKind::Xor => 25,
-        TokenKind::Or => 20,
-        TokenKind::LAnd => 15,
-        TokenKind::LOr => 10,
-        // ?: => 5
-        TokenKind::Assign => 0,
-        TokenKind::PlusEq => 0,
-        TokenKind::MinusEq => 0,
-        TokenKind::MultEq => 0,
-        TokenKind::DivEq => 0,
-        TokenKind::ModEq => 0,
-        TokenKind::OrEq => 0,
-        TokenKind::AndEq => 0,
-        TokenKind::InvEq => 0,
+        TokenKind::Mult | TokenKind::Div | TokenKind::Mod => 50,
+        TokenKind::Plus | TokenKind::Minus => 45,
+        TokenKind::LShift | TokenKind::RShift => 40,
+        TokenKind::LThan
+        | TokenKind::LThanEq
+        | TokenKind::GThan
+        | TokenKind::GThanEq => 35,
+        TokenKind::Eq | TokenKind::NotEq => 30,
+        TokenKind::And => 25,
+        TokenKind::Xor => 20,
+        TokenKind::Or => 15,
+        TokenKind::LAnd => 10,
+        TokenKind::LOr => 5,
+        TokenKind::QMark => 3,
+        TokenKind::Assign
+        | TokenKind::PlusEq
+        | TokenKind::MinusEq
+        | TokenKind::MultEq
+        | TokenKind::DivEq
+        | TokenKind::ModEq
+        | TokenKind::OrEq
+        | TokenKind::AndEq
+        | TokenKind::InvEq => 1,
         _ => 0,
     };
 }
@@ -553,15 +566,52 @@ impl Parser {
         return Ok(new_node!(self, Int));
     }
 
-    fn stmt_or_decl(&mut self) -> Result<ASTRef, String> {
+    fn statement(&mut self) -> Result<ASTRef, String> {
         if peek!(self, TokenKind::LCurly) {
             self.block()
-        } else if self.is_type_spec() {
-            self.declaration()
+        } else if peek!(self, TokenKind::Label, _) {
+            self.label_stmt()
         } else if peek!(self, TokenKind::Return) {
             self.return_stmt()
+        } else if peek!(self, TokenKind::If) {
+            self.if_stmt()
+        } else if peek!(self, TokenKind::GoTo) {
+            self.goto_stmt()
+        } else if accept!(self, TokenKind::Semicolon) {
+            Ok(new_node!(self, EmptyStmt))
         } else {
             self.expr_stmt()
+        }
+    }
+
+    fn label_stmt(&mut self) -> Result<ASTRef, String> {
+        expect!(self, TokenKind::Label, _);
+        let label = yank!(self, TokenKind::Label);
+        let stmt = self.statement()?;
+        let l = self
+            .scope
+            .as_ref()
+            .borrow_mut()
+            .add_label(&label, Rc::new(stmt.clone()) as Rc<dyn Any>);
+
+        if !l.is_ok() {
+            return Err(format!("'{}' label already defined", label));
+        }
+
+        Ok(new_node!(
+            self,
+            Label {
+                name: label,
+                stmt: stmt
+            }
+        ))
+    }
+
+    fn stmt_or_decl(&mut self) -> Result<ASTRef, String> {
+        if self.is_type_spec() {
+            self.declaration()
+        } else {
+            self.statement()
         }
     }
 
@@ -572,14 +622,43 @@ impl Parser {
         expect!(self, TokenKind::LCurly);
 
         while !accept!(self, TokenKind::RCurly) {
-            if !accept!(self, TokenKind::Semicolon) {
-                body.push(self.stmt_or_decl()?);
-            }
+            body.push(self.stmt_or_decl()?);
         }
 
         self.close_scope();
 
         return Ok(new_node!(self, Block { body: body }));
+    }
+
+    fn if_stmt(&mut self) -> Result<ASTRef, String> {
+        expect!(self, TokenKind::If);
+        expect!(self, TokenKind::LParen);
+        let cond = self.expr(0)?;
+        expect!(self, TokenKind::RParen);
+        let then = self.statement()?;
+        let otherwise = if accept!(self, TokenKind::Else) {
+            Some(self.statement()?)
+        } else {
+            None
+        };
+
+        Ok(new_node!(
+            self,
+            If {
+                cond: cond,
+                then: then,
+                otherwise: otherwise
+            }
+        ))
+    }
+
+    fn goto_stmt(&mut self) -> Result<ASTRef, String> {
+        expect!(self, TokenKind::GoTo);
+        expect!(self, TokenKind::Identifier, _);
+        let label = yank!(self, TokenKind::Identifier);
+        expect!(self, TokenKind::Semicolon);
+
+        Ok(new_node!(self, GoTo { label: label }))
     }
 
     fn return_stmt(&mut self) -> Result<ASTRef, String> {
@@ -600,7 +679,27 @@ impl Parser {
         return Ok(stmt);
     }
 
+    fn conditional(
+        &mut self,
+        expr: ASTRef,
+        min_prec: i32,
+    ) -> Result<ASTRef, String> {
+        let middle = self.expr(0)?;
+        expect!(self, TokenKind::Colon);
+        let right = self.expr(min_prec)?;
+
+        Ok(new_node!(
+            self,
+            Conditional {
+                left: expr.clone(),
+                middle: middle,
+                right: right,
+            }
+        ))
+    }
+
     fn expr(&mut self, min_prec: i32) -> Result<ASTRef, String> {
+        self.lexer.push_expr();
         let mut left = self.factor()?;
         let mut prec = precedence_of(&peek_any!(self));
 
@@ -638,17 +737,15 @@ impl Parser {
             } else if accept!(self, TokenKind::RShiftEq) {
                 let right = self.expr(precedence_of(&peek_any!(self)))?;
                 left = self.rshift_eq(left, right)?;
+            } else if accept!(self, TokenKind::QMark) {
+                left = self.conditional(left, prec)?;
             } else {
-                left = self.binop(left, prec)?;
+                left = self.binop(left, prec + 1)?;
                 prec = precedence_of(&peek_any!(self));
             }
         }
 
-        if self.validate && min_prec == 0 {
-            if eval(left.clone()).is_none() {
-                return Err("invalid expression".to_string());
-            }
-        }
+        self.lexer.pop_expr();
 
         return Ok(left);
     }
@@ -683,7 +780,8 @@ impl Parser {
             | TokenKind::XorEq
             | TokenKind::LShiftEq
             | TokenKind::RShiftEq
-            | TokenKind::Assign => true,
+            | TokenKind::Assign
+            | TokenKind::QMark => true,
             _ => false,
         };
     }
@@ -1135,10 +1233,18 @@ impl Parser {
 
             Ok(inner_expr)
         } else if accept!(self, TokenKind::Identifier, _) {
+            let name = yank!(self, TokenKind::Identifier);
+            let sym = self.scope.as_ref().borrow().find(&name);
+
+            if sym.is_none() {
+                return Err(format!("'{}' undeclared", name));
+            }
+
             let mut expr = new_node!(
                 self,
                 Identifier {
-                    name: yank!(self, TokenKind::Identifier)
+                    name: name,
+                    sym: sym.unwrap()
                 }
             );
 
