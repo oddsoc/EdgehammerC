@@ -83,6 +83,14 @@ pub enum TokenKind {
     Return,
     If,
     Else,
+    Do,
+    While,
+    For,
+    Switch,
+    Case,
+    Default,
+    Break,
+    Continue,
     Identifier(String),
     Label(String),
     ConstInt(i64),
@@ -261,6 +269,30 @@ impl Lexer {
             "else" => {
                 return self.new_tok(TokenKind::Else, pos, start);
             }
+            "do" => {
+                return self.new_tok(TokenKind::Do, pos, start);
+            }
+            "while" => {
+                return self.new_tok(TokenKind::While, pos, start);
+            }
+            "for" => {
+                return self.new_tok(TokenKind::For, pos, start);
+            }
+            "switch" => {
+                return self.new_tok(TokenKind::Switch, pos, start);
+            }
+            "case" => {
+                return self.new_tok(TokenKind::Case, pos, start);
+            }
+            "default" => {
+                return self.new_tok(TokenKind::Default, pos, start);
+            }
+            "break" => {
+                return self.new_tok(TokenKind::Break, pos, start);
+            }
+            "continue" => {
+                return self.new_tok(TokenKind::Continue, pos, start);
+            }
             "goto" => {
                 return self.new_tok(TokenKind::GoTo, pos, start);
             }
@@ -287,7 +319,12 @@ impl Lexer {
 
                     _ => break,
                 }
-                byte = self.peek().unwrap();
+
+                if self.peek().is_none() {
+                    break;
+                } else {
+                    byte = self.peek().unwrap();
+                }
             }
 
             if byte == b':' {

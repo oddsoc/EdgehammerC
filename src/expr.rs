@@ -21,42 +21,34 @@
  *  DEALINGS IN THE SOFTWARE.
  */
 
-use crate::as_a;
-use crate::parser::{ASTKind, ASTRef};
+use std::rc::Rc;
 
-fn is_lvalue(expr: ASTRef) -> bool {
-    let node = expr.borrow();
+use crate::ast::{ASTKind, AST};
 
-    match &node.kind {
+fn is_lvalue(expr: Rc<AST>) -> bool {
+    match &expr.kind {
         ASTKind::Identifier { .. } => true,
         _ => false,
     }
 }
 
-pub fn eval(expr: ASTRef) -> Result<ASTRef, ()> {
-    let node = expr.borrow();
-    let scope = node.scope.clone();
-
+pub fn eval(expr: Rc<AST>, constexpr: bool) -> Result<Rc<AST>, ()> {
+    let node = expr.clone();
     match &node.kind {
-        ASTKind::Identifier { name, sym: _ } => {
-            let s = scope.borrow().find_sym(name).and_then(|outer_rc| {
-                outer_rc
-                    .downcast::<ASTRef>()
-                    .ok()
-                    .map(|inner_rc| (*inner_rc).clone())
-            });
-
-            if s.is_some() {
-                Ok(expr.clone())
-            } else {
+        ASTKind::Identifier { name: _, sym } => {
+            if constexpr || sym.is_none() {
                 Err(())
+            } else {
+                Ok(expr)
             }
         }
 
         ASTKind::Assign { left, right } => {
             if is_lvalue(left.clone()) {
-                if eval(left.clone()).is_ok() && eval(right.clone()).is_ok() {
-                    return Ok(expr.clone());
+                if eval(left.clone(), constexpr).is_ok()
+                    && eval(right.clone(), constexpr).is_ok()
+                {
+                    return Ok(expr);
                 }
             };
 
@@ -72,20 +64,130 @@ pub fn eval(expr: ASTRef) -> Result<ASTRef, ()> {
         | ASTKind::RShift { left, right }
         | ASTKind::And { left, right }
         | ASTKind::Or { left, right }
-        | ASTKind::Xor { left, right }
-        | ASTKind::LogicAnd { left, right }
-        | ASTKind::LogicOr { left, right }
-        | ASTKind::Equal { left, right }
+        | ASTKind::Xor { left, right } => {
+            let left_eval = eval(left.clone(), constexpr)?;
+            let right_eval = eval(right.clone(), constexpr)?;
+
+            if let (ASTKind::ConstInt(lhs), ASTKind::ConstInt(rhs)) =
+                (&left_eval.kind, &right_eval.kind)
+            {
+                let result = match &node.kind {
+                    ASTKind::Add { .. } => lhs + rhs,
+                    ASTKind::Subtract { .. } => lhs - rhs,
+                    ASTKind::Multiply { .. } => lhs * rhs,
+                    ASTKind::Divide { .. } => {
+                        if *rhs == 0 {
+                            return Err(());
+                        }
+                        lhs / rhs
+                    }
+                    ASTKind::Modulo { .. } => {
+                        if *rhs == 0 {
+                            return Err(());
+                        }
+                        lhs % rhs
+                    }
+                    ASTKind::LShift { .. } => lhs << rhs,
+                    ASTKind::RShift { .. } => lhs >> rhs,
+                    ASTKind::And { .. } => lhs & rhs,
+                    ASTKind::Or { .. } => lhs | rhs,
+                    ASTKind::Xor { .. } => lhs ^ rhs,
+                    _ => unreachable!(),
+                };
+
+                return Ok(Rc::new(AST {
+                    id: 0,
+                    kind: ASTKind::ConstInt(result),
+                    scope: node.scope.clone(),
+                }));
+            }
+
+            Ok(expr)
+        }
+
+        ASTKind::LogicAnd { left, right }
+        | ASTKind::LogicOr { left, right } => {
+            let left_eval = eval(left.clone(), constexpr)?;
+
+            if let ASTKind::ConstInt(lhs) = left_eval.kind {
+                let result = match &node.kind {
+                    ASTKind::LogicAnd { .. } => {
+                        if lhs == 0 {
+                            return Ok(Rc::new(AST {
+                                id: 0,
+                                kind: ASTKind::ConstInt(0),
+                                scope: node.scope.clone(),
+                            }));
+                        }
+                        let right_eval = eval(right.clone(), constexpr)?;
+                        let rhs =
+                            if let ASTKind::ConstInt(rhs) = right_eval.kind {
+                                rhs
+                            } else {
+                                return Ok(expr);
+                            };
+                        ((lhs != 0 && rhs != 0) as i32).into()
+                    }
+                    ASTKind::LogicOr { .. } => {
+                        if lhs != 0 {
+                            return Ok(Rc::new(AST {
+                                id: 0,
+                                kind: ASTKind::ConstInt(1),
+                                scope: node.scope.clone(),
+                            }));
+                        }
+                        let right_eval = eval(right.clone(), constexpr)?;
+                        let rhs =
+                            if let ASTKind::ConstInt(rhs) = right_eval.kind {
+                                rhs
+                            } else {
+                                return Ok(expr);
+                            };
+                        ((lhs != 0 || rhs != 0) as i32).into()
+                    }
+                    _ => unreachable!(),
+                };
+
+                return Ok(Rc::new(AST {
+                    id: 0,
+                    kind: ASTKind::ConstInt(result),
+                    scope: node.scope.clone(),
+                }));
+            }
+
+            Ok(expr)
+        }
+
+        ASTKind::Equal { left, right }
         | ASTKind::NotEq { left, right }
         | ASTKind::LessThan { left, right }
         | ASTKind::LessOrEq { left, right }
         | ASTKind::GreaterThan { left, right }
         | ASTKind::GreaterOrEq { left, right } => {
-            if eval(left.clone()).is_ok() && eval(right.clone()).is_ok() {
-                Ok(expr.clone())
-            } else {
-                Err(())
+            let left_eval = eval(left.clone(), constexpr)?;
+            let right_eval = eval(right.clone(), constexpr)?;
+
+            if let (ASTKind::ConstInt(lhs), ASTKind::ConstInt(rhs)) =
+                (&left_eval.kind, &right_eval.kind)
+            {
+                let result = match &node.kind {
+                    ASTKind::Equal { .. } => (lhs == rhs) as i64,
+                    ASTKind::NotEq { .. } => (lhs != rhs) as i64,
+                    ASTKind::LessThan { .. } => (lhs < rhs) as i64,
+                    ASTKind::LessOrEq { .. } => (lhs <= rhs) as i64,
+                    ASTKind::GreaterThan { .. } => (lhs > rhs) as i64,
+                    ASTKind::GreaterOrEq { .. } => (lhs >= rhs) as i64,
+                    _ => unreachable!(),
+                };
+
+                return Ok(Rc::new(AST {
+                    id: 0,
+                    kind: ASTKind::ConstInt(result),
+                    scope: node.scope.clone(),
+                }));
             }
+
+            Ok(expr)
         }
 
         ASTKind::Conditional {
@@ -93,50 +195,56 @@ pub fn eval(expr: ASTRef) -> Result<ASTRef, ()> {
             middle,
             right,
         } => {
-            if eval(left.clone()).is_err() {
-                Err(())
-            } else if eval(middle.clone()).is_err() {
-                Err(())
-            } else if eval(right.clone()).is_err() {
-                Err(())
-            } else {
-                Ok(expr.clone())
-            }
-        }
+            let cond_eval = eval(left.clone(), constexpr)?;
 
-        ASTKind::Negate { expr }
-        | ASTKind::Complement { expr }
-        | ASTKind::Not { expr } => {
-            if eval(expr.clone()).is_ok() {
-                Ok(expr.clone())
-            } else {
-                Err(())
-            }
-        }
-
-        ASTKind::PreIncr { expr }
-        | ASTKind::PreDecr { expr }
-        | ASTKind::PostIncr { expr }
-        | ASTKind::PostDecr { expr } => {
-            if eval(expr.clone()).is_ok() {
-                as_a!(Some(expr), ASTKind::Identifier {
-                    name: _,
-                    sym: _
-                } => {
-                    if eval(expr.clone()).is_ok() {
-                        return Ok(expr.clone());
-                    } else {
-                        return Err(());
-                    }
+            if let ASTKind::ConstInt(cond_value) = cond_eval.kind {
+                let branch = if cond_value != 0 {
+                    middle.clone()
                 } else {
-                    Err(())
-                })
-            } else {
-                Err(())
+                    right.clone()
+                };
+
+                return eval(branch, constexpr);
             }
+
+            Ok(expr)
         }
 
-        ASTKind::ConstInt(_) => Ok(expr.clone()),
+        ASTKind::Negate { expr: inner }
+        | ASTKind::Complement { expr: inner }
+        | ASTKind::Not { expr: inner } => {
+            let eval_expr = eval(inner.clone(), constexpr)?;
+
+            if let ASTKind::ConstInt(value) = eval_expr.kind {
+                let result = match &node.kind {
+                    ASTKind::Negate { .. } => -value,
+                    ASTKind::Complement { .. } => !value,
+                    ASTKind::Not { .. } => ((value == 0) as i32).into(),
+                    _ => unreachable!(),
+                };
+
+                return Ok(Rc::new(AST {
+                    id: 0,
+                    kind: ASTKind::ConstInt(result),
+                    scope: node.scope.clone(),
+                }));
+            }
+
+            Ok(expr)
+        }
+
+        ASTKind::PreIncr { expr: inner }
+        | ASTKind::PostIncr { expr: inner }
+        | ASTKind::PreDecr { expr: inner }
+        | ASTKind::PostDecr { expr: inner } => {
+            if !is_lvalue(eval(inner.clone(), constexpr)?) {
+                return Err(());
+            }
+
+            Ok(expr)
+        }
+
+        ASTKind::ConstInt(_) => Ok(expr),
 
         _ => Err(()),
     }

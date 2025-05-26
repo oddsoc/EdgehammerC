@@ -23,6 +23,7 @@
 
 use std::env;
 
+mod ast;
 mod driver;
 mod expr;
 mod ir;
@@ -37,7 +38,7 @@ fn main() -> Result<(), ()> {
 
     if args.len() < 2 {
         eprintln!(
-            "Usage: {} [--lex|--parse|--codegen] [-S] [-o <output>] <c-file> [<c-file> ...]",
+            "Usage: {} [--lex|--parse|--validate|--codegen] [-S] [-o <output>] <c-file> [<c-file> ...]",
             args[0]
         );
         std::process::exit(1);

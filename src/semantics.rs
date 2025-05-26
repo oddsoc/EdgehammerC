@@ -21,14 +21,16 @@
  *  DEALINGS IN THE SOFTWARE.
  */
 
+use std::rc::Rc;
+
+use crate::ast::{ASTKind, AST};
 use crate::expr::*;
-use crate::parser::{ASTKind, ASTRef, ASTVec};
+use crate::scope::ScopeKind;
 
-fn walk(ast: &ASTRef) -> Result<(), ()> {
-    let node = ast.borrow();
-    let scope = node.scope.clone();
+fn walk(ast: &Rc<AST>) -> Result<(), ()> {
+    let scope = ast.scope.clone();
 
-    match &node.kind {
+    match &ast.kind {
         ASTKind::Function {
             params,
             block,
@@ -53,12 +55,12 @@ fn walk(ast: &ASTRef) -> Result<(), ()> {
         ASTKind::Variable { typ, init, .. } => {
             walk(typ)?;
             if let Some(init) = init {
-                _ = eval(init.clone())?;
+                _ = eval(init.clone(), false)?;
             }
             Ok(())
         }
         ASTKind::Return { expr } => {
-            _ = eval(expr.clone())?;
+            _ = eval(expr.clone(), false)?;
             Ok(())
         }
         ASTKind::If {
@@ -66,43 +68,143 @@ fn walk(ast: &ASTRef) -> Result<(), ()> {
             then,
             otherwise,
         } => {
-            _ = eval(cond.clone())?;
+            _ = eval(cond.clone(), false)?;
             walk(then)?;
             if let Some(otherwise) = otherwise {
                 walk(otherwise)?;
             }
             Ok(())
         }
-        ASTKind::ExprStmt { expr } => {
-            _ = eval(expr.clone())?;
+        ASTKind::DoWhile { cond, body } => {
+            _ = eval(cond.clone(), false)?;
+            walk(body)?;
             Ok(())
         }
-        ASTKind::GoTo { label } => {
-            let l = scope.borrow().find_label(label).and_then(|outer_rc| {
-                outer_rc
-                    .downcast::<ASTRef>()
-                    .ok()
-                    .map(|inner_rc| (*inner_rc).clone())
-            });
+        ASTKind::While { cond, body } => {
+            _ = eval(cond.clone(), false)?;
+            walk(body)?;
+            Ok(())
+        }
+        ASTKind::For {
+            init,
+            cond,
+            post,
+            body,
+        } => {
+            if let Some(init) = init {
+                walk(&init)?;
+            }
 
-            if l.is_some() {
+            if let Some(cond) = cond {
+                _ = eval(cond.clone(), false)?;
+            }
+
+            if let Some(post) = post {
+                walk(&post)?;
+            }
+
+            walk(&body)?;
+
+            Ok(())
+        }
+
+        ASTKind::Continue { .. } => {
+            if scope.borrow().kind == ScopeKind::Loop
+                || scope.borrow().loop_scope().is_some()
+            {
                 Ok(())
             } else {
                 Err(())
             }
         }
+
+        ASTKind::Break { .. } => {
+            if scope.borrow().kind == ScopeKind::Loop
+                || scope.borrow().kind == ScopeKind::Switch
+                || scope.borrow().loop_or_switch_scope().is_some()
+            {
+                Ok(())
+            } else {
+                Err(())
+            }
+        }
+        ASTKind::ExprStmt { expr } => {
+            let _ = eval(expr.clone(), false)?;
+            Ok(())
+        }
+        ASTKind::GoTo { label } => {
+            if scope.borrow().find_label(label).is_some() {
+                Ok(())
+            } else {
+                Err(())
+            }
+        }
+
         ASTKind::Label { stmt, .. } => {
             walk(stmt)?;
             Ok(())
         }
 
+        ASTKind::Case { expr, stmt, idx: _ } => {
+            if scope.borrow().kind == ScopeKind::Switch
+                || scope.borrow().switch_scope().is_some()
+            {
+                _ = eval(expr.clone(), true)?;
+                walk(stmt)?;
+                return Ok(());
+            }
+
+            Err(())
+        }
+
+        ASTKind::Default { stmt } => {
+            if scope.borrow().kind == ScopeKind::Switch
+                || scope.borrow().switch_scope().is_some()
+            {
+                walk(stmt)?;
+                return Ok(());
+            }
+
+            Err(())
+        }
+
+        ASTKind::Switch { cond, body, cases } => {
+            _ = eval(cond.clone(), false)?;
+            let mut case_values = std::collections::HashSet::new();
+            let mut has_default = false;
+            for case in cases {
+                match &case.kind {
+                    ASTKind::Case { expr, stmt, .. } => {
+                        let case_eval = eval(expr.clone(), true)?;
+                        if let ASTKind::ConstInt(value) = case_eval.kind {
+                            if !case_values.insert(value) {
+                                return Err(());
+                            }
+                        } else {
+                            return Err(());
+                        }
+                        walk(stmt)?;
+                    }
+                    ASTKind::Default { stmt } => {
+                        if has_default {
+                            return Err(());
+                        }
+                        has_default = true;
+                        walk(stmt)?;
+                    }
+                    _ => return Err(()),
+                }
+            }
+            walk(body)?;
+            Ok(())
+        }
         ASTKind::EmptyStmt => Ok(()),
 
         _ => Ok(()),
     }
 }
 
-pub fn analyse(ast: &ASTVec) -> Result<(), ()> {
+pub fn analyse(ast: &Vec<Rc<AST>>) -> Result<(), ()> {
     for node in ast {
         walk(node)?;
     }

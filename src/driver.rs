@@ -29,7 +29,7 @@ use crate::ir;
 use crate::lexer;
 use crate::parser;
 use crate::semantics::*;
-use crate::x64::codegen;
+use crate::x64::codegen::CodeGenerator;
 use crate::x64::out;
 
 #[derive(Debug, PartialEq, Clone)]
@@ -228,13 +228,15 @@ fn codegen_translation(translation: &Translation, arguments: &[Argument]) {
         panic!("semantic analysis failure");
     }
 
-    let ir = ir::generate(ast);
+    let mut irgen = ir::IrGenerator::new();
+    let ir = irgen.generate(ast);
 
     if arguments.iter().any(|i| matches!(i, Argument::Codegen)) {
         println!("TAC: {:#?}", ir);
     }
 
-    let asm = codegen::generate(ir);
+    let codegen = CodeGenerator::new();
+    let asm = codegen.generate(ir);
 
     if arguments.iter().any(|i| matches!(i, Argument::Codegen)) {
         println!("ASM: {:#?}", asm);
