@@ -22,20 +22,18 @@
  */
 
 use crate::ast::*;
-use crate::expr::*;
 use crate::scope::*;
 
-pub struct Analyser;
+pub struct Resolver;
 
-impl Analyser {
-    pub fn new() -> Analyser {
-        Analyser {}
+impl Resolver {
+    pub fn new() -> Resolver {
+        Resolver {}
     }
 
-    fn walk(&self, ast: &ASTRef) -> Result<(), String> {
-        let scope = ast.borrow().scope.clone();
-
-        match &ast.borrow().kind {
+    fn walk(&self, node: &ASTRef) -> Result<(), String> {
+        let scope = node.borrow().scope.clone();
+        match &node.borrow().kind {
             ASTKind::Function {
                 params, block, ty, ..
             } => {
@@ -57,12 +55,12 @@ impl Analyser {
             ASTKind::Variable { ty, init, .. } => {
                 self.walk(ty)?;
                 if let Some(init) = init {
-                    _ = eval(init.clone())?;
+                    self.walk(&init)?;
                 }
                 Ok(())
             }
             ASTKind::Return { expr } => {
-                _ = eval(expr.clone())?;
+                _ = self.walk(&expr)?;
                 Ok(())
             }
             ASTKind::If {
@@ -70,7 +68,7 @@ impl Analyser {
                 then,
                 otherwise,
             } => {
-                _ = eval(cond.clone())?;
+                self.walk(cond)?;
                 self.walk(then)?;
                 if let Some(otherwise) = otherwise {
                     self.walk(otherwise)?;
@@ -78,12 +76,12 @@ impl Analyser {
                 Ok(())
             }
             ASTKind::DoWhile { cond, body } => {
-                _ = eval(cond.clone())?;
+                self.walk(cond)?;
                 self.walk(body)?;
                 Ok(())
             }
             ASTKind::While { cond, body } => {
-                _ = eval(cond.clone())?;
+                self.walk(cond)?;
                 self.walk(body)?;
                 Ok(())
             }
@@ -98,7 +96,7 @@ impl Analyser {
                 }
 
                 if let Some(cond) = cond {
-                    _ = eval(cond.clone())?;
+                    self.walk(&cond)?;
                 }
 
                 if let Some(post) = post {
@@ -110,30 +108,18 @@ impl Analyser {
                 Ok(())
             }
 
-            ASTKind::Continue { .. } => {
-                if loop_scope(scope).is_some() {
-                    Ok(())
-                } else {
-                    Err("continue not in a loop".to_string())
-                }
-            }
+            ASTKind::Continue { .. } => Ok(()),
 
-            ASTKind::Break { .. } => {
-                if loop_or_switch_scope(scope).is_some() {
-                    Ok(())
-                } else {
-                    Err("break not in a loop or switch".to_string())
-                }
-            }
+            ASTKind::Break { .. } => Ok(()),
             ASTKind::ExprStmt { expr } => {
-                let _ = eval(expr.clone())?;
+                self.walk(expr)?;
                 Ok(())
             }
             ASTKind::GoTo { label } => {
                 if find_label(scope, label).is_some() {
                     Ok(())
                 } else {
-                    Err(format!("label {} not found", label))
+                    Err(format!("no such label: {}", label))
                 }
             }
 
@@ -143,72 +129,111 @@ impl Analyser {
             }
 
             ASTKind::Case { expr, stmt, idx: _ } => {
-                if switch_scope(scope).is_some() {
-                    let e = eval(expr.clone())?;
-
-                    match e.as_ref().borrow().kind {
-                        ASTKind::ConstInt(_) => {}
-                        _ => {
-                            return Err("not a const expression".to_string());
-                        }
-                    }
-
-                    self.walk(stmt)?;
-
-                    return Ok(());
-                }
-
-                Err("case outside of a switch statement".to_string())
+                self.walk(expr)?;
+                self.walk(stmt)?;
+                Ok(())
             }
 
             ASTKind::Default { stmt } => {
-                if switch_scope(scope).is_some() {
-                    self.walk(stmt)?;
-                    return Ok(());
-                }
+                self.walk(stmt)?;
 
-                Err("default outside of a switch statement".to_string())
+                Ok(())
             }
 
             ASTKind::Switch { cond, body, cases } => {
-                _ = eval(cond.clone())?;
-                let mut case_values = std::collections::HashSet::new();
-                let mut has_default = false;
-                for case in cases {
-                    match &case.borrow().kind {
-                        ASTKind::Case { expr, stmt, .. } => {
-                            let case_eval = eval(expr.clone())?;
-                            if let ASTKind::ConstInt(value) =
-                                case_eval.borrow().kind
-                            {
-                                if !case_values.insert(value) {
-                                    return Err(
-                                        "duplicate case expression".to_string()
-                                    );
-                                }
-                            } else {
-                                return Err(
-                                    "not a const expression".to_string()
-                                );
-                            }
-                            self.walk(stmt)?;
-                        }
-                        ASTKind::Default { stmt } => {
-                            if has_default {
-                                return Err(
-                                    "duplicate default case".to_string()
-                                );
-                            }
-                            has_default = true;
-                            self.walk(stmt)?;
-                        }
-                        _ => unreachable!(),
-                    }
-                }
+                self.walk(cond)?;
                 self.walk(body)?;
+
+                for case in cases {
+                    self.walk(case)?;
+                }
                 Ok(())
             }
+
             ASTKind::EmptyStmt => Ok(()),
+
+            ASTKind::Identifier { name, sym: _ } => {
+                if node.borrow().resolve_node().is_some() {
+                    Ok(())
+                } else {
+                    Err(format!("no such identifier: {}", name))
+                }
+            }
+
+            ASTKind::Assign { left, right } => {
+                self.walk(left)?;
+                self.walk(right)?;
+                Ok(())
+            }
+
+            ASTKind::Add { left, right }
+            | ASTKind::Subtract { left, right }
+            | ASTKind::Multiply { left, right }
+            | ASTKind::Divide { left, right }
+            | ASTKind::Modulo { left, right }
+            | ASTKind::LShift { left, right }
+            | ASTKind::RShift { left, right }
+            | ASTKind::And { left, right }
+            | ASTKind::Or { left, right }
+            | ASTKind::Xor { left, right } => {
+                self.walk(left)?;
+                self.walk(right)?;
+                Ok(())
+            }
+
+            ASTKind::LogicAnd { left, right }
+            | ASTKind::LogicOr { left, right } => {
+                self.walk(left)?;
+                self.walk(right)?;
+                Ok(())
+            }
+
+            ASTKind::Equal { left, right }
+            | ASTKind::NotEq { left, right }
+            | ASTKind::LessThan { left, right }
+            | ASTKind::LessOrEq { left, right }
+            | ASTKind::GreaterThan { left, right }
+            | ASTKind::GreaterOrEq { left, right } => {
+                self.walk(left)?;
+                self.walk(right)?;
+                Ok(())
+            }
+
+            ASTKind::Conditional {
+                left,
+                middle,
+                right,
+            } => {
+                self.walk(left)?;
+                self.walk(middle)?;
+                self.walk(right)?;
+                Ok(())
+            }
+
+            ASTKind::Negate { expr: inner }
+            | ASTKind::Complement { expr: inner }
+            | ASTKind::Not { expr: inner } => {
+                self.walk(inner)?;
+                Ok(())
+            }
+
+            ASTKind::PreIncr { expr: inner }
+            | ASTKind::PostIncr { expr: inner }
+            | ASTKind::PreDecr { expr: inner }
+            | ASTKind::PostDecr { expr: inner } => {
+                self.walk(inner)?;
+                Ok(())
+            }
+
+            ASTKind::Call { expr: callee, args } => {
+                self.walk(callee)?;
+
+                for arg in args {
+                    self.walk(arg)?
+                }
+
+                Ok(())
+            }
 
             _ => Ok(()),
         }

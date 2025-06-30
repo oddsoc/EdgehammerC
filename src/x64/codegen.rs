@@ -27,17 +27,17 @@ use std::rc::Rc;
 
 use crate::ir::TAC;
 
-macro_rules! asm_rc {
+macro_rules! new_node {
     ($variant:ident) => {
-        Rc::new(RefCell::new(Asm::$variant))
+        Rc::new(RefCell::new(Code::$variant))
     };
 
     ($variant:ident ( $($args:expr),* $(,)? )) => {
-        Rc::new(RefCell::new(Asm::$variant( $($args),* )))
+        Rc::new(RefCell::new(Code::$variant( $($args),* )))
     };
 
     ($variant:ident { $($field:ident : $value:expr),* $(,)? }) => {
-        Rc::new(RefCell::new(Asm::$variant {
+        Rc::new(RefCell::new(Code::$variant {
             $($field: $value),*
         }))
     };
@@ -56,116 +56,89 @@ pub enum CondCode {
 
 #[derive(Debug, PartialEq, Clone)]
 #[allow(dead_code)]
-pub enum Asm {
-    Function {
-        name: String,
-        stack: usize,
-        asm: AsmVec,
-    },
-    Ret,
-    Movb(AsmRef, AsmRef),
-    Movw(AsmRef, AsmRef),
-    Movl(AsmRef, AsmRef),
-    Movq(AsmRef, AsmRef),
-    Notl(AsmRef),
-    Negl(AsmRef),
-    IMull(AsmRef, AsmRef),
-    IDivl(AsmRef),
-    Addl(AsmRef, AsmRef),
-    Subl(AsmRef, AsmRef),
-    Shll(AsmRef, AsmRef),
-    Sarl(AsmRef, AsmRef),
-    Andl(AsmRef, AsmRef),
-    Orl(AsmRef, AsmRef),
-    Xorl(AsmRef, AsmRef),
-    Cmpl(AsmRef, AsmRef),
-    Imm(i64),
-    Var(usize, usize),
-    Label(usize),
-    Stack(usize, usize),
-    Jmp(AsmRef),
-    JmpCC {
-        cond: CondCode,
-        label: AsmRef,
-    },
-    SetCC {
-        cond: CondCode,
-        dst: AsmRef,
-    },
-    Cdq,
-    Al,
-    Ax,
-    Eax,
-    Rax,
-    Bl,
-    Bx,
-    Ebx,
-    Rbx,
-    Cl,
-    Cx,
-    Ecx,
-    Rcx,
-    Dl,
-    Dx,
-    Edx,
-    Rdx,
-    Sil,
-    Si,
-    Esi,
-    Rsi,
-    Dil,
-    Di,
-    Edi,
-    Rdi,
-    Spl,
-    Sp,
-    Esp,
-    Rsp,
-    Bpl,
-    Bp,
-    Ebp,
-    Rbp,
-    R8b,
-    R8w,
-    R8d,
+pub enum Register {
+    RAX,
+    RBX,
+    RCX,
+    RDX,
+    RSI,
+    RDI,
+    RSP,
+    RBP,
     R8,
-    R9b,
-    R9w,
-    R9d,
     R9,
-    R10b,
-    R10w,
-    R10d,
     R10,
-    R11b,
-    R11w,
-    R11d,
     R11,
-    R12b,
-    R12w,
-    R12d,
     R12,
-    R13b,
-    R13w,
-    R13d,
     R13,
-    R14b,
-    R14w,
-    R14d,
     R14,
-    R15b,
-    R15w,
-    R15d,
     R15,
 }
 
-type AsmRef = Rc<RefCell<Asm>>;
-type AsmVec = Vec<AsmRef>;
-type VarMap = HashMap<usize, AsmRef>;
-type LabelMap = HashMap<usize, AsmRef>;
+#[derive(Debug, PartialEq, Clone)]
+#[allow(dead_code)]
+pub enum Code {
+    Function {
+        name: String,
+        stack: usize,
+        code: CodeVec,
+    },
+    Ret,
+    Mov(CodeRef, CodeRef, usize),
+    MovSignExt(CodeRef, CodeRef, usize),
+    MovZeroExt(CodeRef, CodeRef, usize),
+    Not(CodeRef, usize),
+    Neg(CodeRef, usize),
+    IMul(CodeRef, CodeRef, usize),
+    IDiv(CodeRef, usize),
+    Add(CodeRef, CodeRef, usize),
+    Sub(CodeRef, CodeRef, usize),
+    Shl(CodeRef, CodeRef, usize),
+    Sar(CodeRef, CodeRef, usize),
+    And(CodeRef, CodeRef, usize),
+    Or(CodeRef, CodeRef, usize),
+    Xor(CodeRef, CodeRef, usize),
+    Cmp(CodeRef, CodeRef, usize),
+    Push(CodeRef),
+    Call(CodeRef),
+    Imm {
+        val: i64,
+        signed: bool,
+        size: usize,
+    },
+    Var {
+        off: i32,
+        signed: bool,
+        size: usize,
+    },
+    Reg {
+        reg: Register,
+        signed: bool,
+        size: usize,
+    },
+    Label(usize),
+    FunctionRef(String, bool),
+    PushBytes(usize),
+    PopBytes(usize),
+    Jmp(CodeRef),
+    JmpCC {
+        cond: CondCode,
+        label: CodeRef,
+    },
+    SetCC {
+        cond: CondCode,
+        dst: CodeRef,
+    },
+    Cdq,
+}
+
+type CodeRef = Rc<RefCell<Code>>;
+type CodeVec = Vec<CodeRef>;
+type VarMap = HashMap<usize, CodeRef>;
+type LabelMap = HashMap<usize, CodeRef>;
 
 pub struct CodeGenerator {
-    asm_vec: AsmVec,
+    code_vec: CodeVec,
     var_map: VarMap,
     label_map: LabelMap,
 }
@@ -173,190 +146,181 @@ pub struct CodeGenerator {
 impl CodeGenerator {
     pub fn new() -> Self {
         Self {
-            asm_vec: vec![],
+            code_vec: vec![],
             var_map: VarMap::new(),
             label_map: LabelMap::new(),
         }
     }
 
-    fn create_var(&mut self, idx: usize) -> AsmRef {
-        self.var_map
-            .entry(idx)
-            .or_insert_with(|| asm_rc!(Var(idx, 4)))
-            .clone()
-    }
-
-    fn create_label(&mut self, idx: usize) -> AsmRef {
+    fn new_label(&mut self, idx: usize) -> CodeRef {
         self.label_map
             .entry(idx)
-            .or_insert_with(|| asm_rc!(Label(idx)))
+            .or_insert_with(|| new_node!(Label(idx)))
             .clone()
     }
 
-    fn is_immediate(asm: &AsmRef) -> bool {
-        matches!(*asm.borrow(), Asm::Imm(_))
-    }
-
     #[allow(dead_code)]
-    fn is_variable(asm: &AsmRef) -> bool {
-        matches!(*asm.borrow(), Asm::Var(_, _))
-    }
-
-    #[allow(dead_code)]
-    fn is_register(asm: &AsmRef) -> bool {
-        match *asm.borrow() {
-            Asm::Al
-            | Asm::Ax
-            | Asm::Eax
-            | Asm::Rax
-            | Asm::Bl
-            | Asm::Bx
-            | Asm::Ebx
-            | Asm::Rbx
-            | Asm::Cl
-            | Asm::Cx
-            | Asm::Ecx
-            | Asm::Rcx
-            | Asm::Dl
-            | Asm::Dx
-            | Asm::Edx
-            | Asm::Rdx
-            | Asm::Sil
-            | Asm::Si
-            | Asm::Esi
-            | Asm::Rsi
-            | Asm::Dil
-            | Asm::Di
-            | Asm::Edi
-            | Asm::Rdi
-            | Asm::Spl
-            | Asm::Sp
-            | Asm::Esp
-            | Asm::Rsp
-            | Asm::Bpl
-            | Asm::Bp
-            | Asm::Ebp
-            | Asm::Rbp
-            | Asm::R8b
-            | Asm::R8w
-            | Asm::R8d
-            | Asm::R8
-            | Asm::R9b
-            | Asm::R9w
-            | Asm::R9d
-            | Asm::R9
-            | Asm::R10b
-            | Asm::R10w
-            | Asm::R10d
-            | Asm::R10
-            | Asm::R11b
-            | Asm::R11w
-            | Asm::R11d
-            | Asm::R11
-            | Asm::R12b
-            | Asm::R12w
-            | Asm::R12d
-            | Asm::R12
-            | Asm::R13b
-            | Asm::R13w
-            | Asm::R13d
-            | Asm::R13
-            | Asm::R14b
-            | Asm::R14w
-            | Asm::R14d
-            | Asm::R14
-            | Asm::R15b
-            | Asm::R15w
-            | Asm::R15d
-            | Asm::R15 => true,
-            _ => false,
-        }
-    }
-
-    #[allow(dead_code)]
-    fn unop_fixup(&mut self, operand: &mut AsmRef, arg_reg: Option<Asm>) {
+    fn unop_fixup(&mut self, operand: &mut CodeRef, arg_reg: Option<Code>) {
         if let Some(reg_val) = arg_reg {
             let reg = Rc::new(RefCell::new(reg_val));
-            let mov = self.mov_op(operand.clone(), reg.clone());
-            self.asm_vec.push(mov);
+            let mov = self.new_direct_mov(operand.clone(), reg.clone());
+            self.emit(mov);
             *operand = reg.clone();
         }
     }
 
     fn binop_fixup(
         &mut self,
-        lhs: &mut AsmRef,
-        rhs: &AsmRef,
-        src_reg: Option<Asm>,
-        dst_reg: Option<Asm>,
-        tmp_reg: Asm,
-    ) -> AsmRef {
+        lhs: &mut CodeRef,
+        rhs: &CodeRef,
+        src_reg: Option<CodeRef>,
+        dst_reg: Option<CodeRef>,
+        tmp_reg: CodeRef,
+    ) -> CodeRef {
         let mut dst = rhs.clone();
 
         if src_reg.is_some() || dst_reg.is_some() {
             if let Some(src_val) = src_reg {
-                let src = Rc::new(RefCell::new(src_val));
-                let mov = self.mov_op(lhs.clone(), src.clone());
-                self.asm_vec.push(mov);
+                let src = src_val.clone();
+                let mov = self.new_direct_mov(lhs.clone(), src.clone());
+                self.emit(mov);
                 *lhs = src;
             }
             if let Some(dst_val) = dst_reg {
-                let tmp = Rc::new(RefCell::new(dst_val));
-                let mov = self.mov_op(rhs.clone(), tmp.clone());
-                self.asm_vec.push(mov);
+                let tmp = dst_val.clone();
+                let mov = self.new_direct_mov(rhs.clone(), tmp.clone());
+                self.emit(mov);
                 dst = tmp.clone();
             }
-        } else if Self::is_variable(lhs) && Self::is_variable(rhs) {
-            let tmp = Rc::new(RefCell::new(tmp_reg.clone()));
-            let mov = self.mov_op(rhs.clone(), tmp.clone());
-            self.asm_vec.push(mov);
-            dst = tmp.clone();
+        } else if is_mem_addr(lhs) && is_mem_addr(rhs) {
+            let tmp = tmp_reg.clone();
+            let mov = self.new_direct_mov(lhs.clone(), tmp.clone());
+            self.emit(mov);
+            *lhs = tmp.clone();
         }
 
-        if Self::is_immediate(rhs) {
-            let tmp = Rc::new(RefCell::new(tmp_reg));
-            let mov = self.mov_op(rhs.clone(), tmp.clone());
-            self.asm_vec.push(mov);
+        if is_immediate(rhs) {
+            let tmp = tmp_reg.clone();
+            let mov = self.new_direct_mov(rhs.clone(), tmp.clone());
+            self.emit(mov);
             dst = tmp.clone();
         }
 
         dst
     }
 
-    fn mov_op(&self, src: AsmRef, dst: AsmRef) -> AsmRef {
-        match *dst.borrow() {
-            Asm::Cl => {
-                asm_rc!(Movb(src.clone(), dst.clone()))
-            }
+    fn operand_size(operand: CodeRef) -> usize {
+        match &*operand.borrow() {
+            Code::Reg { size, .. }
+            | Code::Imm { size, .. }
+            | Code::Var { size, .. } => *size,
             _ => {
-                asm_rc!(Movl(src.clone(), dst.clone()))
+                unreachable!();
             }
         }
     }
 
-    fn create_binop<F>(
+    fn new_reg_for(reg: Register, src: CodeRef) -> CodeRef {
+        match &*src.borrow() {
+            Code::Reg { size, signed, .. }
+            | Code::Imm { size, signed, .. }
+            | Code::Var { size, signed, .. } => {
+                new_node!(Reg {
+                    reg: reg,
+                    signed: *signed,
+                    size: *size
+                })
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    fn new_direct_mov(&self, src: CodeRef, dst: CodeRef) -> CodeRef {
+        match &*src.borrow() {
+            Code::Reg {
+                size: src_size,
+                signed: src_signed,
+                ..
+            }
+            | Code::Imm {
+                size: src_size,
+                signed: src_signed,
+                ..
+            }
+            | Code::Var {
+                size: src_size,
+                signed: src_signed,
+                ..
+            } => match &*dst.borrow() {
+                Code::Reg {
+                    size: dst_size,
+                    signed: _dst_signed,
+                    ..
+                }
+                | Code::Imm {
+                    size: dst_size,
+                    signed: _dst_signed,
+                    ..
+                }
+                | Code::Var {
+                    size: dst_size,
+                    signed: _dst_signed,
+                    ..
+                } => {
+                    if *dst_size > *src_size {
+                        if *src_signed {
+                            return new_node!(MovSignExt(
+                                src.clone(),
+                                dst.clone(),
+                                *dst_size
+                            ));
+                        } else {
+                            return new_node!(MovZeroExt(
+                                src.clone(),
+                                dst.clone(),
+                                *dst_size
+                            ));
+                        }
+                    } else {
+                        return new_node!(Mov(
+                            src.clone(),
+                            dst.clone(),
+                            *dst_size
+                        ));
+                    }
+                }
+                _ => unreachable!(),
+            },
+            _ => unreachable!(),
+        }
+    }
+
+    fn new_binop<F>(
         &mut self,
         op_constructor: F,
-        src: &mut AsmRef,
-        final_dst: &AsmRef,
-        tmp_reg: Asm,
-        src_reg: Option<Asm>,
-        dst_reg: Option<Asm>,
-    ) -> AsmRef
+        src: &mut CodeRef,
+        final_dst: &CodeRef,
+        tmp_reg: CodeRef,
+        src_reg: Option<CodeRef>,
+        dst_reg: Option<CodeRef>,
+    ) -> CodeRef
     where
-        F: Fn(AsmRef, AsmRef) -> Asm,
+        F: Fn(CodeRef, CodeRef, usize) -> Code,
     {
         let dst = self.binop_fixup(src, final_dst, src_reg, dst_reg, tmp_reg);
 
-        let mut op =
-            Rc::new(RefCell::new(op_constructor(src.clone(), dst.clone())));
+        let mut op = Rc::new(RefCell::new(op_constructor(
+            src.clone(),
+            dst.clone(),
+            Self::operand_size(dst.clone()),
+        )));
 
         if dst != *final_dst {
             match *final_dst.borrow() {
-                Asm::Imm(_) => {}
+                Code::Imm { .. } => {}
                 _ => {
-                    self.asm_vec.push(op);
-                    op = self.mov_op(dst.clone(), final_dst.clone());
+                    self.emit(op);
+                    op = self.new_direct_mov(dst.clone(), final_dst.clone());
                 }
             }
         }
@@ -364,307 +328,535 @@ impl CodeGenerator {
         op
     }
 
-    fn create_mov(&mut self, src: &mut AsmRef, dst: &AsmRef) -> AsmRef {
-        self.create_binop(Asm::Movl, src, dst, Asm::R10d, None, None)
+    fn new_mov(&mut self, src: &mut CodeRef, final_dst: &CodeRef) -> CodeRef {
+        let dst = self.binop_fixup(
+            src,
+            final_dst,
+            None,
+            None,
+            Self::new_reg_for(Register::R10, final_dst.clone()),
+        );
+
+        let mut op = self.new_direct_mov(src.clone(), dst.clone());
+
+        if dst != *final_dst {
+            self.emit(op);
+            op = self.new_direct_mov(dst, final_dst.clone());
+        }
+
+        op
     }
 
-    fn create_addl(&mut self, src: &mut AsmRef, dst: &AsmRef) -> AsmRef {
-        self.create_binop(Asm::Addl, src, dst, Asm::R10d, None, None)
-    }
-
-    fn create_subl(&mut self, src: &mut AsmRef, dst: &AsmRef) -> AsmRef {
-        self.create_binop(Asm::Subl, src, dst, Asm::R10d, None, None)
-    }
-
-    fn create_shll(&mut self, src: &mut AsmRef, dst: &AsmRef) -> AsmRef {
-        self.create_binop(Asm::Shll, src, dst, Asm::R10d, Some(Asm::Cl), None)
-    }
-
-    fn create_sarl(&mut self, src: &mut AsmRef, dst: &AsmRef) -> AsmRef {
-        self.create_binop(Asm::Sarl, src, dst, Asm::R10d, Some(Asm::Cl), None)
-    }
-
-    fn create_and(&mut self, src: &mut AsmRef, dst: &AsmRef) -> AsmRef {
-        self.create_binop(Asm::Andl, src, dst, Asm::R10d, None, None)
-    }
-
-    fn create_or(&mut self, src: &mut AsmRef, dst: &AsmRef) -> AsmRef {
-        self.create_binop(Asm::Orl, src, dst, Asm::R10d, None, None)
-    }
-
-    fn create_xor(&mut self, src: &mut AsmRef, dst: &AsmRef) -> AsmRef {
-        self.create_binop(Asm::Xorl, src, dst, Asm::R10d, None, None)
-    }
-
-    fn create_cmpl(&mut self, src: &mut AsmRef, dst: &AsmRef) -> AsmRef {
-        self.create_binop(Asm::Cmpl, src, dst, Asm::R10d, None, None)
-    }
-
-    fn create_imull(&mut self, src: &mut AsmRef, dst: &AsmRef) -> AsmRef {
-        self.create_binop(
-            Asm::IMull,
+    fn new_add(&mut self, src: &mut CodeRef, dst: &CodeRef) -> CodeRef {
+        self.new_binop(
+            Code::Add,
             src,
             dst,
-            Asm::R10d,
+            Self::new_reg_for(Register::R10, dst.clone()),
             None,
-            Some(Asm::R11d),
+            None,
         )
     }
 
-    fn create_idiv(&mut self, src: AsmRef) -> AsmRef {
-        if Self::is_immediate(&src) {
-            let tmp = asm_rc!(R10d);
-            let mov = self.mov_op(src, tmp.clone());
-            self.asm_vec.push(mov);
-            asm_rc!(IDivl(tmp.clone()))
+    fn new_sub(&mut self, src: &mut CodeRef, dst: &CodeRef) -> CodeRef {
+        self.new_binop(
+            Code::Sub,
+            src,
+            dst,
+            Self::new_reg_for(Register::R10, dst.clone()),
+            None,
+            None,
+        )
+    }
+
+    fn new_shl(&mut self, src: &mut CodeRef, dst: &CodeRef) -> CodeRef {
+        self.new_binop(
+            Code::Shl,
+            src,
+            dst,
+            Self::new_reg_for(Register::R10, dst.clone()),
+            Some(new_node!(Reg {
+                reg: Register::RCX,
+                signed: false,
+                size: 1
+            })),
+            None,
+        )
+    }
+
+    fn new_sar(&mut self, src: &mut CodeRef, dst: &CodeRef) -> CodeRef {
+        self.new_binop(
+            Code::Sar,
+            src,
+            dst,
+            Self::new_reg_for(Register::R10, dst.clone()),
+            Some(new_node!(Reg {
+                reg: Register::RCX,
+                signed: false,
+                size: 1
+            })),
+            None,
+        )
+    }
+
+    fn new_and(&mut self, src: &mut CodeRef, dst: &CodeRef) -> CodeRef {
+        self.new_binop(
+            Code::And,
+            src,
+            dst,
+            Self::new_reg_for(Register::R10, dst.clone()),
+            None,
+            None,
+        )
+    }
+
+    fn new_or(&mut self, src: &mut CodeRef, dst: &CodeRef) -> CodeRef {
+        self.new_binop(
+            Code::Or,
+            src,
+            dst,
+            Self::new_reg_for(Register::R10, dst.clone()),
+            None,
+            None,
+        )
+    }
+
+    fn new_xor(&mut self, src: &mut CodeRef, dst: &CodeRef) -> CodeRef {
+        self.new_binop(
+            Code::Xor,
+            src,
+            dst,
+            Self::new_reg_for(Register::R10, dst.clone()),
+            None,
+            None,
+        )
+    }
+
+    fn new_cmp(&mut self, src: &mut CodeRef, dst: &CodeRef) -> CodeRef {
+        self.new_binop(
+            Code::Cmp,
+            src,
+            dst,
+            Self::new_reg_for(Register::R10, dst.clone()),
+            None,
+            None,
+        )
+    }
+
+    fn new_imul(&mut self, src: &mut CodeRef, dst: &CodeRef) -> CodeRef {
+        self.new_binop(
+            Code::IMul,
+            src,
+            dst,
+            Self::new_reg_for(Register::R10, dst.clone()),
+            None,
+            Some(Self::new_reg_for(Register::R11, dst.clone())),
+        )
+    }
+
+    fn new_idiv(&mut self, src: CodeRef) -> CodeRef {
+        if is_immediate(&src) {
+            let tmp = Self::new_reg_for(Register::R10, src.clone());
+            let mov = self.new_direct_mov(src.clone(), tmp.clone());
+            self.emit(mov);
+            new_node!(IDiv(tmp.clone(), Self::operand_size(tmp.clone())))
         } else {
-            asm_rc!(IDivl(src.clone()))
+            new_node!(IDiv(src.clone(), Self::operand_size(src.clone())))
         }
     }
 
-    fn transform_expr(&mut self, node: Rc<TAC>) -> AsmRef {
+    #[allow(unused_variables)]
+    fn transform_expr(&mut self, node: Rc<TAC>) -> CodeRef {
         match &*node {
             TAC::ConstInt(val) => {
-                return asm_rc!(Imm(*val));
+                let imm = new_node!(Imm {
+                    val: *val,
+                    signed: true,
+                    size: 4
+                });
+                return imm;
             }
-            TAC::Var(idx, _) => {
-                return self.create_var(*idx);
+            TAC::Var(ty, off) => {
+                let ty_val = ty.borrow();
+                return self
+                    .var_map
+                    .entry(*off)
+                    .or_insert_with(|| {
+                        new_node!(Var {
+                            off: *off as i32,
+                            signed: ty_val.signed,
+                            size: ty_val.size
+                        })
+                    })
+                    .clone();
             }
-            TAC::Inv { src, dst } => {
+            TAC::Inv { ty, src, dst } => {
                 let src = self.transform_expr(src.clone());
                 let dst = self.transform_expr(dst.clone());
-                let mov = self.create_mov(&mut src.clone(), &dst);
-                self.asm_vec.push(mov);
-                return asm_rc!(Notl(dst.clone()));
+                let mov = self.new_mov(&mut src.clone(), &dst);
+                self.emit(mov);
+                return new_node!(Not(
+                    dst.clone(),
+                    Self::operand_size(dst.clone())
+                ));
             }
-            TAC::Neg { src, dst } => {
+            TAC::Neg { ty, src, dst } => {
                 let src = self.transform_expr(src.clone());
                 let dst = self.transform_expr(dst.clone());
-                let mov = self.create_mov(&mut src.clone(), &dst);
-                self.asm_vec.push(mov);
-                return asm_rc!(Negl(dst.clone()));
+                let mov = self.new_mov(&mut src.clone(), &dst);
+                self.emit(mov);
+                return new_node!(Neg(
+                    dst.clone(),
+                    Self::operand_size(dst.clone())
+                ));
             }
-            TAC::Not { src, dst } => {
+            TAC::Not { ty, src, dst } => {
                 let x = self.transform_expr(src.clone());
-                let imm = asm_rc!(Imm(0));
-                let cmp = self.create_cmpl(&mut imm.clone(), &x);
-                self.asm_vec.push(cmp);
+                let imm = new_node!(Imm {
+                    val: 0,
+                    signed: true,
+                    size: Self::operand_size(x.clone())
+                });
+                let cmp = self.new_cmp(&mut imm.clone(), &x);
+                self.emit(cmp);
                 let dst = self.transform_expr(dst.clone());
-                let mov = self.create_mov(&mut imm.clone(), &dst);
-                self.asm_vec.push(mov);
-                return asm_rc!(SetCC {
+                let mov = self.new_mov(&mut imm.clone(), &dst);
+                self.emit(mov);
+                return new_node!(SetCC {
                     cond: CondCode::E,
                     dst: dst.clone(),
                 });
             }
-            TAC::Mul { lhs, rhs, dst } => {
+            TAC::Mul { ty, lhs, rhs, dst } => {
                 let mut x = self.transform_expr(lhs.clone());
                 let dst = self.transform_expr(dst.clone());
-                let mov = self.create_mov(&mut x, &dst);
-                self.asm_vec.push(mov);
+                let mov = self.new_mov(&mut x, &dst);
+                self.emit(mov);
                 let mut y = self.transform_expr(rhs.clone());
-                return self.create_imull(&mut y, &dst);
+                return self.new_imul(&mut y, &dst);
             }
-            TAC::IDiv { lhs, rhs, dst } => {
+            TAC::IDiv { ty, lhs, rhs, dst } => {
                 let mut x = self.transform_expr(lhs.clone());
-                let reg = asm_rc!(Eax);
-                let mov = self.create_mov(&mut x, &reg);
-                self.asm_vec.push(mov);
-                let cdq = asm_rc!(Cdq);
-                self.asm_vec.push(cdq);
+                let reg = Self::new_reg_for(Register::RAX, x.clone());
+                let mov = self.new_mov(&mut x, &reg);
+                self.emit(mov);
+                let cdq = new_node!(Cdq);
+                self.emit(cdq);
                 let y = self.transform_expr(rhs.clone());
-                let idiv = self.create_idiv(y);
-                self.asm_vec.push(idiv);
+                let idiv = self.new_idiv(y);
+                self.emit(idiv);
                 let dst = self.transform_expr(dst.clone());
-                return self.create_mov(&mut asm_rc!(Eax), &dst);
+                return self.new_mov(
+                    &mut Self::new_reg_for(Register::RAX, dst.clone()),
+                    &dst,
+                );
             }
-            TAC::Mod { lhs, rhs, dst } => {
+            TAC::Mod { ty, lhs, rhs, dst } => {
                 let mut x = self.transform_expr(lhs.clone());
-                let reg = asm_rc!(Eax);
-                let mov = self.create_mov(&mut x, &reg);
-                self.asm_vec.push(mov);
-                let cdq = asm_rc!(Cdq);
-                self.asm_vec.push(cdq);
+                let reg = Self::new_reg_for(Register::RAX, x.clone());
+                let mov = self.new_mov(&mut x, &reg);
+                self.emit(mov);
+                let cdq = new_node!(Cdq);
+                self.emit(cdq);
                 let y = self.transform_expr(rhs.clone());
-                let idiv = self.create_idiv(y);
-                self.asm_vec.push(idiv);
+                let idiv = self.new_idiv(y);
+                self.emit(idiv);
                 let dst = self.transform_expr(dst.clone());
-                return self.create_mov(&mut asm_rc!(Edx), &dst);
+                return self.new_mov(
+                    &mut Self::new_reg_for(Register::RDX, dst.clone()),
+                    &dst,
+                );
             }
-            TAC::Add { lhs, rhs, dst } => {
+            TAC::Add { ty, lhs, rhs, dst } => {
                 let mut x = self.transform_expr(lhs.clone());
                 let dst = self.transform_expr(dst.clone());
-                let mov = self.create_mov(&mut x, &dst);
-                self.asm_vec.push(mov);
+                let mov = self.new_mov(&mut x, &dst);
+                self.emit(mov);
                 let mut y = self.transform_expr(rhs.clone());
-                return self.create_addl(&mut y, &dst);
+                return self.new_add(&mut y, &dst);
             }
-            TAC::Sub { lhs, rhs, dst } => {
+            TAC::Sub { ty, lhs, rhs, dst } => {
                 let mut x = self.transform_expr(lhs.clone());
                 let dst = self.transform_expr(dst.clone());
-                let mov = self.create_mov(&mut x, &dst);
-                self.asm_vec.push(mov);
+                let mov = self.new_mov(&mut x, &dst);
+                self.emit(mov);
                 let mut y = self.transform_expr(rhs.clone());
-                return self.create_subl(&mut y, &dst);
+                return self.new_sub(&mut y, &dst);
             }
-            TAC::LShift { lhs, rhs, dst } => {
+            TAC::LShift { ty, lhs, rhs, dst } => {
                 let mut x = self.transform_expr(lhs.clone());
                 let dst = self.transform_expr(dst.clone());
-                let mov = self.create_mov(&mut x, &dst);
-                self.asm_vec.push(mov);
+                let mov = self.new_mov(&mut x, &dst);
+                self.emit(mov);
                 let mut y = self.transform_expr(rhs.clone());
-                return self.create_shll(&mut y, &dst);
+                return self.new_shl(&mut y, &dst);
             }
-            TAC::RShift { lhs, rhs, dst } => {
+            TAC::RShift { ty, lhs, rhs, dst } => {
                 let mut x = self.transform_expr(lhs.clone());
                 let dst = self.transform_expr(dst.clone());
-                let mov = self.create_mov(&mut x, &dst);
-                self.asm_vec.push(mov);
+                let mov = self.new_mov(&mut x, &dst);
+                self.emit(mov);
                 let mut y = self.transform_expr(rhs.clone());
-                return self.create_sarl(&mut y, &dst);
+                return self.new_sar(&mut y, &dst);
             }
-            TAC::And { lhs, rhs, dst } => {
+            TAC::And { ty, lhs, rhs, dst } => {
                 let mut x = self.transform_expr(lhs.clone());
                 let dst = self.transform_expr(dst.clone());
-                let mov = self.create_mov(&mut x, &dst);
-                self.asm_vec.push(mov);
+                let mov = self.new_mov(&mut x, &dst);
+                self.emit(mov);
                 let mut y = self.transform_expr(rhs.clone());
-                return self.create_and(&mut y, &dst);
+                return self.new_and(&mut y, &dst);
             }
-            TAC::Or { lhs, rhs, dst } => {
+            TAC::Or { ty, lhs, rhs, dst } => {
                 let mut x = self.transform_expr(lhs.clone());
                 let dst = self.transform_expr(dst.clone());
-                let mov = self.create_mov(&mut x, &dst);
-                self.asm_vec.push(mov);
+                let mov = self.new_mov(&mut x, &dst);
+                self.emit(mov);
                 let mut y = self.transform_expr(rhs.clone());
-                return self.create_or(&mut y, &dst);
+                return self.new_or(&mut y, &dst);
             }
-            TAC::Xor { lhs, rhs, dst } => {
+            TAC::Xor { ty, lhs, rhs, dst } => {
                 let mut x = self.transform_expr(lhs.clone());
                 let dst = self.transform_expr(dst.clone());
-                let mov = self.create_mov(&mut x, &dst);
-                self.asm_vec.push(mov);
+                let mov = self.new_mov(&mut x, &dst);
+                self.emit(mov);
                 let mut y = self.transform_expr(rhs.clone());
-                return self.create_xor(&mut y, &dst);
+                return self.new_xor(&mut y, &dst);
             }
-            TAC::LessThan { lhs, rhs, dst } => {
+            TAC::LessThan { ty, lhs, rhs, dst } => {
                 let x = self.transform_expr(lhs.clone());
                 let y = self.transform_expr(rhs.clone());
-                let cmp = self.create_cmpl(&mut y.clone(), &x);
+                let cmp = self.new_cmp(&mut y.clone(), &x);
                 let dst = self.transform_expr(dst.clone());
-                self.asm_vec.push(cmp);
-                let mut imm = asm_rc!(Imm(0));
-                let mov = self.create_mov(&mut imm, &dst);
-                self.asm_vec.push(mov);
-                return asm_rc!(SetCC {
+                self.emit(cmp);
+                let mut imm = new_node!(Imm {
+                    val: 0,
+                    signed: true,
+                    size: Self::operand_size(dst.clone())
+                });
+                let mov = self.new_mov(&mut imm, &dst);
+                self.emit(mov);
+                return new_node!(SetCC {
                     cond: CondCode::L,
                     dst: dst.clone(),
                 });
             }
-            TAC::LessOrEq { lhs, rhs, dst } => {
+            TAC::LessOrEq { ty, lhs, rhs, dst } => {
                 let x = self.transform_expr(lhs.clone());
                 let y = self.transform_expr(rhs.clone());
-                let cmp = self.create_cmpl(&mut y.clone(), &x);
+                let cmp = self.new_cmp(&mut y.clone(), &x);
                 let dst = self.transform_expr(dst.clone());
-                self.asm_vec.push(cmp);
-                let mut imm = asm_rc!(Imm(0));
-                let mov = self.create_mov(&mut imm, &dst);
-                self.asm_vec.push(mov);
-                return asm_rc!(SetCC {
+                self.emit(cmp);
+                let mut imm = new_node!(Imm {
+                    val: 0,
+                    signed: true,
+                    size: Self::operand_size(dst.clone())
+                });
+                let mov = self.new_mov(&mut imm, &dst);
+                self.emit(mov);
+                return new_node!(SetCC {
                     cond: CondCode::LE,
                     dst: dst.clone(),
                 });
             }
-            TAC::GreaterThan { lhs, rhs, dst } => {
+            TAC::GreaterThan { ty, lhs, rhs, dst } => {
                 let x = self.transform_expr(lhs.clone());
                 let y = self.transform_expr(rhs.clone());
-                let cmp = self.create_cmpl(&mut y.clone(), &x);
+                let cmp = self.new_cmp(&mut y.clone(), &x);
                 let dst = self.transform_expr(dst.clone());
-                self.asm_vec.push(cmp);
-                let mut imm = asm_rc!(Imm(0));
-                let mov = self.create_mov(&mut imm, &dst);
-                self.asm_vec.push(mov);
-                return asm_rc!(SetCC {
+                self.emit(cmp);
+                let mut imm = new_node!(Imm {
+                    val: 0,
+                    signed: true,
+                    size: Self::operand_size(dst.clone())
+                });
+                let mov = self.new_mov(&mut imm, &dst);
+                self.emit(mov);
+                return new_node!(SetCC {
                     cond: CondCode::G,
                     dst: dst.clone(),
                 });
             }
-            TAC::GreaterOrEq { lhs, rhs, dst } => {
+            TAC::GreaterOrEq { ty, lhs, rhs, dst } => {
                 let x = self.transform_expr(lhs.clone());
                 let y = self.transform_expr(rhs.clone());
-                let cmp = self.create_cmpl(&mut y.clone(), &x);
+                let cmp = self.new_cmp(&mut y.clone(), &x);
                 let dst = self.transform_expr(dst.clone());
-                self.asm_vec.push(cmp);
-                let mut imm = asm_rc!(Imm(0));
-                let mov = self.create_mov(&mut imm, &dst);
-                self.asm_vec.push(mov);
-                return asm_rc!(SetCC {
+                self.emit(cmp);
+                let mut imm = new_node!(Imm {
+                    val: 0,
+                    signed: true,
+                    size: Self::operand_size(dst.clone())
+                });
+                let mov = self.new_mov(&mut imm, &dst);
+                self.emit(mov);
+                return new_node!(SetCC {
                     cond: CondCode::GE,
                     dst: dst.clone(),
                 });
             }
-            TAC::Equal { lhs, rhs, dst } => {
+            TAC::Equal { ty, lhs, rhs, dst } => {
                 let x = self.transform_expr(lhs.clone());
                 let y = self.transform_expr(rhs.clone());
-                let cmp = self.create_cmpl(&mut y.clone(), &x);
-                self.asm_vec.push(cmp);
+                let cmp = self.new_cmp(&mut y.clone(), &x);
+                self.emit(cmp);
                 let dst = self.transform_expr(dst.clone());
-                let mut imm = asm_rc!(Imm(0));
-                let mov = self.create_mov(&mut imm, &dst);
-                self.asm_vec.push(mov);
-                return asm_rc!(SetCC {
+                let mut imm = new_node!(Imm {
+                    val: 0,
+                    signed: true,
+                    size: Self::operand_size(dst.clone())
+                });
+                let mov = self.new_mov(&mut imm, &dst);
+                self.emit(mov);
+                return new_node!(SetCC {
                     cond: CondCode::E,
                     dst: dst.clone(),
                 });
             }
-            TAC::NotEq { lhs, rhs, dst } => {
+            TAC::NotEq { ty, lhs, rhs, dst } => {
                 let x = self.transform_expr(lhs.clone());
                 let y = self.transform_expr(rhs.clone());
-                let cmp = self.create_cmpl(&mut y.clone(), &x);
+                let cmp = self.new_cmp(&mut y.clone(), &x);
                 let dst = self.transform_expr(dst.clone());
-                self.asm_vec.push(cmp);
-                let mut imm = asm_rc!(Imm(0));
-                let mov = self.create_mov(&mut imm, &dst);
-                self.asm_vec.push(mov);
-                return asm_rc!(SetCC {
+                self.emit(cmp);
+                let mut imm = new_node!(Imm {
+                    val: 0,
+                    signed: true,
+                    size: Self::operand_size(dst.clone())
+                });
+                let mov = self.new_mov(&mut imm, &dst);
+                self.emit(mov);
+                return new_node!(SetCC {
                     cond: CondCode::NE,
                     dst: dst.clone(),
                 });
             }
-            TAC::Copy { src, dst } => {
+            TAC::Copy { ty, src, dst } => {
                 let mut src = self.transform_expr(src.clone());
                 let dst = self.transform_expr(dst.clone());
-                return self.create_mov(&mut src, &dst);
+                return self.new_mov(&mut src, &dst);
             }
             TAC::Jump(label) => {
                 let label = self.transform_expr(label.clone());
-                return asm_rc!(Jmp(label));
+                return new_node!(Jmp(label));
             }
-            TAC::JumpOnZero { expr, label } => {
+            TAC::JumpOnZero { ty, expr, label } => {
                 let src = self.transform_expr(expr.clone());
-                let imm = asm_rc!(Imm(0));
-                let cmp = self.create_cmpl(&mut imm.clone(), &src);
-                self.asm_vec.push(cmp);
+                let imm = new_node!(Imm {
+                    val: 0,
+                    signed: true,
+                    size: Self::operand_size(src.clone())
+                });
+                let cmp = self.new_cmp(&mut imm.clone(), &src);
+                self.emit(cmp);
                 let label = self.transform_expr(label.clone());
-                return asm_rc!(JmpCC {
+                return new_node!(JmpCC {
                     cond: CondCode::E,
                     label: label,
                 });
             }
-            TAC::JumpOnNotZero { expr, label } => {
+            TAC::JumpOnNotZero { ty, expr, label } => {
                 let src = self.transform_expr(expr.clone());
-                let imm = asm_rc!(Imm(0));
-                let cmp = self.create_cmpl(&mut imm.clone(), &src);
-                self.asm_vec.push(cmp);
+                let imm = new_node!(Imm {
+                    val: 0,
+                    signed: true,
+                    size: Self::operand_size(src.clone())
+                });
+                let cmp = self.new_cmp(&mut imm.clone(), &src);
+                self.emit(cmp);
                 let label = self.transform_expr(label.clone());
-                return asm_rc!(JmpCC {
+                return new_node!(JmpCC {
                     cond: CondCode::NE,
                     label: label,
                 });
             }
             TAC::Label(idx) => {
-                return self.create_label(*idx);
+                return self.new_label(*idx);
             }
+
+            TAC::FunctionRef(name, defined) => {
+                return new_node!(FunctionRef(name.clone(), *defined));
+            }
+
+            TAC::Call {
+                ty,
+                func,
+                args,
+                dst,
+            } => {
+                let arg_regs = vec![
+                    Register::RDI,
+                    Register::RSI,
+                    Register::RDX,
+                    Register::RCX,
+                    Register::R8,
+                    Register::R9,
+                ];
+
+                let reg_args: Vec<Rc<TAC>> =
+                    args.iter().take(6).cloned().collect();
+
+                let stack_args: Vec<Rc<TAC>> =
+                    args.iter().skip(6).cloned().collect();
+
+                let stack_padding =
+                    if (stack_args.len() & 1) != 0 { 8 } else { 0 };
+
+                if stack_padding != 0 {
+                    self.emit(new_node!(PushBytes(stack_padding)));
+                }
+
+                for (i, arg) in reg_args.iter().enumerate() {
+                    let reg = &arg_regs[i];
+                    let src = self.transform_expr(arg.clone());
+                    let dst =
+                        Self::new_reg_for(reg.clone().into(), src.clone());
+                    self.emit(new_node!(Mov(
+                        src.clone(),
+                        dst.clone(),
+                        Self::operand_size(dst.clone())
+                    )));
+                }
+
+                for arg in stack_args.iter().rev() {
+                    let src = self.transform_expr(arg.clone());
+                    if is_register(&src) || is_immediate(&src) {
+                        self.emit(new_node!(Push(src)));
+                    } else {
+                        let dst = Self::new_reg_for(Register::RAX, src.clone());
+                        self.emit(new_node!(Mov(
+                            src.clone(),
+                            dst.clone(),
+                            Self::operand_size(dst.clone())
+                        )));
+                        self.emit(new_node!(Push(new_node!(Reg {
+                            reg: Register::RAX,
+                            signed: false,
+                            size: 8
+                        }))));
+                    }
+                }
+
+                let callee = self.transform_expr(func.clone());
+                let call = new_node!(Call(callee));
+
+                self.emit(call);
+
+                let pop_bytes = 8 * stack_args.len() + stack_padding;
+
+                if pop_bytes > 0 {
+                    self.emit(new_node!(PopBytes(pop_bytes)));
+                }
+
+                let res = self.transform_expr(dst.clone());
+                let mov = new_node!(Mov(
+                    Self::new_reg_for(Register::RAX, res.clone()),
+                    res.clone(),
+                    Self::operand_size(res.clone())
+                ));
+                mov
+            }
+
             _ => {
                 unreachable!()
             }
@@ -673,23 +865,64 @@ impl CodeGenerator {
 
     fn transform(&mut self, node: Rc<TAC>) {
         match &*node {
-            TAC::Function { name, code, depth } => {
-                let mut func_asm_vec: AsmVec = vec![];
-                let func_var_map = VarMap::new();
-                let func_label_map = LabelMap::new();
-                let mut func_codegen = CodeGenerator {
-                    asm_vec: vec![],
-                    var_map: func_var_map,
-                    label_map: func_label_map,
-                };
-                for op in code {
-                    func_codegen.transform(op.clone());
+            TAC::Function {
+                name,
+                params,
+                code,
+                depth,
+            } => {
+                let mut codegen = CodeGenerator::new();
+
+                let arg_regs = vec![
+                    Register::RDI,
+                    Register::RSI,
+                    Register::RDX,
+                    Register::RCX,
+                    Register::R8,
+                    Register::R9,
+                ];
+
+                let reg_args = if params.len() < 7 { params.len() } else { 6 };
+
+                for i in 0..reg_args {
+                    let reg = &arg_regs[i];
+                    let var = self.transform_expr(params[i].clone());
+                    codegen.emit(new_node!(Mov(
+                        Self::new_reg_for(reg.clone().into(), var.clone()),
+                        var.clone(),
+                        Self::operand_size(var.clone())
+                    )));
                 }
-                func_asm_vec.append(&mut func_codegen.asm_vec);
-                self.asm_vec.push(asm_rc!(Function {
+
+                let stack_arg_count = params.len() - reg_args;
+
+                for i in 0..stack_arg_count {
+                    let stack_par_idx: i32 =
+                        stack_arg_count as i32 - i as i32 - 1;
+                    let par = codegen.transform_expr(
+                        params[stack_par_idx as usize + reg_args].clone(),
+                    );
+                    let mut from = new_node!(Var {
+                        off: -(stack_par_idx * 8 + 16),
+                        signed: false,
+                        size: Self::operand_size(par.clone())
+                    });
+                    let to = Self::new_reg_for(Register::R10, from.clone());
+                    let mut mov = codegen.new_mov(&mut from, &to);
+                    codegen.emit(mov);
+                    from = to.clone();
+                    mov = codegen.new_mov(&mut from, &par);
+                    codegen.emit(mov);
+                }
+
+                for op in code {
+                    codegen.transform(op.clone());
+                }
+
+                self.emit(new_node!(Function {
                     name: name.clone(),
-                    stack: *depth,
-                    asm: func_asm_vec,
+                    stack: (*depth + 15) & !15,
+                    code: codegen.out(),
                 }));
             }
             TAC::Inv { .. }
@@ -715,17 +948,24 @@ impl CodeGenerator {
             | TAC::Jump(_)
             | TAC::JumpOnZero { .. }
             | TAC::JumpOnNotZero { .. }
+            | TAC::Call { .. }
             | TAC::Label(_) => {
                 let expr = self.transform_expr(node.clone());
-                self.asm_vec.push(expr);
+                self.emit(expr);
             }
             TAC::Return(expr) => {
                 let src = self.transform_expr(expr.clone());
-                let dst = asm_rc!(Eax);
+                let dst = Self::new_reg_for(Register::RAX, src.clone());
+
                 if src != dst {
-                    self.asm_vec.push(asm_rc!(Movl(src.clone(), dst.clone(),)));
+                    self.code_vec.push(new_node!(Mov(
+                        src.clone(),
+                        dst.clone(),
+                        Self::operand_size(dst.clone())
+                    )));
                 }
-                self.asm_vec.push(asm_rc!(Ret));
+
+                self.emit(new_node!(Ret));
             }
             _ => {
                 unreachable!()
@@ -733,67 +973,38 @@ impl CodeGenerator {
         }
     }
 
-    fn fixup(&mut self, asm: AsmRef) {
-        let op = &mut *asm.borrow_mut();
-        match op {
-            Asm::Function {
-                name: _,
-                stack: _,
-                asm,
-            } => {
-                for op in asm {
-                    self.fixup(op.clone());
-                }
-            }
-            Asm::IMull(src, dst)
-            | Asm::Addl(src, dst)
-            | Asm::Subl(src, dst)
-            | Asm::Shll(src, dst)
-            | Asm::Sarl(src, dst)
-            | Asm::Andl(src, dst)
-            | Asm::Orl(src, dst)
-            | Asm::Xorl(src, dst)
-            | Asm::Cmpl(src, dst) => {
-                self.fixup(src.clone());
-                self.fixup(dst.clone());
-            }
-            Asm::IDivl(src) => {
-                self.fixup(src.clone());
-            }
-            Asm::Movb(src, dst)
-            | Asm::Movw(src, dst)
-            | Asm::Movl(src, dst)
-            | Asm::Movq(src, dst) => {
-                self.fixup(src.clone());
-                self.fixup(dst.clone());
-            }
-            Asm::Notl(dst) | Asm::Negl(dst) => {
-                self.fixup(dst.clone());
-            }
-            Asm::SetCC { dst, .. } => {
-                self.fixup(dst.clone());
-            }
-            Asm::Jmp(label) => {
-                self.fixup(label.clone());
-            }
-            Asm::JmpCC { label, .. } => {
-                self.fixup(label.clone());
-            }
-            Asm::Var(idx, size) => {
-                *op = Asm::Stack(*idx, *size).try_into().unwrap();
-            }
-            _ => {}
-        }
+    fn emit(&mut self, code: CodeRef) {
+        self.code_vec.push(code.clone());
     }
 
-    pub fn generate(mut self, ir: Vec<Rc<TAC>>) -> AsmVec {
+    fn out(&mut self) -> Vec<CodeRef> {
+        std::mem::take(&mut self.code_vec)
+    }
+
+    pub fn generate(mut self, ir: Vec<Rc<TAC>>) -> CodeVec {
         for tac in ir {
             self.transform(tac.clone());
         }
-        let asm_vec_clones: Vec<_> = self.asm_vec.iter().cloned().collect();
-        for asm in asm_vec_clones {
-            self.fixup(asm);
-        }
-        self.asm_vec
+        self.code_vec
+    }
+}
+
+fn is_immediate(code: &CodeRef) -> bool {
+    matches!(*code.borrow(), Code::Imm { .. })
+}
+
+#[allow(dead_code)]
+fn is_mem_addr(code: &CodeRef) -> bool {
+    match *code.borrow() {
+        Code::Var { .. } => true,
+        _ => false,
+    }
+}
+
+#[allow(dead_code)]
+fn is_register(code: &CodeRef) -> bool {
+    match *code.borrow() {
+        Code::Reg { .. } => true,
+        _ => false,
     }
 }

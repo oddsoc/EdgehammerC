@@ -21,38 +21,57 @@
  *  DEALINGS IN THE SOFTWARE.
  */
 
+use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::ast::{ASTKind, AST};
+use crate::ast::*;
+use crate::scope::*;
+use crate::types::*;
 
-fn is_lvalue(expr: Rc<AST>) -> bool {
-    match &expr.kind {
+fn is_callable(expr: ASTRef) -> bool {
+    match &expr.borrow().kind {
+        ASTKind::Identifier { .. } => {
+            if let Some(node) = expr.as_ref().borrow().resolve_node() {
+                match &node.borrow().kind {
+                    ASTKind::Function { .. } => {
+                        return true;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
+
+    false
+}
+
+fn is_lvalue(expr: ASTRef) -> bool {
+    match &expr.borrow().kind {
         ASTKind::Identifier { .. } => true,
         _ => false,
     }
 }
 
-pub fn eval(expr: Rc<AST>, constexpr: bool) -> Result<Rc<AST>, ()> {
-    let node = expr.clone();
+pub fn eval(expr: ASTRef) -> Result<ASTRef, String> {
+    let node = expr.borrow();
     match &node.kind {
-        ASTKind::Identifier { name: _, sym } => {
-            if constexpr || sym.is_none() {
-                Err(())
+        ASTKind::Identifier { name, sym: _ } => {
+            if resolve(expr.clone()).is_some() {
+                Ok(expr.clone())
             } else {
-                Ok(expr)
+                Err(format!("{} not found", name))
             }
         }
 
         ASTKind::Assign { left, right } => {
             if is_lvalue(left.clone()) {
-                if eval(left.clone(), constexpr).is_ok()
-                    && eval(right.clone(), constexpr).is_ok()
-                {
-                    return Ok(expr);
-                }
-            };
-
-            return Err(());
+                eval(left.clone())?;
+                eval(right.clone())?;
+                Ok(expr.clone())
+            } else {
+                Err("not an lvalue".to_string())
+            }
         }
 
         ASTKind::Add { left, right }
@@ -65,11 +84,11 @@ pub fn eval(expr: Rc<AST>, constexpr: bool) -> Result<Rc<AST>, ()> {
         | ASTKind::And { left, right }
         | ASTKind::Or { left, right }
         | ASTKind::Xor { left, right } => {
-            let left_eval = eval(left.clone(), constexpr)?;
-            let right_eval = eval(right.clone(), constexpr)?;
+            let left_eval = eval(left.clone())?;
+            let right_eval = eval(right.clone())?;
 
             if let (ASTKind::ConstInt(lhs), ASTKind::ConstInt(rhs)) =
-                (&left_eval.kind, &right_eval.kind)
+                (&left_eval.borrow().kind, &right_eval.borrow().kind)
             {
                 let result = match &node.kind {
                     ASTKind::Add { .. } => lhs + rhs,
@@ -77,13 +96,13 @@ pub fn eval(expr: Rc<AST>, constexpr: bool) -> Result<Rc<AST>, ()> {
                     ASTKind::Multiply { .. } => lhs * rhs,
                     ASTKind::Divide { .. } => {
                         if *rhs == 0 {
-                            return Err(());
+                            return Err("attempt to divide by 0".to_string());
                         }
                         lhs / rhs
                     }
                     ASTKind::Modulo { .. } => {
                         if *rhs == 0 {
-                            return Err(());
+                            return Err("attempt to divide by 0".to_string());
                         }
                         lhs % rhs
                     }
@@ -95,67 +114,73 @@ pub fn eval(expr: Rc<AST>, constexpr: bool) -> Result<Rc<AST>, ()> {
                     _ => unreachable!(),
                 };
 
-                return Ok(Rc::new(AST {
+                return Ok(Rc::new(RefCell::new(AST {
                     id: 0,
+                    ty: int_type(),
                     kind: ASTKind::ConstInt(result),
                     scope: node.scope.clone(),
-                }));
+                })));
             }
 
-            Ok(expr)
+            Ok(expr.clone())
         }
 
         ASTKind::LogicAnd { left, right }
         | ASTKind::LogicOr { left, right } => {
-            let left_eval = eval(left.clone(), constexpr)?;
+            let left_eval = eval(left.clone())?;
 
-            if let ASTKind::ConstInt(lhs) = left_eval.kind {
+            if let ASTKind::ConstInt(lhs) = left_eval.borrow().kind {
                 let result = match &node.kind {
                     ASTKind::LogicAnd { .. } => {
                         if lhs == 0 {
-                            return Ok(Rc::new(AST {
+                            return Ok(Rc::new(RefCell::new(AST {
                                 id: 0,
+                                ty: int_type(),
                                 kind: ASTKind::ConstInt(0),
                                 scope: node.scope.clone(),
-                            }));
+                            })));
                         }
-                        let right_eval = eval(right.clone(), constexpr)?;
-                        let rhs =
-                            if let ASTKind::ConstInt(rhs) = right_eval.kind {
-                                rhs
-                            } else {
-                                return Ok(expr);
-                            };
+                        let right_eval = eval(right.clone())?;
+                        let rhs = if let ASTKind::ConstInt(rhs) =
+                            right_eval.borrow().kind
+                        {
+                            rhs
+                        } else {
+                            return Ok(expr.clone());
+                        };
                         ((lhs != 0 && rhs != 0) as i32).into()
                     }
                     ASTKind::LogicOr { .. } => {
                         if lhs != 0 {
-                            return Ok(Rc::new(AST {
+                            return Ok(Rc::new(RefCell::new(AST {
                                 id: 0,
+                                ty: int_type(),
                                 kind: ASTKind::ConstInt(1),
                                 scope: node.scope.clone(),
-                            }));
+                            })));
                         }
-                        let right_eval = eval(right.clone(), constexpr)?;
-                        let rhs =
-                            if let ASTKind::ConstInt(rhs) = right_eval.kind {
-                                rhs
-                            } else {
-                                return Ok(expr);
-                            };
+                        let right_eval = eval(right.clone())?;
+                        let rhs = if let ASTKind::ConstInt(rhs) =
+                            right_eval.borrow().kind
+                        {
+                            rhs
+                        } else {
+                            return Ok(expr.clone());
+                        };
                         ((lhs != 0 || rhs != 0) as i32).into()
                     }
                     _ => unreachable!(),
                 };
 
-                return Ok(Rc::new(AST {
+                return Ok(Rc::new(RefCell::new(AST {
                     id: 0,
+                    ty: int_type(),
                     kind: ASTKind::ConstInt(result),
                     scope: node.scope.clone(),
-                }));
+                })));
             }
 
-            Ok(expr)
+            Ok(expr.clone())
         }
 
         ASTKind::Equal { left, right }
@@ -164,11 +189,11 @@ pub fn eval(expr: Rc<AST>, constexpr: bool) -> Result<Rc<AST>, ()> {
         | ASTKind::LessOrEq { left, right }
         | ASTKind::GreaterThan { left, right }
         | ASTKind::GreaterOrEq { left, right } => {
-            let left_eval = eval(left.clone(), constexpr)?;
-            let right_eval = eval(right.clone(), constexpr)?;
+            let left_eval = eval(left.clone())?;
+            let right_eval = eval(right.clone())?;
 
             if let (ASTKind::ConstInt(lhs), ASTKind::ConstInt(rhs)) =
-                (&left_eval.kind, &right_eval.kind)
+                (&left_eval.borrow().kind, &right_eval.borrow().kind)
             {
                 let result = match &node.kind {
                     ASTKind::Equal { .. } => (lhs == rhs) as i64,
@@ -180,14 +205,15 @@ pub fn eval(expr: Rc<AST>, constexpr: bool) -> Result<Rc<AST>, ()> {
                     _ => unreachable!(),
                 };
 
-                return Ok(Rc::new(AST {
+                return Ok(Rc::new(RefCell::new(AST {
                     id: 0,
+                    ty: int_type(),
                     kind: ASTKind::ConstInt(result),
                     scope: node.scope.clone(),
-                }));
+                })));
             }
 
-            Ok(expr)
+            Ok(expr.clone())
         }
 
         ASTKind::Conditional {
@@ -195,27 +221,27 @@ pub fn eval(expr: Rc<AST>, constexpr: bool) -> Result<Rc<AST>, ()> {
             middle,
             right,
         } => {
-            let cond_eval = eval(left.clone(), constexpr)?;
+            let cond_eval = eval(left.clone())?;
 
-            if let ASTKind::ConstInt(cond_value) = cond_eval.kind {
+            if let ASTKind::ConstInt(cond_value) = cond_eval.borrow().kind {
                 let branch = if cond_value != 0 {
                     middle.clone()
                 } else {
                     right.clone()
                 };
 
-                return eval(branch, constexpr);
+                return eval(branch);
             }
 
-            Ok(expr)
+            Ok(expr.clone())
         }
 
         ASTKind::Negate { expr: inner }
         | ASTKind::Complement { expr: inner }
         | ASTKind::Not { expr: inner } => {
-            let eval_expr = eval(inner.clone(), constexpr)?;
+            let eval_expr = eval(inner.clone())?;
 
-            if let ASTKind::ConstInt(value) = eval_expr.kind {
+            if let ASTKind::ConstInt(value) = eval_expr.borrow().kind {
                 let result = match &node.kind {
                     ASTKind::Negate { .. } => -value,
                     ASTKind::Complement { .. } => !value,
@@ -223,29 +249,41 @@ pub fn eval(expr: Rc<AST>, constexpr: bool) -> Result<Rc<AST>, ()> {
                     _ => unreachable!(),
                 };
 
-                return Ok(Rc::new(AST {
+                return Ok(Rc::new(RefCell::new(AST {
                     id: 0,
+                    ty: int_type(),
                     kind: ASTKind::ConstInt(result),
                     scope: node.scope.clone(),
-                }));
+                })));
             }
 
-            Ok(expr)
+            Ok(expr.clone())
         }
 
         ASTKind::PreIncr { expr: inner }
         | ASTKind::PostIncr { expr: inner }
         | ASTKind::PreDecr { expr: inner }
         | ASTKind::PostDecr { expr: inner } => {
-            if !is_lvalue(eval(inner.clone(), constexpr)?) {
-                return Err(());
+            if !is_lvalue(eval(inner.clone())?) {
+                return Err("not an lvalue".to_string());
             }
 
-            Ok(expr)
+            Ok(expr.clone())
         }
 
-        ASTKind::ConstInt(_) => Ok(expr),
+        ASTKind::Call {
+            expr: callee,
+            args: _,
+        } => {
+            if !is_callable(eval(callee.clone())?) {
+                return Err("not a function".to_string());
+            }
 
-        _ => Err(()),
+            Ok(expr.clone())
+        }
+
+        ASTKind::ConstInt(_) => Ok(expr.clone()),
+
+        _ => unreachable!(),
     }
 }

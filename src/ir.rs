@@ -21,12 +21,12 @@
  *  DEALINGS IN THE SOFTWARE.
  */
 
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::ast::{ASTKind, AST};
-use crate::scope::{Scope, ScopeKind};
+use crate::ast::*;
+use crate::scope::*;
+use crate::types::*;
 
 macro_rules! new_node {
     ($variant:ident) => {
@@ -48,315 +48,360 @@ macro_rules! new_node {
 pub enum TAC {
     Function {
         name: String,
+        params: Vec<Rc<TAC>>,
         code: Vec<Rc<TAC>>,
         depth: usize,
     },
+    Call {
+        ty: TypeRef,
+        func: Rc<TAC>,
+        args: Vec<Rc<TAC>>,
+        dst: Rc<TAC>,
+    },
     ConstInt(i64),
-    Var(usize, usize),
+    Var(TypeRef, usize),
     Inv {
+        ty: TypeRef,
         src: Rc<TAC>,
         dst: Rc<TAC>,
     },
     Neg {
+        ty: TypeRef,
         src: Rc<TAC>,
         dst: Rc<TAC>,
     },
     Not {
+        ty: TypeRef,
         src: Rc<TAC>,
         dst: Rc<TAC>,
     },
     Mul {
+        ty: TypeRef,
         lhs: Rc<TAC>,
         rhs: Rc<TAC>,
         dst: Rc<TAC>,
     },
     IDiv {
+        ty: TypeRef,
         lhs: Rc<TAC>,
         rhs: Rc<TAC>,
         dst: Rc<TAC>,
     },
     Mod {
+        ty: TypeRef,
         lhs: Rc<TAC>,
         rhs: Rc<TAC>,
         dst: Rc<TAC>,
     },
     Add {
+        ty: TypeRef,
         lhs: Rc<TAC>,
         rhs: Rc<TAC>,
         dst: Rc<TAC>,
     },
     Sub {
+        ty: TypeRef,
         lhs: Rc<TAC>,
         rhs: Rc<TAC>,
         dst: Rc<TAC>,
     },
     LShift {
+        ty: TypeRef,
         lhs: Rc<TAC>,
         rhs: Rc<TAC>,
         dst: Rc<TAC>,
     },
     RShift {
+        ty: TypeRef,
         lhs: Rc<TAC>,
         rhs: Rc<TAC>,
         dst: Rc<TAC>,
     },
     And {
+        ty: TypeRef,
         lhs: Rc<TAC>,
         rhs: Rc<TAC>,
         dst: Rc<TAC>,
     },
     Or {
+        ty: TypeRef,
         lhs: Rc<TAC>,
         rhs: Rc<TAC>,
         dst: Rc<TAC>,
     },
     Xor {
+        ty: TypeRef,
         lhs: Rc<TAC>,
         rhs: Rc<TAC>,
         dst: Rc<TAC>,
     },
     Equal {
+        ty: TypeRef,
         lhs: Rc<TAC>,
         rhs: Rc<TAC>,
         dst: Rc<TAC>,
     },
     NotEq {
+        ty: TypeRef,
         lhs: Rc<TAC>,
         rhs: Rc<TAC>,
         dst: Rc<TAC>,
     },
     LessThan {
+        ty: TypeRef,
         lhs: Rc<TAC>,
         rhs: Rc<TAC>,
         dst: Rc<TAC>,
     },
     LessOrEq {
+        ty: TypeRef,
         lhs: Rc<TAC>,
         rhs: Rc<TAC>,
         dst: Rc<TAC>,
     },
     GreaterThan {
+        ty: TypeRef,
         lhs: Rc<TAC>,
         rhs: Rc<TAC>,
         dst: Rc<TAC>,
     },
     GreaterOrEq {
+        ty: TypeRef,
         lhs: Rc<TAC>,
         rhs: Rc<TAC>,
         dst: Rc<TAC>,
     },
     Copy {
+        ty: TypeRef,
         src: Rc<TAC>,
         dst: Rc<TAC>,
     },
     Jump(Rc<TAC>),
     JumpOnZero {
+        ty: TypeRef,
         expr: Rc<TAC>,
         label: Rc<TAC>,
     },
     JumpOnNotZero {
+        ty: TypeRef,
         expr: Rc<TAC>,
         label: Rc<TAC>,
     },
     Label(usize),
+    FunctionRef(String, bool),
     Return(Rc<TAC>),
 }
 
 pub struct IrGenerator {
-    label_index: usize,
+    label_idx: usize,
     label_map: HashMap<String, usize>,
+    tac_code: Vec<Rc<TAC>>,
 }
 
 impl IrGenerator {
     pub fn new() -> Self {
         Self {
-            label_index: 0,
+            label_idx: 0,
             label_map: HashMap::new(),
+            tac_code: Vec::new(),
         }
     }
 
-    fn incr_label_index(&mut self) -> usize {
-        let idx = self.label_index;
-        self.label_index += 1;
+    pub fn from(parent: &IrGenerator) -> Self {
+        Self {
+            label_idx: parent.label_idx,
+            label_map: HashMap::new(),
+            tac_code: Vec::new(),
+        }
+    }
+
+    pub fn join(&mut self, child: &IrGenerator) {
+        self.label_idx = child.label_idx;
+    }
+
+    fn incr_label_idx(&mut self) -> usize {
+        let idx = self.label_idx;
+        self.label_idx += 1;
         idx
     }
 
     fn add_named_label(&mut self, name: &str) -> Option<usize> {
         if !self.label_map.contains_key(name) {
-            let idx = self.incr_label_index();
+            let idx = self.incr_label_idx();
             self.label_map.insert(name.to_string(), idx);
         }
         self.label_map.get(name).cloned()
     }
 
-    fn add_continue_label(
-        &mut self,
-        scope: &Rc<RefCell<Scope>>,
-    ) -> Option<usize> {
-        let scope_ref = scope.borrow();
-        let id = if scope_ref.kind == ScopeKind::Loop {
-            scope_ref.id
-        } else {
-            scope_ref.loop_scope().unwrap().borrow().id
-        };
+    fn add_continue_label(&mut self, scope: &ScopeRef) -> Option<usize> {
+        let id = loop_scope(scope.clone()).unwrap().as_ref().borrow().id;
         let label = format!(".continue.{}", id);
         self.add_named_label(&label)
     }
 
-    fn add_break_label(&mut self, scope: &Rc<RefCell<Scope>>) -> Option<usize> {
-        let scope_ref = scope.borrow();
-        let id = if scope_ref.kind == ScopeKind::Loop
-            || scope_ref.kind == ScopeKind::Switch
-        {
-            scope_ref.id
-        } else {
-            scope_ref.loop_or_switch_scope().unwrap().borrow().id
-        };
+    fn add_break_label(&mut self, scope: &ScopeRef) -> Option<usize> {
+        let id = loop_or_switch_scope(scope.clone())
+            .unwrap()
+            .as_ref()
+            .borrow()
+            .id;
         let label = format!(".break.{}", id);
         self.add_named_label(&label)
     }
 
     fn add_case_label(
         &mut self,
-        scope: &Rc<RefCell<Scope>>,
+        scope: &ScopeRef,
         case_idx: usize,
     ) -> Option<usize> {
-        let scope_ref = scope.borrow();
-        let id = if scope_ref.kind == ScopeKind::Switch {
-            scope_ref.id
-        } else {
-            scope_ref.switch_scope().unwrap().borrow().id
-        };
+        let id = switch_scope(scope.clone()).unwrap().as_ref().borrow().id;
         let label = format!(".case.{}.{}", case_idx, id);
         self.add_named_label(&label)
     }
 
-    fn create_tmp_var(&mut self, scope: &Rc<RefCell<Scope>>) -> Rc<TAC> {
-        let off = scope.borrow_mut().add_tmp(4, 4);
-        new_node!(Var(off, 4))
+    fn new_tmp_var(&mut self, ty: TypeRef, scope: &ScopeRef) -> Rc<TAC> {
+        let ty_val = ty.as_ref().borrow();
+        let off = scope
+            .borrow_mut()
+            .add_tmp_var(ty_val.size, ty_val.alignment);
+        new_node!(Var(ty.clone(), off))
     }
 
-    fn transform_expr(
-        &mut self,
-        expr: Rc<AST>,
-        tac_code: &mut Vec<Rc<TAC>>,
-    ) -> Rc<TAC> {
-        let binding = expr;
+    #[allow(unused_variables)]
+    fn transform_expr(&mut self, expr: ASTRef) -> Rc<TAC> {
+        let binding = expr.borrow();
         match &binding.kind {
             ASTKind::ConstInt(val) => new_node!(ConstInt(*val)),
             ASTKind::Complement { expr: inner } => {
-                let src = self.transform_expr(inner.clone(), tac_code);
-                let dst = self.create_tmp_var(&binding.scope);
-                tac_code.push(new_node!(Inv {
+                let src = self.transform_expr(inner.clone());
+                let dst = self.new_tmp_var(binding.ty.clone(), &binding.scope);
+                self.emit(new_node!(Inv {
+                    ty: binding.ty.clone(),
                     src: src,
                     dst: dst.clone()
                 }));
                 dst
             }
             ASTKind::Negate { expr: inner } => {
-                let src = self.transform_expr(inner.clone(), tac_code);
-                let dst = self.create_tmp_var(&binding.scope);
-                tac_code.push(new_node!(Neg {
+                let src = self.transform_expr(inner.clone());
+                let dst = self.new_tmp_var(binding.ty.clone(), &binding.scope);
+                self.emit(new_node!(Neg {
+                    ty: binding.ty.clone(),
                     src: src,
                     dst: dst.clone()
                 }));
                 dst
             }
             ASTKind::Not { expr: inner } => {
-                let src = self.transform_expr(inner.clone(), tac_code);
-                let dst = self.create_tmp_var(&binding.scope);
-                tac_code.push(new_node!(Not {
+                let src = self.transform_expr(inner.clone());
+                let dst = self.new_tmp_var(binding.ty.clone(), &binding.scope);
+                self.emit(new_node!(Not {
+                    ty: binding.ty.clone(),
                     src: src,
                     dst: dst.clone()
                 }));
                 dst
             }
             ASTKind::PreIncr { expr: inner } => {
-                let src = self.transform_expr(inner.clone(), tac_code);
-                let dst = self.create_tmp_var(&binding.scope);
-                let tmp = self.create_tmp_var(&binding.scope);
-                tac_code.push(new_node!(Copy {
+                let src = self.transform_expr(inner.clone());
+                let dst = self.new_tmp_var(binding.ty.clone(), &binding.scope);
+                let tmp = self.new_tmp_var(binding.ty.clone(), &binding.scope);
+                self.emit(new_node!(Copy {
+                    ty: binding.ty.clone(),
                     src: new_node!(ConstInt(1)),
                     dst: tmp.clone()
                 }));
-                tac_code.push(new_node!(Add {
+                self.emit(new_node!(Add {
+                    ty: binding.ty.clone(),
                     lhs: tmp.clone(),
                     rhs: src.clone(),
                     dst: dst.clone()
                 }));
-                tac_code.push(new_node!(Copy {
+                self.emit(new_node!(Copy {
+                    ty: binding.ty.clone(),
                     src: dst.clone(),
                     dst: src.clone()
                 }));
                 src
             }
             ASTKind::PostIncr { expr: inner } => {
-                let src = self.transform_expr(inner.clone(), tac_code);
-                let dst = self.create_tmp_var(&binding.scope);
-                let tmp = self.create_tmp_var(&binding.scope);
-                tac_code.push(new_node!(Copy {
+                let src = self.transform_expr(inner.clone());
+                let dst = self.new_tmp_var(binding.ty.clone(), &binding.scope);
+                let tmp = self.new_tmp_var(binding.ty.clone(), &binding.scope);
+                self.emit(new_node!(Copy {
+                    ty: binding.ty.clone(),
                     src: src.clone(),
                     dst: tmp.clone()
                 }));
-                tac_code.push(new_node!(Add {
+                self.emit(new_node!(Add {
+                    ty: binding.ty.clone(),
                     lhs: new_node!(ConstInt(1)),
                     rhs: tmp.clone(),
                     dst: dst.clone()
                 }));
-                tac_code.push(new_node!(Copy {
+                self.emit(new_node!(Copy {
+                    ty: binding.ty.clone(),
                     src: dst.clone(),
                     dst: src.clone()
                 }));
                 tmp
             }
             ASTKind::PreDecr { expr: inner } => {
-                let src = self.transform_expr(inner.clone(), tac_code);
-                let dst = self.create_tmp_var(&binding.scope);
-                let tmp = self.create_tmp_var(&binding.scope);
-                tac_code.push(new_node!(Copy {
+                let src = self.transform_expr(inner.clone());
+                let dst = self.new_tmp_var(binding.ty.clone(), &binding.scope);
+                let tmp = self.new_tmp_var(binding.ty.clone(), &binding.scope);
+                self.emit(new_node!(Copy {
+                    ty: binding.ty.clone(),
                     src: new_node!(ConstInt(1)),
                     dst: tmp.clone()
                 }));
-                tac_code.push(new_node!(Sub {
+                self.emit(new_node!(Sub {
+                    ty: binding.ty.clone(),
                     lhs: src.clone(),
                     rhs: tmp.clone(),
                     dst: dst.clone()
                 }));
-                tac_code.push(new_node!(Copy {
+                self.emit(new_node!(Copy {
+                    ty: binding.ty.clone(),
                     src: dst.clone(),
                     dst: src.clone()
                 }));
                 src
             }
             ASTKind::PostDecr { expr: inner } => {
-                let src = self.transform_expr(inner.clone(), tac_code);
-                let dst = self.create_tmp_var(&binding.scope);
-                let tmp = self.create_tmp_var(&binding.scope);
-                let res = self.create_tmp_var(&binding.scope);
-                tac_code.push(new_node!(Copy {
+                let src = self.transform_expr(inner.clone());
+                let dst = self.new_tmp_var(binding.ty.clone(), &binding.scope);
+                let tmp = self.new_tmp_var(binding.ty.clone(), &binding.scope);
+                let res = self.new_tmp_var(binding.ty.clone(), &binding.scope);
+                self.emit(new_node!(Copy {
+                    ty: binding.ty.clone(),
                     src: src.clone(),
                     dst: res.clone()
                 }));
-                tac_code.push(new_node!(Copy {
+                self.emit(new_node!(Copy {
+                    ty: binding.ty.clone(),
                     src: new_node!(ConstInt(1)),
                     dst: tmp.clone()
                 }));
-                tac_code.push(new_node!(Sub {
+                self.emit(new_node!(Sub {
+                    ty: binding.ty.clone(),
                     lhs: src.clone(),
                     rhs: tmp.clone(),
                     dst: dst.clone()
                 }));
-                tac_code.push(new_node!(Copy {
+                self.emit(new_node!(Copy {
+                    ty: binding.ty.clone(),
                     src: dst.clone(),
                     dst: src.clone()
                 }));
                 res
             }
             ASTKind::Multiply { left, right } => {
-                let lhs = self.transform_expr(left.clone(), tac_code);
-                let rhs = self.transform_expr(right.clone(), tac_code);
-                let dst = self.create_tmp_var(&binding.scope);
-                tac_code.push(new_node!(Mul {
+                let lhs = self.transform_expr(left.clone());
+                let rhs = self.transform_expr(right.clone());
+                let dst = self.new_tmp_var(binding.ty.clone(), &binding.scope);
+                self.emit(new_node!(Mul {
+                    ty: binding.ty.clone(),
                     lhs: lhs,
                     rhs: rhs,
                     dst: dst.clone()
@@ -364,10 +409,11 @@ impl IrGenerator {
                 dst
             }
             ASTKind::Divide { left, right } => {
-                let lhs = self.transform_expr(left.clone(), tac_code);
-                let rhs = self.transform_expr(right.clone(), tac_code);
-                let dst = self.create_tmp_var(&binding.scope);
-                tac_code.push(new_node!(IDiv {
+                let lhs = self.transform_expr(left.clone());
+                let rhs = self.transform_expr(right.clone());
+                let dst = self.new_tmp_var(binding.ty.clone(), &binding.scope);
+                self.emit(new_node!(IDiv {
+                    ty: binding.ty.clone(),
                     lhs: lhs,
                     rhs: rhs,
                     dst: dst.clone()
@@ -375,10 +421,11 @@ impl IrGenerator {
                 dst
             }
             ASTKind::Modulo { left, right } => {
-                let lhs = self.transform_expr(left.clone(), tac_code);
-                let rhs = self.transform_expr(right.clone(), tac_code);
-                let dst = self.create_tmp_var(&binding.scope);
-                tac_code.push(new_node!(Mod {
+                let lhs = self.transform_expr(left.clone());
+                let rhs = self.transform_expr(right.clone());
+                let dst = self.new_tmp_var(binding.ty.clone(), &binding.scope);
+                self.emit(new_node!(Mod {
+                    ty: binding.ty.clone(),
                     lhs: lhs,
                     rhs: rhs,
                     dst: dst.clone()
@@ -386,10 +433,11 @@ impl IrGenerator {
                 dst
             }
             ASTKind::Add { left, right } => {
-                let lhs = self.transform_expr(left.clone(), tac_code);
-                let rhs = self.transform_expr(right.clone(), tac_code);
-                let dst = self.create_tmp_var(&binding.scope);
-                tac_code.push(new_node!(Add {
+                let lhs = self.transform_expr(left.clone());
+                let rhs = self.transform_expr(right.clone());
+                let dst = self.new_tmp_var(binding.ty.clone(), &binding.scope);
+                self.emit(new_node!(Add {
+                    ty: binding.ty.clone(),
                     lhs: lhs,
                     rhs: rhs,
                     dst: dst.clone()
@@ -397,10 +445,11 @@ impl IrGenerator {
                 dst
             }
             ASTKind::Subtract { left, right } => {
-                let lhs = self.transform_expr(left.clone(), tac_code);
-                let rhs = self.transform_expr(right.clone(), tac_code);
-                let dst = self.create_tmp_var(&binding.scope);
-                tac_code.push(new_node!(Sub {
+                let lhs = self.transform_expr(left.clone());
+                let rhs = self.transform_expr(right.clone());
+                let dst = self.new_tmp_var(binding.ty.clone(), &binding.scope);
+                self.emit(new_node!(Sub {
+                    ty: binding.ty.clone(),
                     lhs: lhs,
                     rhs: rhs,
                     dst: dst.clone()
@@ -408,10 +457,11 @@ impl IrGenerator {
                 dst
             }
             ASTKind::LShift { left, right } => {
-                let lhs = self.transform_expr(left.clone(), tac_code);
-                let rhs = self.transform_expr(right.clone(), tac_code);
-                let dst = self.create_tmp_var(&binding.scope);
-                tac_code.push(new_node!(LShift {
+                let lhs = self.transform_expr(left.clone());
+                let rhs = self.transform_expr(right.clone());
+                let dst = self.new_tmp_var(binding.ty.clone(), &binding.scope);
+                self.emit(new_node!(LShift {
+                    ty: binding.ty.clone(),
                     lhs: lhs,
                     rhs: rhs,
                     dst: dst.clone()
@@ -419,10 +469,11 @@ impl IrGenerator {
                 dst
             }
             ASTKind::RShift { left, right } => {
-                let lhs = self.transform_expr(left.clone(), tac_code);
-                let rhs = self.transform_expr(right.clone(), tac_code);
-                let dst = self.create_tmp_var(&binding.scope);
-                tac_code.push(new_node!(RShift {
+                let lhs = self.transform_expr(left.clone());
+                let rhs = self.transform_expr(right.clone());
+                let dst = self.new_tmp_var(binding.ty.clone(), &binding.scope);
+                self.emit(new_node!(RShift {
+                    ty: binding.ty.clone(),
                     lhs: lhs,
                     rhs: rhs,
                     dst: dst.clone()
@@ -430,10 +481,11 @@ impl IrGenerator {
                 dst
             }
             ASTKind::And { left, right } => {
-                let lhs = self.transform_expr(left.clone(), tac_code);
-                let rhs = self.transform_expr(right.clone(), tac_code);
-                let dst = self.create_tmp_var(&binding.scope);
-                tac_code.push(new_node!(And {
+                let lhs = self.transform_expr(left.clone());
+                let rhs = self.transform_expr(right.clone());
+                let dst = self.new_tmp_var(binding.ty.clone(), &binding.scope);
+                self.emit(new_node!(And {
+                    ty: binding.ty.clone(),
                     lhs: lhs,
                     rhs: rhs,
                     dst: dst.clone()
@@ -441,10 +493,11 @@ impl IrGenerator {
                 dst
             }
             ASTKind::Or { left, right } => {
-                let lhs = self.transform_expr(left.clone(), tac_code);
-                let rhs = self.transform_expr(right.clone(), tac_code);
-                let dst = self.create_tmp_var(&binding.scope);
-                tac_code.push(new_node!(Or {
+                let lhs = self.transform_expr(left.clone());
+                let rhs = self.transform_expr(right.clone());
+                let dst = self.new_tmp_var(binding.ty.clone(), &binding.scope);
+                self.emit(new_node!(Or {
+                    ty: binding.ty.clone(),
                     lhs: lhs,
                     rhs: rhs,
                     dst: dst.clone()
@@ -452,10 +505,11 @@ impl IrGenerator {
                 dst
             }
             ASTKind::Xor { left, right } => {
-                let lhs = self.transform_expr(left.clone(), tac_code);
-                let rhs = self.transform_expr(right.clone(), tac_code);
-                let dst = self.create_tmp_var(&binding.scope);
-                tac_code.push(new_node!(Xor {
+                let lhs = self.transform_expr(left.clone());
+                let rhs = self.transform_expr(right.clone());
+                let dst = self.new_tmp_var(binding.ty.clone(), &binding.scope);
+                self.emit(new_node!(Xor {
+                    ty: binding.ty.clone(),
                     lhs: lhs,
                     rhs: rhs,
                     dst: dst.clone()
@@ -463,10 +517,11 @@ impl IrGenerator {
                 dst
             }
             ASTKind::Equal { left, right } => {
-                let lhs = self.transform_expr(left.clone(), tac_code);
-                let rhs = self.transform_expr(right.clone(), tac_code);
-                let dst = self.create_tmp_var(&binding.scope);
-                tac_code.push(new_node!(Equal {
+                let lhs = self.transform_expr(left.clone());
+                let rhs = self.transform_expr(right.clone());
+                let dst = self.new_tmp_var(binding.ty.clone(), &binding.scope);
+                self.emit(new_node!(Equal {
+                    ty: binding.ty.clone(),
                     lhs: lhs,
                     rhs: rhs,
                     dst: dst.clone()
@@ -474,10 +529,11 @@ impl IrGenerator {
                 dst
             }
             ASTKind::NotEq { left, right } => {
-                let lhs = self.transform_expr(left.clone(), tac_code);
-                let rhs = self.transform_expr(right.clone(), tac_code);
-                let dst = self.create_tmp_var(&binding.scope);
-                tac_code.push(new_node!(NotEq {
+                let lhs = self.transform_expr(left.clone());
+                let rhs = self.transform_expr(right.clone());
+                let dst = self.new_tmp_var(binding.ty.clone(), &binding.scope);
+                self.emit(new_node!(NotEq {
+                    ty: binding.ty.clone(),
                     lhs: lhs,
                     rhs: rhs,
                     dst: dst.clone()
@@ -485,10 +541,11 @@ impl IrGenerator {
                 dst
             }
             ASTKind::LessThan { left, right } => {
-                let lhs = self.transform_expr(left.clone(), tac_code);
-                let rhs = self.transform_expr(right.clone(), tac_code);
-                let dst = self.create_tmp_var(&binding.scope);
-                tac_code.push(new_node!(LessThan {
+                let lhs = self.transform_expr(left.clone());
+                let rhs = self.transform_expr(right.clone());
+                let dst = self.new_tmp_var(binding.ty.clone(), &binding.scope);
+                self.emit(new_node!(LessThan {
+                    ty: binding.ty.clone(),
                     lhs: lhs,
                     rhs: rhs,
                     dst: dst.clone()
@@ -496,10 +553,11 @@ impl IrGenerator {
                 dst
             }
             ASTKind::LessOrEq { left, right } => {
-                let lhs = self.transform_expr(left.clone(), tac_code);
-                let rhs = self.transform_expr(right.clone(), tac_code);
-                let dst = self.create_tmp_var(&binding.scope);
-                tac_code.push(new_node!(LessOrEq {
+                let lhs = self.transform_expr(left.clone());
+                let rhs = self.transform_expr(right.clone());
+                let dst = self.new_tmp_var(binding.ty.clone(), &binding.scope);
+                self.emit(new_node!(LessOrEq {
+                    ty: binding.ty.clone(),
                     lhs: lhs,
                     rhs: rhs,
                     dst: dst.clone()
@@ -507,10 +565,11 @@ impl IrGenerator {
                 dst
             }
             ASTKind::GreaterThan { left, right } => {
-                let lhs = self.transform_expr(left.clone(), tac_code);
-                let rhs = self.transform_expr(right.clone(), tac_code);
-                let dst = self.create_tmp_var(&binding.scope);
-                tac_code.push(new_node!(GreaterThan {
+                let lhs = self.transform_expr(left.clone());
+                let rhs = self.transform_expr(right.clone());
+                let dst = self.new_tmp_var(binding.ty.clone(), &binding.scope);
+                self.emit(new_node!(GreaterThan {
+                    ty: binding.ty.clone(),
                     lhs: lhs,
                     rhs: rhs,
                     dst: dst.clone()
@@ -518,10 +577,11 @@ impl IrGenerator {
                 dst
             }
             ASTKind::GreaterOrEq { left, right } => {
-                let lhs = self.transform_expr(left.clone(), tac_code);
-                let rhs = self.transform_expr(right.clone(), tac_code);
-                let dst = self.create_tmp_var(&binding.scope);
-                tac_code.push(new_node!(GreaterOrEq {
+                let lhs = self.transform_expr(left.clone());
+                let rhs = self.transform_expr(right.clone());
+                let dst = self.new_tmp_var(binding.ty.clone(), &binding.scope);
+                self.emit(new_node!(GreaterOrEq {
+                    ty: binding.ty.clone(),
                     lhs: lhs,
                     rhs: rhs,
                     dst: dst.clone()
@@ -529,63 +589,72 @@ impl IrGenerator {
                 dst
             }
             ASTKind::LogicAnd { left, right } => {
-                let false_label = new_node!(Label(self.incr_label_index()));
-                let end_label = new_node!(Label(self.incr_label_index()));
-                let x = self.transform_expr(left.clone(), tac_code);
-                tac_code.push(new_node!(JumpOnZero {
+                let false_label = new_node!(Label(self.incr_label_idx()));
+                let end_label = new_node!(Label(self.incr_label_idx()));
+                let x = self.transform_expr(left.clone());
+                self.emit(new_node!(JumpOnZero {
+                    ty: binding.ty.clone(),
                     expr: x,
                     label: false_label.clone()
                 }));
-                let y = self.transform_expr(right.clone(), tac_code);
-                tac_code.push(new_node!(JumpOnZero {
+                let y = self.transform_expr(right.clone());
+                self.emit(new_node!(JumpOnZero {
+                    ty: binding.ty.clone(),
                     expr: y,
                     label: false_label.clone()
                 }));
-                let dst = self.create_tmp_var(&binding.scope);
-                tac_code.push(new_node!(Copy {
+                let dst = self.new_tmp_var(binding.ty.clone(), &binding.scope);
+                self.emit(new_node!(Copy {
+                    ty: binding.ty.clone(),
                     src: new_node!(ConstInt(1)),
                     dst: dst.clone()
                 }));
-                tac_code.push(new_node!(Jump(end_label.clone())));
-                tac_code.push(false_label);
-                tac_code.push(new_node!(Copy {
+                self.emit(new_node!(Jump(end_label.clone())));
+                self.emit(false_label);
+                self.emit(new_node!(Copy {
+                    ty: binding.ty.clone(),
                     src: new_node!(ConstInt(0)),
                     dst: dst.clone()
                 }));
-                tac_code.push(end_label);
+                self.emit(end_label);
                 dst
             }
             ASTKind::LogicOr { left, right } => {
-                let true_label = new_node!(Label(self.incr_label_index()));
-                let end_label = new_node!(Label(self.incr_label_index()));
-                let x = self.transform_expr(left.clone(), tac_code);
-                tac_code.push(new_node!(JumpOnNotZero {
+                let true_label = new_node!(Label(self.incr_label_idx()));
+                let end_label = new_node!(Label(self.incr_label_idx()));
+                let x = self.transform_expr(left.clone());
+                self.emit(new_node!(JumpOnNotZero {
+                    ty: binding.ty.clone(),
                     expr: x,
                     label: true_label.clone()
                 }));
-                let y = self.transform_expr(right.clone(), tac_code);
-                tac_code.push(new_node!(JumpOnNotZero {
+                let y = self.transform_expr(right.clone());
+                self.emit(new_node!(JumpOnNotZero {
+                    ty: binding.ty.clone(),
                     expr: y,
                     label: true_label.clone()
                 }));
-                let dst = self.create_tmp_var(&binding.scope);
-                tac_code.push(new_node!(Copy {
+                let dst = self.new_tmp_var(binding.ty.clone(), &binding.scope);
+                self.emit(new_node!(Copy {
+                    ty: binding.ty.clone(),
                     src: new_node!(ConstInt(0)),
                     dst: dst.clone()
                 }));
-                tac_code.push(new_node!(Jump(end_label.clone())));
-                tac_code.push(true_label);
-                tac_code.push(new_node!(Copy {
+                self.emit(new_node!(Jump(end_label.clone())));
+                self.emit(true_label);
+                self.emit(new_node!(Copy {
+                    ty: binding.ty.clone(),
                     src: new_node!(ConstInt(1)),
                     dst: dst.clone()
                 }));
-                tac_code.push(end_label);
+                self.emit(end_label);
                 dst
             }
             ASTKind::Assign { left, right } => {
-                let exp = self.transform_expr(right.clone(), tac_code);
-                let dst = self.transform_expr(left.clone(), tac_code);
-                tac_code.push(new_node!(Copy {
+                let exp = self.transform_expr(right.clone());
+                let dst = self.transform_expr(left.clone());
+                self.emit(new_node!(Copy {
+                    ty: binding.ty.clone(),
                     src: exp,
                     dst: dst.clone()
                 }));
@@ -596,65 +665,146 @@ impl IrGenerator {
                 middle,
                 right,
             } => {
-                let e2_label = new_node!(Label(self.incr_label_index()));
-                let c = self.transform_expr(left.clone(), tac_code);
-                tac_code.push(new_node!(JumpOnZero {
+                let e2_label = new_node!(Label(self.incr_label_idx()));
+                let c = self.transform_expr(left.clone());
+                self.emit(new_node!(JumpOnZero {
+                    ty: binding.ty.clone(),
                     expr: c,
                     label: e2_label.clone()
                 }));
-                let e1 = self.transform_expr(middle.clone(), tac_code);
-                let res = self.create_tmp_var(&binding.scope);
-                tac_code.push(new_node!(Copy {
+                let e1 = self.transform_expr(middle.clone());
+                let res = self.new_tmp_var(binding.ty.clone(), &binding.scope);
+                self.emit(new_node!(Copy {
+                    ty: binding.ty.clone(),
                     src: e1.clone(),
                     dst: res.clone()
                 }));
-                let end_label = new_node!(Label(self.incr_label_index()));
-                tac_code.push(new_node!(Jump(end_label.clone())));
-                tac_code.push(e2_label.clone());
-                let e2 = self.transform_expr(right.clone(), tac_code);
-                tac_code.push(new_node!(Copy {
+                let end_label = new_node!(Label(self.incr_label_idx()));
+                self.emit(new_node!(Jump(end_label.clone())));
+                self.emit(e2_label.clone());
+                let e2 = self.transform_expr(right.clone());
+                self.emit(new_node!(Copy {
+                    ty: binding.ty.clone(),
                     src: e2.clone(),
                     dst: res.clone()
                 }));
-                tac_code.push(end_label.clone());
+                self.emit(end_label.clone());
                 res
             }
-            ASTKind::Identifier { name: _, sym } => {
-                new_node!(Var(sym.as_ref().unwrap().0, 4))
+            ASTKind::Identifier { .. } => {
+                let node_ref = expr.as_ref().borrow();
+                let sym_rc = node_ref.resolve().unwrap();
+                let sym = sym_rc.borrow();
+                let sym_node = node_ref.resolve_node();
+
+                match &sym_node.unwrap().borrow().kind {
+                    ASTKind::Function { name, .. } => {
+                        let defined = get_sym(
+                            global_scope(binding.scope.clone()),
+                            name,
+                            None,
+                        )
+                        .unwrap()
+                        .borrow()
+                        .defined;
+                        new_node!(FunctionRef(name.clone(), defined))
+                    }
+                    _ => {
+                        new_node!(Var(binding.ty.clone(), sym.offset))
+                    }
+                }
             }
-            _ => unreachable!(),
+
+            ASTKind::Call { expr, args } => {
+                let mut arg_exprs: Vec<Rc<TAC>> = vec![];
+
+                for arg in args {
+                    arg_exprs.push(self.transform_expr(arg.clone()));
+                }
+
+                let dst = self.new_tmp_var(binding.ty.clone(), &binding.scope);
+                let fun = self.transform_expr(expr.clone());
+
+                self.emit(new_node!(Call {
+                    ty: binding.ty.clone(),
+                    func: fun,
+                    args: arg_exprs,
+                    dst: dst.clone()
+                }));
+
+                dst
+            }
+
+            _ => {
+                unreachable!()
+            }
         }
     }
 
-    fn transform(&mut self, node: Rc<AST>, tac_code: &mut Vec<Rc<TAC>>) {
-        let binding = node;
+    fn transform(&mut self, node: ASTRef) {
+        let binding = node.borrow();
         match &binding.kind {
             ASTKind::Function {
                 name,
-                params: _,
+                params,
                 block,
-                rtype: _,
+                ty: _,
                 scope,
             } => {
-                let mut func_code: Vec<Rc<TAC>> = vec![];
-                match &block.clone().unwrap().kind {
-                    ASTKind::Block { body } => {
-                        for stmt in body {
-                            self.transform(stmt.clone(), &mut func_code);
+                let mut irgen = IrGenerator::from(self);
+
+                if block.is_some() {
+                    let mut tac_params: Vec<Rc<TAC>> = vec![];
+
+                    for param in params {
+                        if let ASTKind::Parameter {
+                            name,
+                            idx: _,
+                            ty: _,
+                        } = &param.borrow().kind
+                        {
+                            if name.is_some() {
+                                // otherwise 'void'
+                                let ty = param.as_ref().borrow().ty.clone();
+                                let offset = find_offset(
+                                    param.as_ref().borrow().scope.clone(),
+                                    &name.as_ref().unwrap(),
+                                    None,
+                                )
+                                .unwrap();
+                                let p = new_node!(Var(ty, offset));
+                                tac_params.push(p);
+                            }
                         }
                     }
-                    _ => {}
+
+                    match &block.as_ref().unwrap().borrow().kind {
+                        ASTKind::Block { body } => {
+                            for stmt in body {
+                                irgen.transform(stmt.clone());
+                            }
+                        }
+                        _ => {}
+                    }
+
+                    irgen.emit(new_node!(Return(new_node!(ConstInt(0)))));
+
+                    self.join(&irgen);
+
+                    let func = new_node!(Function {
+                        name: name.clone(),
+                        params: tac_params,
+                        code: irgen.out(),
+                        depth: scope.borrow().depth,
+                    });
+
+                    self.emit(func);
                 }
-                func_code.push(new_node!(Return(new_node!(ConstInt(0)))));
-                tac_code.push(new_node!(Function {
-                    name: name.clone(),
-                    code: func_code,
-                    depth: scope.borrow().depth,
-                }));
             }
+
             ASTKind::Block { body } => {
                 for stmt in body {
-                    self.transform(stmt.clone(), tac_code);
+                    self.transform(stmt.clone());
                 }
             }
             ASTKind::If {
@@ -663,13 +813,14 @@ impl IrGenerator {
                 otherwise,
             } => {
                 let else_label = if otherwise.is_some() {
-                    Some(new_node!(Label(self.incr_label_index())))
+                    Some(new_node!(Label(self.incr_label_idx())))
                 } else {
                     None
                 };
-                let end_label = new_node!(Label(self.incr_label_index()));
-                let c = self.transform_expr(cond.clone(), tac_code);
-                tac_code.push(new_node!(JumpOnZero {
+                let end_label = new_node!(Label(self.incr_label_idx()));
+                let c = self.transform_expr(cond.clone());
+                self.emit(new_node!(JumpOnZero {
+                    ty: binding.ty.clone(),
                     expr: c,
                     label: if else_label.is_some() {
                         else_label.as_ref().unwrap().clone()
@@ -677,42 +828,49 @@ impl IrGenerator {
                         end_label.clone()
                     }
                 }));
-                self.transform(then.clone(), tac_code);
+                self.transform(then.clone());
                 if otherwise.is_some() {
-                    tac_code.push(new_node!(Jump(end_label.clone())));
-                    tac_code.push(else_label.unwrap());
-                    self.transform(
-                        otherwise.as_ref().unwrap().clone(),
-                        tac_code,
-                    );
+                    self.emit(new_node!(Jump(end_label.clone())));
+                    self.emit(else_label.unwrap());
+                    self.transform(otherwise.as_ref().unwrap().clone());
                 }
-                tac_code.push(end_label);
+                self.emit(end_label);
             }
             ASTKind::Switch { cond, body, cases } => {
-                let cond = self.transform_expr(cond.clone(), tac_code);
-                let dst = self.create_tmp_var(&binding.scope);
-                tac_code.push(new_node!(Copy {
-                    src: cond,
+                let src = self.transform_expr(cond.clone());
+                let dst =
+                    self.new_tmp_var(cond.borrow().ty.clone(), &binding.scope);
+                self.emit(new_node!(Copy {
+                    ty: binding.ty.clone(),
+                    src: src,
                     dst: dst.clone()
                 }));
                 for c in cases.iter() {
-                    match &c.kind {
+                    match &c.borrow().kind {
                         ASTKind::Case {
                             expr,
                             stmt: _,
                             idx: _,
                         } => {
-                            let e = self.transform_expr(expr.clone(), tac_code);
-                            let tmp = self.create_tmp_var(&binding.scope);
-                            tac_code.push(new_node!(Equal {
+                            let e = self.transform_expr(expr.clone());
+                            let tmp = self.new_tmp_var(
+                                expr.borrow().ty.clone(),
+                                &binding.scope,
+                            );
+                            self.emit(new_node!(Equal {
+                                ty: binding.ty.clone(),
                                 lhs: dst.clone(),
                                 rhs: e,
                                 dst: tmp.clone()
                             }));
-                            let label_idx = self.add_case_label(&c.scope, c.id);
+                            let label_idx = self.add_case_label(
+                                &c.borrow().scope,
+                                c.borrow().id,
+                            );
                             let case_label =
                                 new_node!(Label(label_idx.unwrap()));
-                            tac_code.push(new_node!(JumpOnNotZero {
+                            self.emit(new_node!(JumpOnNotZero {
+                                ty: binding.ty.clone(),
                                 expr: tmp,
                                 label: case_label
                             }));
@@ -722,62 +880,67 @@ impl IrGenerator {
                 }
                 let mut has_default = false;
                 for c in cases.iter() {
-                    match &c.kind {
+                    match &c.borrow().kind {
                         ASTKind::Default { .. } => {
-                            let label_idx = self.add_case_label(&c.scope, c.id);
+                            let label_idx = self.add_case_label(
+                                &c.borrow().scope,
+                                c.borrow().id,
+                            );
                             let case_label =
                                 new_node!(Label(label_idx.unwrap()));
-                            tac_code.push(new_node!(Jump(case_label)));
+                            self.emit(new_node!(Jump(case_label)));
                             has_default = true;
                         }
                         _ => {}
                     }
                 }
                 let break_label = new_node!(Label(
-                    self.add_break_label(&body.scope).unwrap()
+                    self.add_break_label(&body.borrow().scope).unwrap()
                 ));
                 if !has_default {
-                    tac_code.push(new_node!(Jump(break_label.clone())));
+                    self.emit(new_node!(Jump(break_label.clone())));
                 }
                 if cases.len() > 0 {
-                    self.transform(body.clone(), tac_code);
+                    self.transform(body.clone());
                 }
-                tac_code.push(break_label);
+                self.emit(break_label);
             }
             ASTKind::DoWhile { cond, body } => {
-                let start_label = new_node!(Label(self.incr_label_index()));
-                tac_code.push(start_label.clone());
-                self.transform(body.clone(), tac_code);
+                let start_label = new_node!(Label(self.incr_label_idx()));
+                self.emit(start_label.clone());
+                self.transform(body.clone());
                 let continue_label = new_node!(Label(
-                    self.add_continue_label(&body.scope).unwrap()
+                    self.add_continue_label(&body.borrow().scope).unwrap()
                 ));
-                tac_code.push(continue_label);
-                let c = self.transform_expr(cond.clone(), tac_code);
-                tac_code.push(new_node!(JumpOnNotZero {
+                self.emit(continue_label);
+                let c = self.transform_expr(cond.clone());
+                self.emit(new_node!(JumpOnNotZero {
+                    ty: binding.ty.clone(),
                     expr: c,
                     label: start_label
                 }));
                 let break_label = new_node!(Label(
-                    self.add_break_label(&body.scope).unwrap()
+                    self.add_break_label(&body.borrow().scope).unwrap()
                 ));
-                tac_code.push(break_label);
+                self.emit(break_label);
             }
             ASTKind::While { cond, body } => {
                 let continue_label = new_node!(Label(
-                    self.add_continue_label(&body.scope).unwrap()
+                    self.add_continue_label(&body.borrow().scope).unwrap()
                 ));
-                tac_code.push(continue_label.clone());
-                let c = self.transform_expr(cond.clone(), tac_code);
+                self.emit(continue_label.clone());
+                let c = self.transform_expr(cond.clone());
                 let break_label = new_node!(Label(
-                    self.add_break_label(&body.scope).unwrap()
+                    self.add_break_label(&body.borrow().scope).unwrap()
                 ));
-                tac_code.push(new_node!(JumpOnZero {
+                self.emit(new_node!(JumpOnZero {
+                    ty: binding.ty.clone(),
                     expr: c,
                     label: break_label.clone()
                 }));
-                self.transform(body.clone(), tac_code);
-                tac_code.push(new_node!(Jump(continue_label)));
-                tac_code.push(break_label);
+                self.transform(body.clone());
+                self.emit(new_node!(Jump(continue_label)));
+                self.emit(break_label);
             }
             ASTKind::For {
                 init,
@@ -786,84 +949,83 @@ impl IrGenerator {
                 body,
             } => {
                 if init.is_some() {
-                    self.transform(init.as_ref().unwrap().clone(), tac_code);
+                    self.transform(init.as_ref().unwrap().clone());
                 }
-                let start_label = new_node!(Label(self.incr_label_index()));
-                tac_code.push(start_label.clone());
+                let start_label = new_node!(Label(self.incr_label_idx()));
+                self.emit(start_label.clone());
                 let break_label = new_node!(Label(
-                    self.add_break_label(&body.scope).unwrap()
+                    self.add_break_label(&body.borrow().scope).unwrap()
                 ));
                 if cond.is_some() {
-                    let c = self.transform_expr(
-                        cond.as_ref().unwrap().clone(),
-                        tac_code,
-                    );
-                    tac_code.push(new_node!(JumpOnZero {
+                    let c = self.transform_expr(cond.as_ref().unwrap().clone());
+                    self.emit(new_node!(JumpOnZero {
+                        ty: binding.ty.clone(),
                         expr: c,
                         label: break_label.clone()
                     }));
                 }
-                self.transform(body.clone(), tac_code);
+                self.transform(body.clone());
                 let continue_label = new_node!(Label(
-                    self.add_continue_label(&body.scope).unwrap()
+                    self.add_continue_label(&body.borrow().scope).unwrap()
                 ));
-                tac_code.push(continue_label.clone());
+                self.emit(continue_label.clone());
                 if post.is_some() {
-                    self.transform(post.as_ref().unwrap().clone(), tac_code);
+                    self.transform(post.as_ref().unwrap().clone());
                 }
-                tac_code.push(new_node!(Jump(start_label.clone())));
-                tac_code.push(break_label);
+                self.emit(new_node!(Jump(start_label.clone())));
+                self.emit(break_label);
             }
             ASTKind::Return { expr } => {
-                let e = self.transform_expr(expr.clone(), tac_code);
-                tac_code.push(new_node!(Return(e)));
+                let e = self.transform_expr(expr.clone());
+                self.emit(new_node!(Return(e)));
             }
             ASTKind::GoTo { label } => {
                 let idx = self.add_named_label(label);
                 let l = new_node!(Label(idx.unwrap()));
-                tac_code.push(new_node!(Jump(l.clone())));
+                self.emit(new_node!(Jump(l.clone())));
             }
             ASTKind::Label { name, stmt } => {
                 let idx = self.add_named_label(name);
                 let l = new_node!(Label(idx.unwrap()));
-                tac_code.push(l);
-                self.transform(stmt.clone(), tac_code);
+                self.emit(l);
+                self.transform(stmt.clone());
             }
             ASTKind::Case { stmt, .. } => {
                 let label_idx = self.add_case_label(&binding.scope, binding.id);
-                tac_code.push(new_node!(Label(label_idx.unwrap())));
-                self.transform(stmt.clone(), tac_code);
+                self.emit(new_node!(Label(label_idx.unwrap())));
+                self.transform(stmt.clone());
             }
             ASTKind::Default { stmt, .. } => {
                 let label_idx = self.add_case_label(&binding.scope, binding.id);
-                tac_code.push(new_node!(Label(label_idx.unwrap())));
-                self.transform(stmt.clone(), tac_code);
+                self.emit(new_node!(Label(label_idx.unwrap())));
+                self.transform(stmt.clone());
             }
             ASTKind::Break { .. } => {
                 let idx = self.add_break_label(&binding.scope);
                 let l = new_node!(Label(idx.unwrap()));
-                tac_code.push(new_node!(Jump(l.clone())));
+                self.emit(new_node!(Jump(l.clone())));
             }
             ASTKind::Continue { .. } => {
                 let idx = self.add_continue_label(&binding.scope);
                 let l = new_node!(Label(idx.unwrap()));
-                tac_code.push(new_node!(Jump(l.clone())));
+                self.emit(new_node!(Jump(l.clone())));
             }
             ASTKind::ExprStmt { expr } => {
-                _ = self.transform_expr(expr.clone(), tac_code);
+                _ = self.transform_expr(expr.clone());
             }
-            ASTKind::Variable { name, typ: _, init } => {
+            ASTKind::Variable { name, ty: _, init } => {
                 if init.is_some() {
-                    let e = self.transform_expr(
-                        init.as_ref().unwrap().clone(),
-                        tac_code,
-                    );
+                    let e = self.transform_expr(init.as_ref().unwrap().clone());
                     let scope = &binding.scope;
                     let v = new_node!(Var(
-                        scope.borrow().find_off(&name).unwrap(),
-                        4
+                        binding.ty.clone(),
+                        find_offset(scope.clone(), &name, None).unwrap(),
                     ));
-                    tac_code.push(new_node!(Copy { src: e, dst: v }));
+                    self.emit(new_node!(Copy {
+                        ty: binding.ty.clone(),
+                        src: e,
+                        dst: v
+                    }));
                 }
             }
             ASTKind::EmptyStmt => {}
@@ -873,11 +1035,19 @@ impl IrGenerator {
         }
     }
 
-    pub fn generate(&mut self, ast: Vec<Rc<AST>>) -> Vec<Rc<TAC>> {
-        let mut code: Vec<Rc<TAC>> = vec![];
+    fn emit(&mut self, ir: Rc<TAC>) {
+        self.tac_code.push(ir.clone());
+    }
+
+    fn out(&mut self) -> Vec<Rc<TAC>> {
+        std::mem::take(&mut self.tac_code)
+    }
+
+    pub fn generate(&mut self, ast: Vec<ASTRef>) -> Vec<Rc<TAC>> {
+        self.tac_code.clear();
         for node in ast {
-            self.transform(node, &mut code);
+            self.transform(node);
         }
-        code
+        self.tac_code.clone()
     }
 }

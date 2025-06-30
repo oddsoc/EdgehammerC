@@ -26,7 +26,7 @@ use std::io::Write;
 use std::path::Path;
 use std::rc::Rc;
 
-use crate::x64::codegen::Asm;
+use crate::x64::codegen::{Code, Register};
 
 use super::codegen::CondCode;
 
@@ -42,260 +42,344 @@ fn cc_to_str(cc: &CondCode) -> String {
     .to_string()
 }
 
-fn asm_to_str(asm: Rc<RefCell<Asm>>) -> String {
-    match &*asm.borrow() {
-        Asm::Imm(val) => format!("${}", val),
-        Asm::Stack(idx, _size) => format!("-{}(%rbp)", idx),
-        Asm::Label(idx) => format!(".L{}", idx),
-        Asm::Al => format!("%al"),
-        Asm::Ax => format!("%ax"),
-        Asm::Eax => format!("%eax"),
-        Asm::Rax => format!("%Rax"),
-        Asm::Bl => format!("%bl"),
-        Asm::Bx => format!("%bx"),
-        Asm::Ebx => format!("%ebx"),
-        Asm::Rbx => format!("%rbx"),
-        Asm::Cl => format!("%cl"),
-        Asm::Cx => format!("%cx"),
-        Asm::Ecx => format!("%ecx"),
-        Asm::Rcx => format!("%rcx"),
-        Asm::Dl => format!("%dl"),
-        Asm::Dx => format!("%dx"),
-        Asm::Edx => format!("%edx"),
-        Asm::Rdx => format!("%rdx"),
-        Asm::Sil => format!("%sil"),
-        Asm::Si => format!("%si"),
-        Asm::Esi => format!("%esi"),
-        Asm::Rsi => format!("%rsi"),
-        Asm::Dil => format!("%dil"),
-        Asm::Di => format!("%di"),
-        Asm::Edi => format!("%edi"),
-        Asm::Rdi => format!("%rdi"),
-        Asm::Spl => format!("%spl"),
-        Asm::Sp => format!("%sp"),
-        Asm::Esp => format!("%esp"),
-        Asm::Rsp => format!("%rsp"),
-        Asm::Bpl => format!("%bpl"),
-        Asm::Bp => format!("%bp"),
-        Asm::Ebp => format!("%ebp"),
-        Asm::Rbp => format!("%rbp"),
-        Asm::R8b => format!("%r8b"),
-        Asm::R8w => format!("%r8w"),
-        Asm::R8d => format!("%r8d"),
-        Asm::R8 => format!("%r8"),
-        Asm::R9b => format!("%r9b"),
-        Asm::R9w => format!("%r9w"),
-        Asm::R9d => format!("%r9d"),
-        Asm::R9 => format!("%r9"),
-        Asm::R10b => format!("%r10b"),
-        Asm::R10w => format!("%r10w"),
-        Asm::R10d => format!("%r10d"),
-        Asm::R10 => format!("%r10"),
-        Asm::R11b => format!("%r11b"),
-        Asm::R11w => format!("%r11w"),
-        Asm::R11d => format!("%r11d"),
-        Asm::R11 => format!("%r11"),
-        Asm::R12b => format!("%r12b"),
-        Asm::R12w => format!("%r12w"),
-        Asm::R12d => format!("%r12d"),
-        Asm::R12 => format!("%r12"),
-        Asm::R13b => format!("%r13b"),
-        Asm::R13w => format!("%r13w"),
-        Asm::R13d => format!("%r13d"),
-        Asm::R13 => format!("%r13"),
-        Asm::R14b => format!("%r14b"),
-        Asm::R14w => format!("%r14w"),
-        Asm::R14d => format!("%r14d"),
-        Asm::R14 => format!("%r14"),
-        Asm::R15b => format!("%r15b"),
-        Asm::R15w => format!("%r15w"),
-        Asm::R15d => format!("%r15d"),
-        Asm::R15 => format!("%r15"),
+fn code_to_str(code: Rc<RefCell<Code>>) -> String {
+    match &*code.borrow() {
+        Code::Imm { val, .. } => format!("${}", val),
+        Code::Var { off, .. } => {
+            format!("{}(%rbp)", -off)
+        }
+
+        Code::Label(idx) => format!(".L{}", idx),
+        Code::FunctionRef(name, defined) => {
+            if *defined {
+                format!("{}", name)
+            } else {
+                format!("{}@PLT", name)
+            }
+        }
+
+        Code::Reg { reg, size, .. } => match &*reg {
+            Register::RAX => match size {
+                1 => "%al".to_string(),
+                2 => "%ax".to_string(),
+                4 => "%eax".to_string(),
+                8 => "%rax".to_string(),
+                _ => unreachable!(),
+            },
+            Register::RBX => match size {
+                1 => "%bl".to_string(),
+                2 => "%bx".to_string(),
+                4 => "%ebx".to_string(),
+                8 => "%rbx".to_string(),
+                _ => unreachable!(),
+            },
+            Register::RCX => match size {
+                1 => "%cl".to_string(),
+                2 => "%cx".to_string(),
+                4 => "%ecx".to_string(),
+                8 => "%rcx".to_string(),
+                _ => unreachable!(),
+            },
+            Register::RDX => match size {
+                1 => "%dl".to_string(),
+                2 => "%dx".to_string(),
+                4 => "%edx".to_string(),
+                8 => "%rdx".to_string(),
+                _ => unreachable!(),
+            },
+            Register::RSI => match size {
+                1 => "%sil".to_string(),
+                2 => "%si".to_string(),
+                4 => "%esi".to_string(),
+                8 => "%rsi".to_string(),
+                _ => unreachable!(),
+            },
+            Register::RDI => match size {
+                1 => "%dil".to_string(),
+                2 => "%di".to_string(),
+                4 => "%edi".to_string(),
+                8 => "%rdi".to_string(),
+                _ => unreachable!(),
+            },
+            Register::RSP => match size {
+                1 => "%spl".to_string(),
+                2 => "%sp".to_string(),
+                4 => "%esp".to_string(),
+                8 => "%rsp".to_string(),
+                _ => unreachable!(),
+            },
+            Register::RBP => match size {
+                1 => "%bpl".to_string(),
+                2 => "%bp".to_string(),
+                4 => "%ebp".to_string(),
+                8 => "%rbp".to_string(),
+                _ => unreachable!(),
+            },
+            Register::R8 => match size {
+                1 => "%r8b".to_string(),
+                2 => "%r8w".to_string(),
+                4 => "%r8d".to_string(),
+                8 => "%r8".to_string(),
+                _ => unreachable!(),
+            },
+            Register::R9 => match size {
+                1 => "%r9b".to_string(),
+                2 => "%r9w".to_string(),
+                4 => "%r9d".to_string(),
+                8 => "%r9".to_string(),
+                _ => unreachable!(),
+            },
+            Register::R10 => match size {
+                1 => "%r10b".to_string(),
+                2 => "%r10w".to_string(),
+                4 => "%r10d".to_string(),
+                8 => "%r10".to_string(),
+                _ => unreachable!(),
+            },
+            Register::R11 => match size {
+                1 => "%r11b".to_string(),
+                2 => "%r11w".to_string(),
+                4 => "%r11d".to_string(),
+                8 => "%r11".to_string(),
+                _ => unreachable!(),
+            },
+            Register::R12 => match size {
+                1 => "%r12b".to_string(),
+                2 => "%r12w".to_string(),
+                4 => "%r12d".to_string(),
+                8 => "%r12".to_string(),
+                _ => unreachable!(),
+            },
+            Register::R13 => match size {
+                1 => "%r13b".to_string(),
+                2 => "%r13w".to_string(),
+                4 => "%r13d".to_string(),
+                8 => "%r13".to_string(),
+                _ => unreachable!(),
+            },
+            Register::R14 => match size {
+                1 => "%r14b".to_string(),
+                2 => "%r14w".to_string(),
+                4 => "%r14d".to_string(),
+                8 => "%r14".to_string(),
+                _ => unreachable!(),
+            },
+            Register::R15 => match size {
+                1 => "%r15b".to_string(),
+                2 => "%r15w".to_string(),
+                4 => "%r15d".to_string(),
+                8 => "%r15".to_string(),
+                _ => unreachable!(),
+            },
+        },
 
         _ => unreachable!(),
     }
 }
 
-fn emit_operand(file: &mut std::fs::File, operand: Rc<RefCell<Asm>>) {
-    write!(file, "{}", asm_to_str(operand)).unwrap();
+fn emit_operand(file: &mut std::fs::File, operand: Rc<RefCell<Code>>) {
+    write!(file, "{}", code_to_str(operand)).unwrap();
 }
 
-fn emit_op(file: &mut std::fs::File, instr: Rc<RefCell<Asm>>) {
+fn op_suffix(size: usize) -> String {
+    match size {
+        1 => "b".to_string(),
+        2 => "s".to_string(),
+        4 => "l".to_string(),
+        8 => "q".to_string(),
+        _ => unreachable!(),
+    }
+}
+
+fn emit_op(file: &mut std::fs::File, instr: Rc<RefCell<Code>>) {
     match &*instr.borrow() {
-        Asm::Movb(src, dst) => {
-            write!(file, "\tmovb\t").unwrap();
+        Code::Mov(src, dst, size) => {
+            write!(file, "\tmov{}\t", op_suffix(*size)).unwrap();
             emit_operand(file, src.clone());
             write!(file, ", ").unwrap();
             emit_operand(file, dst.clone());
             writeln!(file, "").unwrap();
         }
 
-        Asm::Movw(src, dst) => {
-            write!(file, "\tmovw\t").unwrap();
+        Code::MovSignExt(src, dst, size) => {
+            write!(file, "\tmovsx{}\t", op_suffix(*size)).unwrap();
             emit_operand(file, src.clone());
             write!(file, ", ").unwrap();
             emit_operand(file, dst.clone());
             writeln!(file, "").unwrap();
         }
 
-        Asm::Movl(src, dst) => {
-            write!(file, "\tmovl\t").unwrap();
+        Code::MovZeroExt(src, dst, size) => {
+            write!(file, "\tmovzx{}\t", op_suffix(*size)).unwrap();
             emit_operand(file, src.clone());
             write!(file, ", ").unwrap();
             emit_operand(file, dst.clone());
             writeln!(file, "").unwrap();
         }
 
-        Asm::Movq(src, dst) => {
-            write!(file, "\tmovq\t").unwrap();
+        Code::Neg(dst, size) => {
+            write!(file, "\tneg{}\t", op_suffix(*size)).unwrap();
+            emit_operand(file, dst.clone());
+            writeln!(file, "").unwrap();
+        }
+
+        Code::Not(dst, size) => {
+            write!(file, "\tnot{}\t", op_suffix(*size)).unwrap();
+            emit_operand(file, dst.clone());
+            writeln!(file, "").unwrap();
+        }
+
+        Code::IMul(src, dst, size) => {
+            write!(file, "\timul{}\t", op_suffix(*size)).unwrap();
             emit_operand(file, src.clone());
             write!(file, ", ").unwrap();
             emit_operand(file, dst.clone());
             writeln!(file, "").unwrap();
         }
 
-        Asm::Negl(dst) => {
-            write!(file, "\tnegl\t").unwrap();
-            emit_operand(file, dst.clone());
+        Code::IDiv(src, size) => {
+            write!(file, "\tidiv{}\t", op_suffix(*size)).unwrap();
+            emit_operand(file, src.clone());
             writeln!(file, "").unwrap();
         }
 
-        Asm::Notl(dst) => {
-            write!(file, "\tnotl\t").unwrap();
-            emit_operand(file, dst.clone());
-            writeln!(file, "").unwrap();
-        }
-
-        Asm::IMull(src, dst) => {
-            write!(file, "\timull\t").unwrap();
+        Code::Add(src, dst, size) => {
+            write!(file, "\tadd{}\t", op_suffix(*size)).unwrap();
             emit_operand(file, src.clone());
             write!(file, ", ").unwrap();
             emit_operand(file, dst.clone());
             writeln!(file, "").unwrap();
         }
 
-        Asm::IDivl(src) => {
-            write!(file, "\tidivl\t").unwrap();
-            emit_operand(file, src.clone());
-            writeln!(file, "").unwrap();
-        }
-
-        Asm::Addl(src, dst) => {
-            write!(file, "\taddl\t").unwrap();
+        Code::Sub(src, dst, size) => {
+            write!(file, "\tsub{}\t", op_suffix(*size)).unwrap();
             emit_operand(file, src.clone());
             write!(file, ", ").unwrap();
             emit_operand(file, dst.clone());
             writeln!(file, "").unwrap();
         }
 
-        Asm::Subl(src, dst) => {
-            write!(file, "\tsubl\t").unwrap();
+        Code::Shl(src, dst, size) => {
+            write!(file, "\tshl{}\t", op_suffix(*size)).unwrap();
             emit_operand(file, src.clone());
             write!(file, ", ").unwrap();
             emit_operand(file, dst.clone());
             writeln!(file, "").unwrap();
         }
 
-        Asm::Shll(src, dst) => {
-            write!(file, "\tshll\t").unwrap();
+        Code::Sar(src, dst, size) => {
+            write!(file, "\tsar{}\t", op_suffix(*size)).unwrap();
             emit_operand(file, src.clone());
             write!(file, ", ").unwrap();
             emit_operand(file, dst.clone());
             writeln!(file, "").unwrap();
         }
 
-        Asm::Sarl(src, dst) => {
-            write!(file, "\tsarl\t").unwrap();
+        Code::And(src, dst, size) => {
+            write!(file, "\tand{}\t", op_suffix(*size)).unwrap();
             emit_operand(file, src.clone());
             write!(file, ", ").unwrap();
             emit_operand(file, dst.clone());
             writeln!(file, "").unwrap();
         }
 
-        Asm::Andl(src, dst) => {
-            write!(file, "\tandl\t").unwrap();
+        Code::Or(src, dst, size) => {
+            write!(file, "\tor{}\t", op_suffix(*size)).unwrap();
             emit_operand(file, src.clone());
             write!(file, ", ").unwrap();
             emit_operand(file, dst.clone());
             writeln!(file, "").unwrap();
         }
 
-        Asm::Orl(src, dst) => {
-            write!(file, "\torl\t").unwrap();
+        Code::Xor(src, dst, size) => {
+            write!(file, "\txor{}\t", op_suffix(*size)).unwrap();
             emit_operand(file, src.clone());
             write!(file, ", ").unwrap();
             emit_operand(file, dst.clone());
             writeln!(file, "").unwrap();
         }
 
-        Asm::Xorl(src, dst) => {
-            write!(file, "\txorl\t").unwrap();
-            emit_operand(file, src.clone());
-            write!(file, ", ").unwrap();
-            emit_operand(file, dst.clone());
-            writeln!(file, "").unwrap();
-        }
-
-        Asm::Cdq => {
+        Code::Cdq => {
             writeln!(file, "\tcdq").unwrap();
         }
 
-        Asm::Ret => {
+        Code::Ret => {
             writeln!(file, "\tmovq\t%rbp, %rsp").unwrap();
             writeln!(file, "\tpopq\t%rbp").unwrap();
             writeln!(file, "\tret").unwrap();
         }
 
-        Asm::Cmpl(src, dst) => {
-            write!(file, "\tcmpl\t").unwrap();
+        Code::Cmp(src, dst, size) => {
+            write!(file, "\tcmp{}\t", op_suffix(*size)).unwrap();
             emit_operand(file, src.clone());
             write!(file, ", ").unwrap();
             emit_operand(file, dst.clone());
             writeln!(file, "").unwrap();
         }
 
-        Asm::Jmp(label) => {
+        Code::Jmp(label) => {
             write!(file, "\tjmp\t").unwrap();
             emit_operand(file, label.clone());
             writeln!(file, "").unwrap();
         }
 
-        Asm::JmpCC { cond, label } => {
+        Code::JmpCC { cond, label } => {
             let cc = cc_to_str(cond);
             write!(file, "\tj{} \t", cc).unwrap();
             emit_operand(file, label.clone());
             writeln!(file, "").unwrap();
         }
 
-        Asm::SetCC { cond, dst } => {
+        Code::SetCC { cond, dst } => {
             let cc = cc_to_str(cond);
             write!(file, "\tset{}\t", cc).unwrap();
             emit_operand(file, dst.clone());
             writeln!(file, "").unwrap();
         }
 
-        Asm::Label(idx) => {
+        Code::Label(idx) => {
             writeln!(file, ".L{}:", *idx).unwrap();
         }
 
+        Code::Call(func) => {
+            write!(file, "\tcall\t").unwrap();
+            emit_operand(file, func.clone());
+            writeln!(file, "").unwrap();
+        }
+
+        Code::Push(val) => {
+            write!(file, "\tpushq\t").unwrap();
+            emit_operand(file, val.clone());
+            writeln!(file, "").unwrap();
+        }
+
+        Code::PushBytes(n) => {
+            write!(file, "\tsubq\t${}, %rsp\n", n).unwrap();
+        }
+
+        Code::PopBytes(n) => {
+            write!(file, "\taddq\t${}, %rsp\n", n).unwrap();
+        }
+
         _ => {
+            println!("Cannot emit {:?}", instr);
             unreachable!();
         }
     }
 }
 
-pub fn emit(filepath: &str, asm: Vec<Rc<RefCell<Asm>>>) {
+pub fn emit(filepath: &str, code: Vec<Rc<RefCell<Code>>>) {
     let mut file = std::fs::File::create(filepath).unwrap();
     let path = Path::new(filepath);
     let filename = path.file_stem().unwrap().to_str().unwrap();
 
     writeln!(file, "// Generated by Andrew's C~ Compiler\n").unwrap();
     writeln!(file, "\t.file \"{}.c\"", filename).unwrap();
-    writeln!(file, "\t.text").unwrap();
+    writeln!(file, "\t.text\n").unwrap();
 
-    for instr in asm {
+    for instr in code {
         match &*instr.borrow() {
-            Asm::Function { name, stack, asm } => {
+            Code::Function { name, stack, code } => {
                 writeln!(file, "\t.globl {}", name).unwrap();
                 writeln!(file, "\t.type {}, @function", name).unwrap();
                 writeln!(file, "{}:", name).unwrap();
@@ -304,9 +388,11 @@ pub fn emit(filepath: &str, asm: Vec<Rc<RefCell<Asm>>>) {
                 writeln!(file, "\tmovq\t%rsp, %rbp").unwrap();
                 writeln!(file, "\tsubq\t${}, %rsp", stack).unwrap();
 
-                for instr in asm {
+                for instr in code {
                     emit_op(&mut file, instr.clone());
                 }
+
+                writeln!(file, "").unwrap();
             }
 
             _ => {
@@ -315,6 +401,6 @@ pub fn emit(filepath: &str, asm: Vec<Rc<RefCell<Asm>>>) {
         }
     }
 
-    writeln!(file, "\n\t.ident\t\"EdgehammerC 0.1.0\"").unwrap();
+    writeln!(file, "\t.ident\t\"EdgehammerC 0.1.0\"").unwrap();
     writeln!(file, "\t.section .note.GNU-stack,\"\",@progbits").unwrap();
 }

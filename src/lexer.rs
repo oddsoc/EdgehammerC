@@ -42,6 +42,7 @@ pub enum TokenKind {
     RCurly,
     Colon,
     Semicolon,
+    Comma,
     QMark,
     Tilde,
     Minus,
@@ -418,6 +419,14 @@ impl Lexer {
                     self.consume();
                     return self.new_tok(
                         TokenKind::Semicolon,
+                        start,
+                        self.column - 1,
+                    );
+                }
+                b',' => {
+                    self.consume();
+                    return self.new_tok(
+                        TokenKind::Comma,
                         start,
                         self.column - 1,
                     );

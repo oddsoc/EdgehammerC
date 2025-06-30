@@ -26,7 +26,10 @@ use std::collections::HashMap;
 use std::rc::{Rc, Weak};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::ast::AST;
+use crate::ast::*;
+
+pub type ScopeRef = Rc<RefCell<Scope>>;
+pub type SymRef = Rc<RefCell<Symbol>>;
 
 #[derive(Debug, PartialEq)]
 pub enum ScopeKind {
@@ -37,20 +40,36 @@ pub enum ScopeKind {
     Switch,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
+pub enum Linkage {
+    External,
+    Internal,
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct Symbol {
+    pub name: String,
+    pub node: Option<Weak<RefCell<AST>>>,
+    pub offset: usize,
+    pub size: usize,
+    pub alignment: usize,
+    pub linkage: Option<Linkage>,
+    pub defined: bool,
+}
+
 #[derive(Debug)]
 pub struct Scope {
     pub kind: ScopeKind,
     parent: Option<ScopeRef>,
-    nesting: usize,
     offset: usize,
     pub id: usize,
     pub depth: usize,
 
-    labels: HashMap<String, Weak<AST>>,
-    symbols: HashMap<String, (usize, Weak<AST>)>,
+    labels: HashMap<String, Weak<RefCell<AST>>>,
+    symbols: HashMap<String, SymRef>,
 }
-
-pub type ScopeRef = Rc<RefCell<Scope>>;
 
 static SCOPE_ID: AtomicUsize = AtomicUsize::new(0);
 
@@ -69,11 +88,6 @@ impl Scope {
             parent: parent.clone(),
             offset: if parent.is_some() {
                 parent.clone().unwrap().as_ref().borrow().offset
-            } else {
-                0
-            },
-            nesting: if parent.is_some() {
-                parent.clone().unwrap().as_ref().borrow().nesting + 1
             } else {
                 0
             },
@@ -99,7 +113,7 @@ impl Scope {
         }
     }
 
-    pub fn add_tmp(&mut self, size: usize, alignment: usize) -> usize {
+    pub fn add_tmp_var(&mut self, size: usize, alignment: usize) -> usize {
         assert!(alignment.is_power_of_two());
         self.offset = (self.offset + (alignment - 1)) & !(alignment - 1);
         let offset = self.offset;
@@ -114,14 +128,49 @@ impl Scope {
     pub fn update_sym(
         &mut self,
         name: &str,
-        symbol: Rc<AST>,
+        node: ASTRef,
+        defined: bool,
     ) -> Result<(), ()> {
-        let entry = self.find(name);
-        assert!(entry.is_some(), "symbol '{}' not found", name);
-        self.symbols.insert(
-            name.to_string(),
-            (entry.unwrap().0, Rc::downgrade(&symbol)),
-        );
+        let linkage: Option<Linkage>;
+
+        if let Some(sym) = self.symbols.get_mut(name) {
+            let mut sym_mut = sym.borrow_mut();
+            linkage = sym_mut.linkage.clone();
+            if sym_mut.node.is_none() || linkage.is_none() {
+                if defined {
+                    sym_mut.defined = true;
+                }
+                sym_mut.node = Some(Rc::downgrade(&node));
+            }
+        } else {
+            return Err(());
+        }
+
+        if matches!(linkage, Some(Linkage::External)) {
+            let mut maybe_scope = self.parent.as_ref().map(Rc::clone);
+            while let Some(scope_rc) = maybe_scope {
+                let is_global = scope_rc.borrow().parent.is_none();
+
+                if is_global {
+                    let global = scope_rc.borrow();
+                    if let Some(global_sym) = global.symbols.get(name) {
+                        if defined {
+                            global_sym.as_ref().borrow_mut().defined = true;
+                        }
+
+                        if global_sym.as_ref().borrow().node.is_some() {
+                            break;
+                        } else {
+                            global_sym.as_ref().borrow_mut().node =
+                                Some(Rc::downgrade(&node));
+                        }
+                    }
+                    break;
+                }
+
+                maybe_scope = scope_rc.borrow().parent.as_ref().map(Rc::clone);
+            }
+        }
 
         Ok(())
     }
@@ -129,12 +178,19 @@ impl Scope {
     pub fn add_sym(
         &mut self,
         name: &str,
-        symbol: Rc<AST>,
+        linkage: Option<Linkage>,
+        node: Option<ASTRef>,
         size: usize,
         alignment: usize,
     ) -> Result<(), ()> {
-        if self.symbols.contains_key(name) {
-            return Err(());
+        if let Some(sym) = self.symbols.get(name) {
+            let sym_ref = sym.borrow();
+
+            if compatible_linkage(&sym_ref.linkage, &linkage) {
+                return Ok(());
+            } else {
+                return Err(());
+            }
         }
 
         assert!(alignment.is_power_of_two());
@@ -143,130 +199,213 @@ impl Scope {
         self.offset += size;
         self.depth = self.offset;
         self.update_depth(self.depth);
-        self.symbols
-            .insert(name.to_string(), (offset, Rc::downgrade(&symbol)));
+
+        let symbol = Rc::new(RefCell::new(Symbol {
+            name: name.to_string(),
+            node: node.as_ref().map(Rc::downgrade),
+            offset,
+            size,
+            alignment,
+            linkage: linkage.clone(),
+            defined: if let Some(Linkage::External) = linkage {
+                false
+            } else {
+                true
+            },
+        }));
+
+        self.symbols.insert(name.to_string(), Rc::clone(&symbol));
+
+        if matches!(linkage, Some(Linkage::External)) {
+            let mut maybe_scope = self.parent.as_ref().map(Rc::clone);
+
+            while let Some(scope_rc) = maybe_scope {
+                let is_global = scope_rc.borrow().parent.is_none();
+
+                if is_global {
+                    let mut global = scope_rc.borrow_mut();
+                    if !global.symbols.contains_key(name) {
+                        global
+                            .symbols
+                            .insert(name.to_string(), Rc::clone(&symbol));
+                    }
+                    break;
+                }
+
+                maybe_scope = scope_rc.borrow().parent.as_ref().map(Rc::clone);
+            }
+        }
 
         Ok(())
     }
+}
 
-    pub fn add_label(&mut self, name: &str, stmt: Rc<AST>) -> Result<(), ()> {
-        if !matches!(self.kind, ScopeKind::Function) {
-            return self
-                .parent
-                .as_ref()
-                .unwrap()
-                .borrow_mut()
-                .add_label(name, stmt.clone());
-        } else if self.labels.contains_key(name) {
-            Err(())
-        } else {
-            self.labels.insert(name.to_string(), Rc::downgrade(&stmt));
-            Ok(())
-        }
+fn compatible_linkage(a: &Option<Linkage>, b: &Option<Linkage>) -> bool {
+    match (a, b) {
+        (None, None) => false,
+        (Some(x), Some(y)) => x == y,
+        _ => false,
     }
+}
 
-    pub fn loop_or_switch_scope(&self) -> Option<ScopeRef> {
-        if self.kind == ScopeKind::Loop || self.kind == ScopeKind::Switch {
-            // only search ancestors
-            return None;
-        }
+pub fn add_label(
+    scope: ScopeRef,
+    name: &str,
+    stmt: ASTRef,
+) -> Result<(), String> {
+    assert!(scope.as_ref().borrow().kind != ScopeKind::Global);
 
-        let switch_scope = self.scope_of(ScopeKind::Switch);
-        let loop_scope = self.scope_of(ScopeKind::Loop);
-
-        if switch_scope.is_some() {
-            if loop_scope.is_some()
-                && loop_scope.as_ref().unwrap().borrow().nesting
-                    > switch_scope.as_ref().unwrap().borrow().nesting
-            {
-                return loop_scope;
-            } else {
-                return switch_scope;
-            }
-        }
-
-        loop_scope
+    if !matches!(scope.as_ref().borrow().kind, ScopeKind::Function) {
+        add_label(
+            scope.as_ref().borrow().parent.as_ref().unwrap().clone(),
+            name,
+            stmt,
+        )
+    } else if scope.borrow().labels.contains_key(name) {
+        Err(format!("'{}' label already exists", name))
+    } else {
+        scope
+            .borrow_mut()
+            .labels
+            .insert(name.to_string(), Rc::downgrade(&stmt));
+        Ok(())
     }
+}
 
-    pub fn loop_scope(&self) -> Option<ScopeRef> {
-        self.scope_of(ScopeKind::Loop)
-    }
-
-    pub fn switch_scope(&self) -> Option<ScopeRef> {
-        self.scope_of(ScopeKind::Switch)
-    }
-
-    fn scope_of(&self, kind: ScopeKind) -> Option<ScopeRef> {
-        if self.kind == kind {
-            // only search ancestors
-            return None;
-        }
-
-        let mut current = self.parent.clone();
-
-        while let Some(parent_rc) = current {
-            let parent_ref = parent_rc.borrow();
-            if parent_ref.kind == kind {
-                return Some(parent_rc.clone());
-            }
-            current = parent_ref.parent.clone();
-        }
-
+pub fn loop_or_switch_scope(scope: ScopeRef) -> Option<ScopeRef> {
+    if scope.as_ref().borrow().kind == ScopeKind::Loop
+        || scope.borrow().kind == ScopeKind::Switch
+    {
+        Some(scope.clone())
+    } else if scope.borrow().parent.is_some() {
+        loop_or_switch_scope(
+            scope.as_ref().borrow().parent.as_ref().unwrap().clone(),
+        )
+    } else {
         None
     }
+}
 
-    pub fn find_label(&self, name: &str) -> Option<Rc<AST>> {
-        if self.kind == ScopeKind::Function {
-            return self.labels.get(name).and_then(|w| w.upgrade());
-        }
+pub fn loop_scope(scope: ScopeRef) -> Option<ScopeRef> {
+    scope_of(scope, ScopeKind::Loop)
+}
 
-        self.scope_of(ScopeKind::Function).and_then(|scope| {
-            scope.borrow().labels.get(name).and_then(|w| w.upgrade())
-        })
+pub fn switch_scope(scope: ScopeRef) -> Option<ScopeRef> {
+    scope_of(scope, ScopeKind::Switch)
+}
+
+fn scope_of(scope: ScopeRef, kind: ScopeKind) -> Option<ScopeRef> {
+    if scope.as_ref().borrow().kind == kind {
+        Some(scope.clone())
+    } else if scope.borrow().parent.is_some() {
+        scope_of(
+            scope.as_ref().borrow().parent.as_ref().unwrap().clone(),
+            kind,
+        )
+    } else {
+        None
     }
+}
 
-    pub fn find(&self, name: &str) -> Option<(usize, Rc<AST>)> {
-        let mut parent = self.parent.clone();
+pub fn find_label(scope: ScopeRef, name: &str) -> Option<ASTRef> {
+    if let Some(sc) = scope_of(scope, ScopeKind::Function) {
+        sc.as_ref()
+            .borrow()
+            .labels
+            .get(name)
+            .and_then(|w| w.upgrade())
+    } else {
+        None
+    }
+}
 
-        if let Some((offset, sym_weak)) = self.symbols.get(name) {
-            if let Some(sym) = sym_weak.upgrade() {
-                return Some((*offset, sym));
-            }
-        }
+pub fn global_scope(scope: ScopeRef) -> ScopeRef {
+    if let Some(parent) = scope.as_ref().borrow().parent.clone() {
+        global_scope(parent.clone())
+    } else {
+        scope.clone()
+    }
+}
 
-        while parent.is_some() {
-            if let Some((offset, sym_weak)) =
-                parent.clone().unwrap().as_ref().borrow().symbols.get(name)
-            {
-                if let Some(sym) = sym_weak.upgrade() {
-                    return Some((*offset, sym));
+pub fn get_sym(
+    scope: ScopeRef,
+    name: &str,
+    before: Option<ASTRef>,
+) -> Option<SymRef> {
+    if let Some(sym) = scope.as_ref().borrow().symbols.get(name) {
+        if let Some(node) = before.as_ref() {
+            if sym.as_ref().borrow().node.is_some() {
+                let sym_node =
+                    sym.as_ref().borrow().node.as_ref().unwrap().upgrade();
+                if sym_node.as_ref().unwrap().borrow().preceeds(&node.borrow())
+                {
+                    return Some(sym.clone());
                 }
             }
-
-            parent = parent.unwrap().as_ref().borrow().parent.clone();
+        } else {
+            return Some(sym.clone());
         }
+    }
 
+    None
+}
+
+pub fn find_sym(
+    scope: ScopeRef,
+    name: &str,
+    before: Option<ASTRef>,
+) -> Option<SymRef> {
+    let mut sym = get_sym(scope.clone(), name, before.clone());
+
+    if sym.is_none() {
+        if scope.as_ref().borrow().parent.is_some() {
+            sym = find_sym(
+                scope.as_ref().borrow().parent.as_ref().unwrap().clone(),
+                name,
+                before,
+            );
+        }
+    }
+
+    sym
+}
+
+#[allow(dead_code)]
+fn find_node(
+    scope: ScopeRef,
+    name: &str,
+    before: Option<ASTRef>,
+) -> Option<ASTRef> {
+    if let Some(sym) = find_sym(scope.clone(), name, before) {
+        if let Some(sym_node) = &sym.borrow_mut().node {
+            sym_node.upgrade()
+        } else {
+            None
+        }
+    } else {
         None
     }
+}
 
-    pub fn find_sym(&self, name: &str) -> Option<Rc<AST>> {
-        let entry = self.find(name);
-
-        if entry.is_some() {
-            Some(entry.unwrap().1.clone())
-        } else {
-            None
-        }
+pub fn find_offset(
+    scope: ScopeRef,
+    name: &str,
+    before: Option<ASTRef>,
+) -> Option<usize> {
+    if let Some(sym) = find_sym(scope.clone(), name, before) {
+        Some(sym.borrow_mut().offset)
+    } else {
+        None
     }
+}
 
-    #[allow(dead_code)]
-    pub fn find_off(&self, name: &str) -> Option<usize> {
-        let entry = self.find(name);
+pub fn resolve(identifier: ASTRef) -> Option<SymRef> {
+    let scope = identifier.borrow().scope.clone();
 
-        if entry.is_some() {
-            Some(entry.unwrap().0.clone())
-        } else {
-            None
+    match &identifier.borrow().kind {
+        ASTKind::Identifier { name, sym: _ } => {
+            return find_sym(scope, name, Some(identifier.clone()));
         }
+        _ => return None,
     }
 }

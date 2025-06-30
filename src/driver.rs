@@ -25,10 +25,13 @@ use std::env;
 use std::path::PathBuf;
 use std::process::Command;
 
+use crate::ast::*;
 use crate::ir;
 use crate::lexer;
 use crate::parser;
+use crate::resolver::*;
 use crate::semantics::*;
+use crate::types::*;
 use crate::x64::codegen::CodeGenerator;
 use crate::x64::out;
 
@@ -38,6 +41,7 @@ pub enum Argument {
     Parse,
     Validate,
     Codegen,
+    NoLink,
     OutputAsm,
     OutputTo(PathBuf),
 }
@@ -47,6 +51,7 @@ pub struct Translation {
     c_file: PathBuf,
     i_file: PathBuf,
     s_file: PathBuf,
+    o_file: PathBuf,
 }
 
 fn build_translations(
@@ -69,10 +74,15 @@ fn build_translations(
                     temp_dir.join(format!("{}.s", stem.to_string_lossy()))
                 };
 
+            let o_file = env::current_dir()
+                .unwrap()
+                .join(format!("{}.o", stem.to_string_lossy()));
+
             translations.push(Translation {
                 c_file,
                 i_file,
                 s_file,
+                o_file,
             });
         } else {
             eprintln!("invalid C file path: {}", c_file.display());
@@ -111,6 +121,9 @@ pub fn process_args(args: &[String]) -> (Vec<Translation>, Vec<Argument>) {
                     std::process::exit(1);
                 }
             }
+            "-c" => {
+                arguments.push(Argument::NoLink);
+            }
             "--lex" => {
                 arguments.push(Argument::Lex);
             }
@@ -139,9 +152,15 @@ pub fn process_args(args: &[String]) -> (Vec<Translation>, Vec<Argument>) {
             let c_file = &files[0];
             if let Some(path) = c_file.parent() {
                 if let Some(stem) = c_file.file_stem() {
-                    arguments.push(Argument::OutputTo(PathBuf::from(
-                        path.join(stem),
-                    )));
+                    if arguments.iter().any(|i| matches!(i, Argument::NoLink)) {
+                        arguments.push(Argument::OutputTo(PathBuf::from(
+                            path.join(format!("{}.o", stem.to_string_lossy())),
+                        )));
+                    } else {
+                        arguments.push(Argument::OutputTo(PathBuf::from(
+                            path.join(stem),
+                        )));
+                    }
                 } else {
                     eprintln!("invalid C file path: {}", c_file.display());
                     std::process::exit(1);
@@ -190,6 +209,32 @@ fn lex(translations: &[Translation], arguments: &[Argument]) {
     }
 }
 
+fn verify(ast: Vec<ASTRef>) {
+    let resolver = Resolver::new();
+
+    let mut res = resolver.run(&ast);
+
+    if res.is_err() {
+        panic!("unable to resolve AST: {:?}", res);
+    }
+
+    let annotator = Annotator::new();
+
+    res = annotator.run(&ast);
+
+    if res.is_err() {
+        panic!("Type checking failed: {:?}", res);
+    }
+
+    let analyser = Analyser::new();
+
+    res = analyser.run(&ast);
+
+    if res.is_err() {
+        panic!("semantic analysis failed: {:?}", res);
+    }
+}
+
 fn parse_translation(translation: &Translation, arguments: &[Argument]) {
     let c_file = translation.c_file.to_str().unwrap();
     let i_file = translation.i_file.to_str().unwrap();
@@ -202,9 +247,7 @@ fn parse_translation(translation: &Translation, arguments: &[Argument]) {
     let ast = parser.parse().unwrap();
 
     if validate {
-        if analyse(&ast).is_err() {
-            panic!("semantic analysis failure");
-        }
+        verify(ast.clone());
     }
 
     println!("{:#?}", ast);
@@ -224,15 +267,14 @@ fn codegen_translation(translation: &Translation, arguments: &[Argument]) {
     let mut parser = parser::Parser::new(i_file, true);
     let ast = parser.parse().unwrap();
 
-    if analyse(&ast).is_err() {
-        panic!("semantic analysis failure");
-    }
+    verify(ast.clone());
 
     let mut irgen = ir::IrGenerator::new();
-    let ir = irgen.generate(ast);
+
+    let ir = irgen.generate(ast.clone());
 
     if arguments.iter().any(|i| matches!(i, Argument::Codegen)) {
-        println!("TAC: {:#?}", ir);
+        println!("TAC: {:#?}", &ir);
     }
 
     let codegen = CodeGenerator::new();
@@ -264,7 +306,14 @@ fn codegen(translations: &[Translation], arguments: &[Argument]) {
         .find(|i| matches!(i, Argument::OutputTo(_)))
     {
         Some(Argument::OutputTo(output)) => {
-            assemble_gcc(&s_files, output.to_str().unwrap());
+            let link =
+                if arguments.iter().any(|i| matches!(i, Argument::NoLink)) {
+                    false
+                } else {
+                    true
+                };
+
+            assemble_gcc(&s_files, output.to_str().unwrap(), link);
         }
         _ => {}
     }
@@ -287,13 +336,18 @@ fn preprocess_gcc(c_file: &str, i_file: &str) {
         .expect("failed to preprocess {c_file}");
 }
 
-fn assemble_gcc(s_files: &Vec<String>, o_file: &str) {
-    Command::new("gcc")
-        .args(s_files.iter().map(|s| s.as_str()))
+fn assemble_gcc(s_files: &Vec<String>, o_file: &str, link: bool) {
+    let mut cmd = Command::new("gcc");
+
+    if !link {
+        cmd.arg("-c");
+    }
+
+    cmd.args(s_files.iter().map(|s| s.as_str()))
         .arg("-o")
-        .arg(o_file)
-        .status()
-        .expect("failed to assemble {filename}");
+        .arg(o_file);
+
+    cmd.status().expect("failed to assemble {filename}");
 }
 
 pub fn run(translations: &[Translation], arguments: &[Argument]) {

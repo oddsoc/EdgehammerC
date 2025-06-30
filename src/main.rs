@@ -29,8 +29,10 @@ mod expr;
 mod ir;
 mod lexer;
 mod parser;
+mod resolver;
 mod scope;
 mod semantics;
+mod types;
 mod x64;
 
 fn main() -> Result<(), ()> {
