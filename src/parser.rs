@@ -21,15 +21,14 @@
  *  DEALINGS IN THE SOFTWARE.
  */
 
-#[allow(unused_imports)]
-use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::ast::*;
 use crate::lexer::Lexer;
 use crate::lexer::Token;
 use crate::lexer::TokenKind;
-use crate::scope::*;
+use crate::scope;
+use scope::*;
 
 macro_rules! accept {
     ($parser:expr, $kind:path) => {
@@ -55,7 +54,7 @@ macro_rules! expect {
     ($parser:expr, $kind:path) => {
         if !matches!($parser.next.as_ref().unwrap().kind, $kind) {
             let msg = format!(
-                "Expected {:?}, but found {:?}",
+                "expected {:?}, but got {:?}",
                 stringify!($kind),
                 $parser.next.as_ref().unwrap().kind
             );
@@ -68,7 +67,7 @@ macro_rules! expect {
     ($parser:expr, $kind:path, $_:tt) => {
         if !matches!($parser.next.as_ref().unwrap().kind, $kind(_)) {
             let msg = format!(
-                "Expected {:?}, but found {:?}",
+                "expected {:?}, but got {:?}",
                 stringify!($kind),
                 $parser.next.as_ref().unwrap().kind
             );
@@ -118,29 +117,15 @@ macro_rules! yank {
 
 macro_rules! new_node {
     ($parser:expr, $variant:ident) => {
-        AST::new($parser.next_node_id(), ASTKind::$variant, None, $parser.scope.clone())
+        Ast::new($parser.next_node_id(), AstKind::$variant, None, $parser.scope.clone())
     };
 
     ($parser:expr, $variant:ident ( $($args:expr),* $(,)? )) => {
-        AST::new($parser.next_node_id(), ASTKind::$variant( $($args),* ), None, $parser.scope.clone())
+        Ast::new($parser.next_node_id(), AstKind::$variant( $($args),* ), None, $parser.scope.clone())
     };
 
     ($parser:expr, $variant:ident { $($field:ident : $value:expr),* $(,)? }) => {
-        AST::new($parser.next_node_id(), ASTKind::$variant { $($field: $value),*}, None, $parser.scope.clone())
-    };
-
-    ($parser:expr, $id:expr, $variant:ident) => {
-        AST::new($id, ASTKind::$variant, None, $parser.scope.clone())
-    };
-
-    ($parser:expr, $id:expr, $variant:ident ( $($args:expr),* $(,)? )) => {
-        AST::new($id, ASTKind::$variant( $($args),* ), None, $parser.scope.clone())
-    };
-
-    ($parser:expr, $id:expr, $variant:ident { $($field:ident : $value:expr),* $(,)? }) => {
-        AST::new($id, ASTKind::$variant {
-            $($field: $value),*
-        }, None, $parser.scope.clone())
+        Ast::new($parser.next_node_id(), AstKind::$variant { $($field: $value),*}, None, $parser.scope.clone())
     };
 }
 
@@ -151,12 +136,11 @@ pub struct Parser {
     next: Option<Token>,
     nr_nodes: usize,
     scope: ScopeRef,
-    cases: Vec<Vec<ASTRef>>,
-    validate: bool,
+    cases: Vec<Vec<AstRef>>,
 }
 
 fn precedence_of(kind: &TokenKind) -> i32 {
-    return match kind {
+    match kind {
         TokenKind::Mult | TokenKind::Div | TokenKind::Mod => 50,
         TokenKind::Plus | TokenKind::Minus => 45,
         TokenKind::LShift | TokenKind::RShift => 40,
@@ -181,25 +165,22 @@ fn precedence_of(kind: &TokenKind) -> i32 {
         | TokenKind::AndEq
         | TokenKind::InvEq => 1,
         _ => 0,
-    };
+    }
 }
 
 impl Parser {
-    pub fn new(filename: &str, validate: bool) -> Self {
-        let scope = Scope::open(ScopeKind::Global, None);
+    pub fn new(filename: &str) -> Self {
         let mut parser = Self {
             lexer: Lexer::new(filename),
             last: None,
             next: None,
             nr_nodes: 0,
-            scope: scope.clone(),
+            scope: crate::scope::new(),
             cases: vec![],
-            validate: validate,
         };
 
         parser.advance();
-
-        return parser;
+        parser
     }
 
     fn next_node_id(&mut self) -> usize {
@@ -209,81 +190,83 @@ impl Parser {
     }
 
     fn open_scope(&mut self, kind: ScopeKind) {
-        self.scope = Scope::open(kind, Some(self.scope.clone()));
+        self.scope = scope::open(self.scope.clone(), kind);
     }
 
     fn close_scope(&mut self) {
-        self.scope = self.scope.clone().borrow().close();
+        self.scope = scope::close(&self.scope);
     }
 
-    fn add_sym(
-        &mut self,
-        name: &str,
-        linkage: Option<Linkage>,
-        sym: Option<ASTRef>,
-    ) -> Result<(), String> {
-        let s = self.scope.as_ref().borrow_mut().add_sym(
-            &name,
-            linkage,
-            sym.clone(),
-            4,
-            4,
-        );
-
-        if self.validate && s.is_err() {
-            Err(format!("'{}' is already defined", name))
-        } else {
-            Ok(())
-        }
+    pub fn parse(&mut self) -> Result<Vec<AstRef>, String> {
+        self.program()
     }
 
-    fn update_sym(
-        &mut self,
-        name: &str,
-        sym: ASTRef,
-        defined: bool,
-    ) -> Result<(), String> {
-        let s = self.scope.as_ref().borrow_mut().update_sym(
-            &name,
-            sym.clone(),
-            defined,
-        );
-
-        if self.validate && s.is_err() {
-            Err(format!("'{}' not defined", name))
-        } else {
-            Ok(())
-        }
-    }
-
-    pub fn parse(&mut self) -> Result<Vec<ASTRef>, String> {
-        return self.program();
-    }
-
-    fn program(&mut self) -> Result<Vec<ASTRef>, String> {
-        let mut prog: Vec<ASTRef> = vec![];
+    fn program(&mut self) -> Result<Vec<AstRef>, String> {
+        let mut prog: Vec<AstRef> = vec![];
 
         while !self.eof() {
             prog.push(self.declaration()?);
         }
 
-        return Ok(prog);
+        Ok(prog)
     }
 
-    fn declaration(&mut self) -> Result<ASTRef, String> {
-        let ty = self.type_spec()?;
+    fn declaration(&mut self) -> Result<AstRef, String> {
+        let (ty_spec, storage_class) = self.type_spec_and_storage_class()?;
         expect!(self, TokenKind::Identifier, _);
         let name = yank!(self, TokenKind::Identifier);
 
         if peek!(self, TokenKind::LParen) {
-            self.function(ty, name)
+            self.function(ty_spec, storage_class, name)
         } else {
-            self.variable_decl(ty, name)
+            self.variable_decl(ty_spec, storage_class, name)
         }
     }
 
-    fn parameter_list(&mut self) -> Result<Vec<ASTRef>, String> {
-        let mut params: Vec<ASTRef> = vec![];
+    fn is_storage_class(&mut self) -> bool {
+        peek!(self, TokenKind::Static)
+            || peek!(self, TokenKind::Extern)
+            || peek!(self, TokenKind::Auto)
+            || peek!(self, TokenKind::Register)
+    }
+
+    fn is_type_spec_or_storage_class(&mut self) -> bool {
+        self.is_type_spec() || self.is_storage_class()
+    }
+
+    fn type_spec_and_storage_class(
+        &mut self,
+    ) -> Result<(AstRef, Option<StorageClass>), String> {
+        let mut type_specs: Vec<AstRef> = vec![];
+        let mut storage_classes: Vec<StorageClass> = vec![];
+
+        loop {
+            if self.is_type_spec() {
+                type_specs.push(self.type_spec()?);
+            } else if self.is_storage_class() {
+                storage_classes.push(self.storage_class()?);
+            } else {
+                break;
+            }
+        }
+
+        if type_specs.len() != 1 {
+            return Err("invalid type specifier".to_string());
+        }
+
+        if storage_classes.len() > 1 {
+            return Err("invalid storage class".to_string());
+        }
+
+        if storage_classes.len() == 1 {
+            Ok((type_specs[0].clone(), Some(storage_classes[0])))
+        } else {
+            Ok((type_specs[0].clone(), None))
+        }
+    }
+
+    fn parameter_list(&mut self) -> Result<Vec<AstRef>, String> {
+        let mut params: Vec<AstRef> = vec![];
         let mut idx = 0;
         expect!(self, TokenKind::LParen);
 
@@ -303,65 +286,104 @@ impl Parser {
         Ok(params)
     }
 
-    fn parameter(&mut self, idx: usize) -> Result<ASTRef, String> {
-        let ty = self.type_spec()?;
+    fn parameter(&mut self, idx: usize) -> Result<AstRef, String> {
+        let ty_spec = self.type_spec()?;
 
         if peek!(self, TokenKind::RParen) {
             Ok(new_node!(
                 self,
                 Parameter {
                     name: None,
+                    sym: None,
                     idx: idx,
-                    ty: ty
+                    type_spec: ty_spec
                 }
             ))
         } else {
             expect!(self, TokenKind::Identifier, _);
             let name = yank!(self, TokenKind::Identifier);
+
+            let sym = add_sym(
+                self.scope.clone(),
+                &name,
+                SymKind::Parameter,
+                4,
+                4,
+                None,
+                Some(Definition::Concrete),
+                None,
+            )?;
+
             let param = new_node!(
                 self,
                 Parameter {
                     name: Some(name.clone()),
+                    sym: Some(Rc::downgrade(&sym)),
                     idx: idx,
-                    ty: ty,
+                    type_spec: ty_spec,
                 }
             );
-            self.add_sym(&name, None, Some(param.clone()))?;
+
+            sym.borrow_mut().node = Some(Rc::downgrade(&param));
+
             Ok(param)
         }
     }
 
-    fn function(&mut self, ty: ASTRef, name: String) -> Result<ASTRef, String> {
-        let node_id = self.next_node_id();
-        self.add_sym(&name, Some(Linkage::External), None)?;
+    fn function(
+        &mut self,
+        ty_spec: AstRef,
+        storage_class: Option<StorageClass>,
+        name: String,
+    ) -> Result<AstRef, String> {
         self.open_scope(ScopeKind::Function);
         let params = self.parameter_list()?;
 
         if accept!(self, TokenKind::Semicolon) {
             self.close_scope();
 
+            let sym = add_sym(
+                self.scope.clone(),
+                &name,
+                SymKind::Function,
+                1,
+                16,
+                storage_class,
+                None,
+                None,
+            )?;
+
             let signature = new_node!(
                 self,
-                node_id,
                 Function {
                     name: name.clone(),
+                    sym: Some(Rc::downgrade(&sym)),
                     params: params.clone(),
                     block: None,
-                    ty: ty.clone(),
+                    type_spec: ty_spec.clone(),
                     scope: self.scope.clone(),
                 }
             );
 
-            self.update_sym(&name, signature.clone(), false)?;
+            sym.borrow_mut().node = Some(Rc::downgrade(&signature));
 
-            return Ok(signature);
+            Ok(signature)
         } else {
+            let sym = add_sym(
+                parent_of(&self.scope),
+                &name,
+                SymKind::Function,
+                1,
+                16,
+                storage_class,
+                Some(Definition::Concrete),
+                None,
+            )?;
+
             let body = self.function_body()?;
             self.close_scope();
 
-            if self.validate
-                && self.scope.as_ref().borrow().kind != ScopeKind::Global
-            {
+            if kind_of(&self.scope) != ScopeKind::File {
                 return Err(
                     "function definition is not allowed here".to_string()
                 );
@@ -369,29 +391,57 @@ impl Parser {
 
             let function = new_node!(
                 self,
-                node_id,
                 Function {
                     name: name.clone(),
+                    sym: Some(Rc::downgrade(&sym)),
                     params: params.clone(),
                     block: Some(body),
-                    ty: ty.clone(),
+                    type_spec: ty_spec.clone(),
                     scope: self.scope.clone(),
                 }
             );
 
-            self.update_sym(&name, function.clone(), true)?;
+            sym.borrow_mut().node = Some(Rc::downgrade(&function));
 
             Ok(function)
         }
     }
 
+    fn determine_definition_type(
+        &self,
+        storage_class: Option<StorageClass>,
+    ) -> Option<Definition> {
+        if peek!(self, TokenKind::Assign) {
+            Some(Definition::Concrete)
+        } else if let Some(StorageClass::Static) = storage_class {
+            Some(Definition::Tentative)
+        } else if let Some(StorageClass::Extern) = storage_class {
+            None
+        } else if !scope::has_parent(&self.scope) {
+            Some(Definition::Tentative)
+        } else {
+            None
+        }
+    }
+
     fn variable_decl(
         &mut self,
-        ty: ASTRef,
+        ty_spec: AstRef,
+        storage_class: Option<StorageClass>,
         name: String,
-    ) -> Result<ASTRef, String> {
-        let node_id = self.next_node_id();
-        self.add_sym(&name, None, None)?;
+    ) -> Result<AstRef, String> {
+        let definition = self.determine_definition_type(storage_class);
+
+        let sym = add_sym(
+            self.scope.clone(),
+            &name,
+            SymKind::Variable,
+            4,
+            4,
+            storage_class,
+            definition,
+            None,
+        )?;
 
         let initializer = if accept!(self, TokenKind::Assign) {
             Some(self.expr(0)?)
@@ -403,24 +453,24 @@ impl Parser {
 
         let var = new_node!(
             self,
-            node_id,
             Variable {
                 name: name.clone(),
-                ty: ty.clone(),
+                sym: Some(Rc::downgrade(&sym)),
+                type_spec: ty_spec.clone(),
                 init: initializer,
             }
         );
 
-        self.update_sym(&name, var.clone(), true)?;
+        sym.borrow_mut().node = Some(Rc::downgrade(&var));
 
         Ok(var)
     }
 
     fn is_type_spec(&self) -> bool {
-        return peek!(self, TokenKind::Int) || peek!(self, TokenKind::Void);
+        peek!(self, TokenKind::Int) || peek!(self, TokenKind::Void)
     }
 
-    fn type_spec(&mut self) -> Result<ASTRef, String> {
+    fn type_spec(&mut self) -> Result<AstRef, String> {
         if accept!(self, TokenKind::Int) {
             Ok(new_node!(self, Int))
         } else {
@@ -429,7 +479,21 @@ impl Parser {
         }
     }
 
-    fn statement(&mut self) -> Result<ASTRef, String> {
+    fn storage_class(&mut self) -> Result<StorageClass, String> {
+        if accept!(self, TokenKind::Static) {
+            Ok(StorageClass::Static)
+        } else if accept!(self, TokenKind::Extern) {
+            Ok(StorageClass::Extern)
+        } else if accept!(self, TokenKind::Auto) {
+            Ok(StorageClass::Auto)
+        } else if accept!(self, TokenKind::Register) {
+            Ok(StorageClass::Register)
+        } else {
+            Err("unknown storage class specifier".to_string())
+        }
+    }
+
+    fn statement(&mut self) -> Result<AstRef, String> {
         if peek!(self, TokenKind::LCurly) {
             self.block()
         } else if peek!(self, TokenKind::Label, _)
@@ -462,7 +526,7 @@ impl Parser {
         }
     }
 
-    fn while_stmt(&mut self) -> Result<ASTRef, String> {
+    fn while_stmt(&mut self) -> Result<AstRef, String> {
         expect!(self, TokenKind::While);
         expect!(self, TokenKind::LParen);
         let cond = self.expr(0)?;
@@ -480,7 +544,7 @@ impl Parser {
         ))
     }
 
-    fn do_while_stmt(&mut self) -> Result<ASTRef, String> {
+    fn do_while_stmt(&mut self) -> Result<AstRef, String> {
         expect!(self, TokenKind::Do);
         self.open_scope(ScopeKind::Loop);
         let body = self.statement()?;
@@ -500,12 +564,21 @@ impl Parser {
         ))
     }
 
-    fn for_init(&mut self) -> Result<ASTRef, String> {
-        if self.is_type_spec() {
-            let ty = self.type_spec()?;
+    fn for_init(&mut self) -> Result<AstRef, String> {
+        if self.is_type_spec_or_storage_class() {
+            let (ty_spec, storage_class) =
+                self.type_spec_and_storage_class()?;
             expect!(self, TokenKind::Identifier, _);
             let name = yank!(self, TokenKind::Identifier);
-            Ok(self.variable_decl(ty, name)?)
+
+            if storage_class.is_some() {
+                return Err(format!(
+                    "loop initial declaration of '{}' cannot have a storage class",
+                    name
+                ));
+            }
+
+            Ok(self.variable_decl(ty_spec, storage_class, name)?)
         } else {
             let init = new_node!(
                 self,
@@ -518,19 +591,19 @@ impl Parser {
         }
     }
 
-    fn for_stmt(&mut self) -> Result<ASTRef, String> {
+    fn for_stmt(&mut self) -> Result<AstRef, String> {
         expect!(self, TokenKind::For);
         expect!(self, TokenKind::LParen);
 
         self.open_scope(ScopeKind::Loop);
 
-        let init: Option<ASTRef> = if accept!(self, TokenKind::Semicolon) {
+        let init: Option<AstRef> = if accept!(self, TokenKind::Semicolon) {
             None
         } else {
             Some(self.for_init()?)
         };
 
-        let cond: Option<ASTRef> = if accept!(self, TokenKind::Semicolon) {
+        let cond: Option<AstRef> = if accept!(self, TokenKind::Semicolon) {
             None
         } else {
             let c = Some(self.expr(0)?);
@@ -538,7 +611,7 @@ impl Parser {
             c
         };
 
-        let post: Option<ASTRef> = if peek!(self, TokenKind::RParen) {
+        let post: Option<AstRef> = if peek!(self, TokenKind::RParen) {
             None
         } else {
             Some(new_node!(
@@ -566,7 +639,7 @@ impl Parser {
         ))
     }
 
-    fn switch_stmt(&mut self) -> Result<ASTRef, String> {
+    fn switch_stmt(&mut self) -> Result<AstRef, String> {
         expect!(self, TokenKind::Switch);
         expect!(self, TokenKind::LParen);
         let expr = self.expr(0)?;
@@ -589,27 +662,27 @@ impl Parser {
         ))
     }
 
-    fn break_stmt(&mut self) -> Result<ASTRef, String> {
+    fn break_stmt(&mut self) -> Result<AstRef, String> {
         expect!(self, TokenKind::Break);
         expect!(self, TokenKind::Semicolon);
 
         Ok(new_node!(self, Break { to: None }))
     }
 
-    fn continue_stmt(&mut self) -> Result<ASTRef, String> {
+    fn continue_stmt(&mut self) -> Result<AstRef, String> {
         expect!(self, TokenKind::Continue);
         expect!(self, TokenKind::Semicolon);
 
         Ok(new_node!(self, Continue { to: None }))
     }
 
-    fn labelled_stmt(&mut self) -> Result<ASTRef, String> {
+    fn labelled_stmt(&mut self) -> Result<AstRef, String> {
         if accept!(self, TokenKind::Label, _) {
             let label = yank!(self, TokenKind::Label);
             let stmt = self.statement()?;
             let l = add_label(self.scope.clone(), &label, stmt.clone());
 
-            if self.validate && !l.is_ok() {
+            if l.is_err() {
                 return Err(format!("'{}' label already defined", label));
             }
 
@@ -652,16 +725,16 @@ impl Parser {
         }
     }
 
-    fn stmt_or_decl(&mut self) -> Result<ASTRef, String> {
-        if self.is_type_spec() {
+    fn stmt_or_decl(&mut self) -> Result<AstRef, String> {
+        if self.is_type_spec_or_storage_class() {
             self.declaration()
         } else {
             self.statement()
         }
     }
 
-    fn block(&mut self) -> Result<ASTRef, String> {
-        let mut body: Vec<ASTRef> = vec![];
+    fn block(&mut self) -> Result<AstRef, String> {
+        let mut body: Vec<AstRef> = vec![];
         self.open_scope(ScopeKind::Block);
 
         expect!(self, TokenKind::LCurly);
@@ -672,11 +745,11 @@ impl Parser {
 
         self.close_scope();
 
-        return Ok(new_node!(self, Block { body: body }));
+        Ok(new_node!(self, Block { body: body }))
     }
 
-    fn function_body(&mut self) -> Result<ASTRef, String> {
-        let mut body: Vec<ASTRef> = vec![];
+    fn function_body(&mut self) -> Result<AstRef, String> {
+        let mut body: Vec<AstRef> = vec![];
 
         expect!(self, TokenKind::LCurly);
 
@@ -684,10 +757,10 @@ impl Parser {
             body.push(self.stmt_or_decl()?);
         }
 
-        return Ok(new_node!(self, Block { body: body }));
+        Ok(new_node!(self, Block { body: body }))
     }
 
-    fn if_stmt(&mut self) -> Result<ASTRef, String> {
+    fn if_stmt(&mut self) -> Result<AstRef, String> {
         expect!(self, TokenKind::If);
         expect!(self, TokenKind::LParen);
         let cond = self.expr(0)?;
@@ -709,7 +782,7 @@ impl Parser {
         ))
     }
 
-    fn goto_stmt(&mut self) -> Result<ASTRef, String> {
+    fn goto_stmt(&mut self) -> Result<AstRef, String> {
         expect!(self, TokenKind::GoTo);
         expect!(self, TokenKind::Identifier, _);
         let label = yank!(self, TokenKind::Identifier);
@@ -718,14 +791,14 @@ impl Parser {
         Ok(new_node!(self, GoTo { label: label }))
     }
 
-    fn return_stmt(&mut self) -> Result<ASTRef, String> {
+    fn return_stmt(&mut self) -> Result<AstRef, String> {
         expect!(self, TokenKind::Return);
         let expr = self.expr(0)?;
         expect!(self, TokenKind::Semicolon);
-        return Ok(new_node!(self, Return { expr: expr }));
+        Ok(new_node!(self, Return { expr: expr }))
     }
 
-    fn expr_stmt(&mut self) -> Result<ASTRef, String> {
+    fn expr_stmt(&mut self) -> Result<AstRef, String> {
         let stmt = new_node!(
             self,
             ExprStmt {
@@ -733,21 +806,21 @@ impl Parser {
             }
         );
         expect!(self, TokenKind::Semicolon);
-        return Ok(stmt);
+        Ok(stmt)
     }
 
     fn conditional(
         &mut self,
-        expr: ASTRef,
+        expr: AstRef,
         min_prec: i32,
-    ) -> Result<ASTRef, String> {
+    ) -> Result<AstRef, String> {
         let middle = self.expr(0)?;
         expect!(self, TokenKind::Colon);
         let right = self.expr(min_prec)?;
 
         Ok(new_node!(
             self,
-            Conditional {
+            Ternary {
                 left: expr.clone(),
                 middle: middle,
                 right: right,
@@ -755,8 +828,8 @@ impl Parser {
         ))
     }
 
-    fn argument_list(&mut self) -> Result<Vec<ASTRef>, String> {
-        let mut args: Vec<ASTRef> = vec![];
+    fn argument_list(&mut self) -> Result<Vec<AstRef>, String> {
+        let mut args: Vec<AstRef> = vec![];
 
         if !accept!(self, TokenKind::RParen) {
             loop {
@@ -773,7 +846,7 @@ impl Parser {
         Ok(args)
     }
 
-    fn call(&mut self, expr: ASTRef) -> Result<ASTRef, String> {
+    fn call(&mut self, expr: AstRef) -> Result<AstRef, String> {
         let args = self.argument_list()?;
 
         Ok(new_node!(
@@ -785,7 +858,7 @@ impl Parser {
         ))
     }
 
-    fn expr(&mut self, min_prec: i32) -> Result<ASTRef, String> {
+    fn expr(&mut self, min_prec: i32) -> Result<AstRef, String> {
         self.lexer.push_expr();
         let mut left = self.factor()?;
         let mut prec = precedence_of(&peek_any!(self));
@@ -834,11 +907,11 @@ impl Parser {
 
         self.lexer.pop_expr();
 
-        return Ok(left);
+        Ok(left)
     }
 
     fn peek_binop(&self) -> bool {
-        return match peek_any!(self) {
+        match peek_any!(self) {
             TokenKind::Mult
             | TokenKind::Div
             | TokenKind::Mod
@@ -870,19 +943,19 @@ impl Parser {
             | TokenKind::Assign
             | TokenKind::QMark => true,
             _ => false,
-        };
+        }
     }
 
-    fn binop(&mut self, left: ASTRef, prec: i32) -> Result<ASTRef, String> {
+    fn binop(&mut self, left: AstRef, prec: i32) -> Result<AstRef, String> {
         if accept!(self, TokenKind::Mult) {
             let right = self.expr(prec + 1)?;
-            return Ok(new_node!(
+            Ok(new_node!(
                 self,
                 Multiply {
                     left: left,
                     right: right
                 }
-            ));
+            ))
         } else if accept!(self, TokenKind::Div) {
             let right = self.expr(prec + 1)?;
             return Ok(new_node!(
@@ -1043,24 +1116,56 @@ impl Parser {
 
     fn assignment(
         &mut self,
-        left: ASTRef,
-        right: ASTRef,
-    ) -> Result<ASTRef, String> {
-        return Ok(new_node!(
+        left: AstRef,
+        right: AstRef,
+    ) -> Result<AstRef, String> {
+        Ok(new_node!(
             self,
             Assign {
                 left: left,
                 right: right
             }
-        ));
+        ))
+    }
+
+    fn pre_incr(&mut self, expr: AstRef) -> Result<AstRef, String> {
+        Ok(new_node!(
+            self,
+            Assign {
+                left: expr.clone(),
+                right: new_node!(
+                    self,
+                    Add {
+                        left: expr.clone(),
+                        right: new_node!(self, ConstInt(1))
+                    }
+                ),
+            }
+        ))
+    }
+
+    fn pre_decr(&mut self, expr: AstRef) -> Result<AstRef, String> {
+        Ok(new_node!(
+            self,
+            Assign {
+                left: expr.clone(),
+                right: new_node!(
+                    self,
+                    Subtract {
+                        left: expr.clone(),
+                        right: new_node!(self, ConstInt(1))
+                    }
+                ),
+            }
+        ))
     }
 
     fn plus_eq(
         &mut self,
-        left: ASTRef,
-        right: ASTRef,
-    ) -> Result<ASTRef, String> {
-        return Ok(new_node!(
+        left: AstRef,
+        right: AstRef,
+    ) -> Result<AstRef, String> {
+        Ok(new_node!(
             self,
             Assign {
                 left: left.clone(),
@@ -1072,15 +1177,15 @@ impl Parser {
                     }
                 ),
             }
-        ));
+        ))
     }
 
     fn minus_eq(
         &mut self,
-        left: ASTRef,
-        right: ASTRef,
-    ) -> Result<ASTRef, String> {
-        return Ok(new_node!(
+        left: AstRef,
+        right: AstRef,
+    ) -> Result<AstRef, String> {
+        Ok(new_node!(
             self,
             Assign {
                 left: left.clone(),
@@ -1092,15 +1197,15 @@ impl Parser {
                     }
                 ),
             }
-        ));
+        ))
     }
 
     fn mult_eq(
         &mut self,
-        left: ASTRef,
-        right: ASTRef,
-    ) -> Result<ASTRef, String> {
-        return Ok(new_node!(
+        left: AstRef,
+        right: AstRef,
+    ) -> Result<AstRef, String> {
+        Ok(new_node!(
             self,
             Assign {
                 left: left.clone(),
@@ -1112,15 +1217,15 @@ impl Parser {
                     }
                 ),
             }
-        ));
+        ))
     }
 
     fn div_eq(
         &mut self,
-        left: ASTRef,
-        right: ASTRef,
-    ) -> Result<ASTRef, String> {
-        return Ok(new_node!(
+        left: AstRef,
+        right: AstRef,
+    ) -> Result<AstRef, String> {
+        Ok(new_node!(
             self,
             Assign {
                 left: left.clone(),
@@ -1132,15 +1237,15 @@ impl Parser {
                     }
                 ),
             }
-        ));
+        ))
     }
 
     fn mod_eq(
         &mut self,
-        left: ASTRef,
-        right: ASTRef,
-    ) -> Result<ASTRef, String> {
-        return Ok(new_node!(
+        left: AstRef,
+        right: AstRef,
+    ) -> Result<AstRef, String> {
+        Ok(new_node!(
             self,
             Assign {
                 left: left.clone(),
@@ -1152,15 +1257,15 @@ impl Parser {
                     }
                 ),
             }
-        ));
+        ))
     }
 
     fn and_eq(
         &mut self,
-        left: ASTRef,
-        right: ASTRef,
-    ) -> Result<ASTRef, String> {
-        return Ok(new_node!(
+        left: AstRef,
+        right: AstRef,
+    ) -> Result<AstRef, String> {
+        Ok(new_node!(
             self,
             Assign {
                 left: left.clone(),
@@ -1172,11 +1277,11 @@ impl Parser {
                     }
                 ),
             }
-        ));
+        ))
     }
 
-    fn or_eq(&mut self, left: ASTRef, right: ASTRef) -> Result<ASTRef, String> {
-        return Ok(new_node!(
+    fn or_eq(&mut self, left: AstRef, right: AstRef) -> Result<AstRef, String> {
+        Ok(new_node!(
             self,
             Assign {
                 left: left.clone(),
@@ -1188,15 +1293,15 @@ impl Parser {
                     }
                 ),
             }
-        ));
+        ))
     }
 
     fn xor_eq(
         &mut self,
-        left: ASTRef,
-        right: ASTRef,
-    ) -> Result<ASTRef, String> {
-        return Ok(new_node!(
+        left: AstRef,
+        right: AstRef,
+    ) -> Result<AstRef, String> {
+        Ok(new_node!(
             self,
             Assign {
                 left: left.clone(),
@@ -1208,15 +1313,15 @@ impl Parser {
                     }
                 ),
             }
-        ));
+        ))
     }
 
     fn lshift_eq(
         &mut self,
-        left: ASTRef,
-        right: ASTRef,
-    ) -> Result<ASTRef, String> {
-        return Ok(new_node!(
+        left: AstRef,
+        right: AstRef,
+    ) -> Result<AstRef, String> {
+        Ok(new_node!(
             self,
             Assign {
                 left: left.clone(),
@@ -1228,15 +1333,15 @@ impl Parser {
                     }
                 ),
             }
-        ));
+        ))
     }
 
     fn rshift_eq(
         &mut self,
-        left: ASTRef,
-        right: ASTRef,
-    ) -> Result<ASTRef, String> {
-        return Ok(new_node!(
+        left: AstRef,
+        right: AstRef,
+    ) -> Result<AstRef, String> {
+        Ok(new_node!(
             self,
             Assign {
                 left: left.clone(),
@@ -1248,7 +1353,7 @@ impl Parser {
                     }
                 ),
             }
-        ));
+        ))
     }
 
     fn peek_postfix_op(&self) -> bool {
@@ -1258,7 +1363,7 @@ impl Parser {
         }
     }
 
-    fn postfix(&mut self, mut expr: ASTRef) -> Result<ASTRef, String> {
+    fn postfix(&mut self, mut expr: AstRef) -> Result<AstRef, String> {
         while self.peek_postfix_op() {
             if accept!(self, TokenKind::LParen) {
                 expr = self.call(expr.clone())?;
@@ -1274,9 +1379,9 @@ impl Parser {
         Ok(expr)
     }
 
-    fn factor(&mut self) -> Result<ASTRef, String> {
+    fn factor(&mut self) -> Result<AstRef, String> {
         if peek!(self, TokenKind::ConstInt, _) {
-            return self.const_int();
+            self.const_int()
         } else if accept!(self, TokenKind::Tilde) {
             return Ok(new_node!(
                 self,
@@ -1299,19 +1404,11 @@ impl Parser {
                 }
             ));
         } else if accept!(self, TokenKind::Incr) {
-            return Ok(new_node!(
-                self,
-                PreIncr {
-                    expr: self.factor()?
-                }
-            ));
+            let subexpr = self.factor()?;
+            return self.pre_incr(subexpr);
         } else if accept!(self, TokenKind::Decr) {
-            return Ok(new_node!(
-                self,
-                PreDecr {
-                    expr: self.factor()?
-                }
-            ));
+            let subexpr = self.factor()?;
+            return self.pre_decr(subexpr);
         } else if accept!(self, TokenKind::LParen) {
             let mut inner_expr = self.expr(0)?;
             expect!(self, TokenKind::RParen);
@@ -1323,15 +1420,16 @@ impl Parser {
             Ok(inner_expr)
         } else if accept!(self, TokenKind::Identifier, _) {
             let name = yank!(self, TokenKind::Identifier);
-            let sym = find_sym(self.scope.clone(), &name, None);
+            let sym = get_sym(self.scope.clone(), &name);
+
             let mut expr = new_node!(
                 self,
                 Identifier {
                     name: name.clone(),
-                    sym: if sym.is_some() {
-                        Some(Rc::downgrade(&sym.unwrap()))
+                    sym: if let Some(s) = sym {
+                        Some(Rc::downgrade(&s.clone()))
                     } else {
-                        None
+                        return Err(format!("'{}' undeclared", name));
                     }
                 }
             );
@@ -1346,18 +1444,18 @@ impl Parser {
         }
     }
 
-    fn const_int(&mut self) -> Result<ASTRef, String> {
+    fn const_int(&mut self) -> Result<AstRef, String> {
         expect!(self, TokenKind::ConstInt, _);
         let value = yank!(self, TokenKind::ConstInt);
-        return Ok(new_node!(self, ConstInt(value)));
+        Ok(new_node!(self, ConstInt(value)))
     }
 
-    fn oops(&self, why: &str) -> Result<ASTRef, String> {
-        return Err(why.to_string());
+    fn oops(&self, why: &str) -> Result<AstRef, String> {
+        Err(why.to_string())
     }
 
     fn eof(&self) -> bool {
-        return matches!(self.next.as_ref().unwrap().kind, TokenKind::EOF);
+        matches!(self.next.as_ref().unwrap().kind, TokenKind::EOF)
     }
 
     fn advance(&mut self) {

@@ -32,40 +32,61 @@ impl Analyser {
         Analyser {}
     }
 
-    fn walk(&self, ast: &ASTRef) -> Result<(), String> {
+    fn walk(&self, ast: &AstRef) -> Result<(), String> {
         let scope = ast.borrow().scope.clone();
 
         match &ast.borrow().kind {
-            ASTKind::Function {
-                params, block, ty, ..
+            AstKind::Function {
+                params,
+                block,
+                type_spec,
+                ..
             } => {
                 for param in params {
                     self.walk(param)?;
                 }
-                self.walk(ty)?;
+                self.walk(type_spec)?;
                 if let Some(block) = block {
                     self.walk(block)?;
                 }
                 Ok(())
             }
-            ASTKind::Block { body } => {
+            AstKind::Block { body } => {
                 for stmt in body {
                     self.walk(stmt)?;
                 }
                 Ok(())
             }
-            ASTKind::Variable { ty, init, .. } => {
-                self.walk(ty)?;
+
+            AstKind::Variable {
+                type_spec, init, ..
+            } => {
+                self.walk(type_spec)?;
                 if let Some(init) = init {
-                    _ = eval(init.clone())?;
+                    if let Some(sym) = resolve(ast) {
+                        if has_static_storage_duration(sym) {
+                            let e = eval(init.clone())?;
+                            let initializer = e.as_ref().borrow();
+                            match initializer.kind {
+                                AstKind::ConstInt(_) => {}
+                                _ => {
+                                    return Err(
+                                        "not a const expression".to_string()
+                                    );
+                                }
+                            }
+                        }
+                    }
                 }
+
                 Ok(())
             }
-            ASTKind::Return { expr } => {
+
+            AstKind::Return { expr } => {
                 _ = eval(expr.clone())?;
                 Ok(())
             }
-            ASTKind::If {
+            AstKind::If {
                 cond,
                 then,
                 otherwise,
@@ -77,24 +98,24 @@ impl Analyser {
                 }
                 Ok(())
             }
-            ASTKind::DoWhile { cond, body } => {
+            AstKind::DoWhile { cond, body } => {
                 _ = eval(cond.clone())?;
                 self.walk(body)?;
                 Ok(())
             }
-            ASTKind::While { cond, body } => {
+            AstKind::While { cond, body } => {
                 _ = eval(cond.clone())?;
                 self.walk(body)?;
                 Ok(())
             }
-            ASTKind::For {
+            AstKind::For {
                 init,
                 cond,
                 post,
                 body,
             } => {
                 if let Some(init) = init {
-                    self.walk(&init)?;
+                    self.walk(init)?;
                 }
 
                 if let Some(cond) = cond {
@@ -102,52 +123,57 @@ impl Analyser {
                 }
 
                 if let Some(post) = post {
-                    self.walk(&post)?;
+                    self.walk(post)?;
                 }
 
-                self.walk(&body)?;
+                self.walk(body)?;
 
                 Ok(())
             }
 
-            ASTKind::Continue { .. } => {
-                if loop_scope(scope).is_some() {
+            AstKind::Continue { .. } => {
+                if upto(scope.clone(), ScopeKind::Loop).is_some() {
                     Ok(())
                 } else {
                     Err("continue not in a loop".to_string())
                 }
             }
 
-            ASTKind::Break { .. } => {
-                if loop_or_switch_scope(scope).is_some() {
+            AstKind::Break { .. } => {
+                if upto_any(
+                    scope.clone(),
+                    &[ScopeKind::Loop, ScopeKind::Switch],
+                )
+                .is_some()
+                {
                     Ok(())
                 } else {
                     Err("break not in a loop or switch".to_string())
                 }
             }
-            ASTKind::ExprStmt { expr } => {
+            AstKind::ExprStmt { expr } => {
                 let _ = eval(expr.clone())?;
                 Ok(())
             }
-            ASTKind::GoTo { label } => {
-                if find_label(scope, label).is_some() {
+            AstKind::GoTo { label } => {
+                if get_label(scope.clone(), label).is_some() {
                     Ok(())
                 } else {
                     Err(format!("label {} not found", label))
                 }
             }
 
-            ASTKind::Label { stmt, .. } => {
+            AstKind::Label { stmt, .. } => {
                 self.walk(stmt)?;
                 Ok(())
             }
 
-            ASTKind::Case { expr, stmt, idx: _ } => {
-                if switch_scope(scope).is_some() {
+            AstKind::Case { expr, stmt, idx: _ } => {
+                if upto(scope.clone(), ScopeKind::Switch).is_some() {
                     let e = eval(expr.clone())?;
 
                     match e.as_ref().borrow().kind {
-                        ASTKind::ConstInt(_) => {}
+                        AstKind::ConstInt(_) => {}
                         _ => {
                             return Err("not a const expression".to_string());
                         }
@@ -161,8 +187,8 @@ impl Analyser {
                 Err("case outside of a switch statement".to_string())
             }
 
-            ASTKind::Default { stmt } => {
-                if switch_scope(scope).is_some() {
+            AstKind::Default { stmt } => {
+                if upto(scope.clone(), ScopeKind::Switch).is_some() {
                     self.walk(stmt)?;
                     return Ok(());
                 }
@@ -170,15 +196,15 @@ impl Analyser {
                 Err("default outside of a switch statement".to_string())
             }
 
-            ASTKind::Switch { cond, body, cases } => {
+            AstKind::Switch { cond, body, cases } => {
                 _ = eval(cond.clone())?;
                 let mut case_values = std::collections::HashSet::new();
                 let mut has_default = false;
                 for case in cases {
                     match &case.borrow().kind {
-                        ASTKind::Case { expr, stmt, .. } => {
+                        AstKind::Case { expr, stmt, .. } => {
                             let case_eval = eval(expr.clone())?;
-                            if let ASTKind::ConstInt(value) =
+                            if let AstKind::ConstInt(value) =
                                 case_eval.borrow().kind
                             {
                                 if !case_values.insert(value) {
@@ -193,7 +219,7 @@ impl Analyser {
                             }
                             self.walk(stmt)?;
                         }
-                        ASTKind::Default { stmt } => {
+                        AstKind::Default { stmt } => {
                             if has_default {
                                 return Err(
                                     "duplicate default case".to_string()
@@ -208,13 +234,13 @@ impl Analyser {
                 self.walk(body)?;
                 Ok(())
             }
-            ASTKind::EmptyStmt => Ok(()),
+            AstKind::EmptyStmt => Ok(()),
 
             _ => Ok(()),
         }
     }
 
-    pub fn run(&self, ast: &Vec<ASTRef>) -> Result<(), String> {
+    pub fn run(&self, ast: &Vec<AstRef>) -> Result<(), String> {
         for node in ast {
             self.walk(node)?;
         }

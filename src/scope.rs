@@ -21,391 +21,748 @@
  *  DEALINGS IN THE SOFTWARE.
  */
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::{Rc, Weak};
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::ast::*;
+use crate::types::*;
 
 pub type ScopeRef = Rc<RefCell<Scope>>;
 pub type SymRef = Rc<RefCell<Symbol>>;
+pub type SymWeakRef = Weak<RefCell<Symbol>>;
+pub type SymTab = HashMap<String, Vec<SymRef>>;
+pub type Labels = HashMap<String, AstWeakRef>;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug)]
+pub struct Scope {
+    next_id: Rc<Cell<usize>>,
+    pub id: usize,
+    parent: Option<ScopeRef>,
+    kind: ScopeKind,
+    pub symbols: SymTab,
+    externs: Rc<RefCell<SymTab>>,
+    labels: Labels,
+    offset: usize,
+    pub size: usize,
+}
+
+#[derive(Debug, PartialEq, Clone, Copy)]
 pub enum ScopeKind {
-    Global,
+    File,
     Function,
     Block,
     Loop,
     Switch,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-#[allow(dead_code)]
-pub enum Linkage {
-    External,
-    Internal,
-}
-
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub struct Symbol {
-    pub name: String,
-    pub node: Option<Weak<RefCell<AST>>>,
-    pub offset: usize,
-    pub size: usize,
-    pub alignment: usize,
-    pub linkage: Option<Linkage>,
-    pub defined: bool,
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub enum SymKind {
+    Function,
+    Parameter,
+    Variable,
 }
 
 #[derive(Debug)]
-pub struct Scope {
-    pub kind: ScopeKind,
-    parent: Option<ScopeRef>,
-    offset: usize,
-    pub id: usize,
-    pub depth: usize,
-
-    labels: HashMap<String, Weak<RefCell<AST>>>,
-    symbols: HashMap<String, SymRef>,
+#[allow(dead_code)]
+pub struct Symbol {
+    pub at_scope: usize,
+    pub kind: SymKind,
+    pub name: String,
+    pub node: Option<AstWeakRef>,
+    pub pos: usize,
+    pub size: usize,
+    pub alignment: usize,
+    pub linkage: Option<Linkage>,
+    pub storage_class: Option<StorageClass>,
+    pub definition: Option<Definition>,
 }
 
-static SCOPE_ID: AtomicUsize = AtomicUsize::new(0);
-
-fn next_scope_id() -> usize {
-    SCOPE_ID.fetch_add(1, Ordering::SeqCst)
+#[derive(Debug, Clone, PartialEq)]
+pub enum Definition {
+    Tentative,
+    Concrete,
 }
 
-impl Scope {
-    pub fn open(kind: ScopeKind, parent: Option<ScopeRef>) -> ScopeRef {
-        if !matches!(kind, ScopeKind::Global) {
-            assert!(parent.is_some());
-        }
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Linkage {
+    Internal,
+    External,
+}
 
-        Rc::new(RefCell::new(Scope {
-            kind: kind,
-            parent: parent.clone(),
-            offset: if parent.is_some() {
-                parent.clone().unwrap().as_ref().borrow().offset
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum StorageClass {
+    Static,
+    Extern,
+    Auto,
+    Register,
+}
+
+pub trait SymTabOps {
+    fn decls<'a>(&'a self, name: &'a str) -> Option<&'a Vec<SymRef>>;
+    fn decl(&self, name: &str) -> Option<SymRef>;
+    fn def(&self, name: &str) -> Option<SymRef>;
+    fn defs(&self) -> Vec<SymRef>;
+    fn has_concrete_def(&self, name: &str) -> bool;
+    fn has_extern_decl(&self, name: &str) -> bool;
+    fn add_sym(&mut self, name: &str, sym: SymRef);
+}
+
+impl SymTabOps for SymTab {
+    fn decls<'a>(&'a self, name: &'a str) -> Option<&'a Vec<SymRef>> {
+        self.get(name)
+    }
+
+    fn decl(&self, name: &str) -> Option<SymRef> {
+        if let Some(syms) = self.get(name) {
+            if !syms.is_empty() {
+                Some(syms[0].clone())
             } else {
-                0
-            },
-            id: next_scope_id(),
-            depth: 0,
-            labels: HashMap::new(),
-            symbols: HashMap::new(),
-        }))
-    }
-
-    pub fn close(&self) -> ScopeRef {
-        self.parent.clone().unwrap()
-    }
-
-    pub fn update_depth(&self, depth: usize) {
-        let mut parent = self.parent.clone();
-
-        while parent.is_some() {
-            if parent.clone().unwrap().as_ref().borrow_mut().depth < depth {
-                parent.clone().unwrap().as_ref().borrow_mut().depth = depth;
-            }
-            parent = parent.unwrap().as_ref().borrow().parent.clone();
-        }
-    }
-
-    pub fn add_tmp_var(&mut self, size: usize, alignment: usize) -> usize {
-        assert!(alignment.is_power_of_two());
-        self.offset = (self.offset + (alignment - 1)) & !(alignment - 1);
-        let offset = self.offset;
-        self.offset += size;
-        self.depth = self.offset;
-
-        self.update_depth(self.depth);
-
-        offset
-    }
-
-    pub fn update_sym(
-        &mut self,
-        name: &str,
-        node: ASTRef,
-        defined: bool,
-    ) -> Result<(), ()> {
-        let linkage: Option<Linkage>;
-
-        if let Some(sym) = self.symbols.get_mut(name) {
-            let mut sym_mut = sym.borrow_mut();
-            linkage = sym_mut.linkage.clone();
-            if sym_mut.node.is_none() || linkage.is_none() {
-                if defined {
-                    sym_mut.defined = true;
-                }
-                sym_mut.node = Some(Rc::downgrade(&node));
+                None
             }
         } else {
-            return Err(());
+            None
         }
-
-        if matches!(linkage, Some(Linkage::External)) {
-            let mut maybe_scope = self.parent.as_ref().map(Rc::clone);
-            while let Some(scope_rc) = maybe_scope {
-                let is_global = scope_rc.borrow().parent.is_none();
-
-                if is_global {
-                    let global = scope_rc.borrow();
-                    if let Some(global_sym) = global.symbols.get(name) {
-                        if defined {
-                            global_sym.as_ref().borrow_mut().defined = true;
-                        }
-
-                        if global_sym.as_ref().borrow().node.is_some() {
-                            break;
-                        } else {
-                            global_sym.as_ref().borrow_mut().node =
-                                Some(Rc::downgrade(&node));
-                        }
-                    }
-                    break;
-                }
-
-                maybe_scope = scope_rc.borrow().parent.as_ref().map(Rc::clone);
-            }
-        }
-
-        Ok(())
     }
 
-    pub fn add_sym(
-        &mut self,
-        name: &str,
-        linkage: Option<Linkage>,
-        node: Option<ASTRef>,
-        size: usize,
-        alignment: usize,
-    ) -> Result<(), ()> {
-        if let Some(sym) = self.symbols.get(name) {
-            let sym_ref = sym.borrow();
+    fn def(&self, name: &str) -> Option<SymRef> {
+        self.get(name).and_then(|syms| {
+            syms.iter()
+                .find(|s| {
+                    matches!(s.borrow().definition, Some(Definition::Concrete))
+                })
+                .cloned()
+                .or_else(|| {
+                    syms.iter()
+                        .find(|s| {
+                            matches!(
+                                s.borrow().definition,
+                                Some(Definition::Tentative)
+                            )
+                        })
+                        .cloned()
+                })
+        })
+    }
 
-            if compatible_linkage(&sym_ref.linkage, &linkage) {
-                return Ok(());
-            } else {
-                return Err(());
-            }
+    fn defs(&self) -> Vec<SymRef> {
+        self.iter()
+            .filter_map(|(_name, syms)| {
+                syms.iter()
+                    .find(|s| {
+                        matches!(
+                            s.borrow().definition,
+                            Some(Definition::Concrete)
+                        )
+                    })
+                    .cloned()
+                    .or_else(|| {
+                        syms.iter()
+                            .find(|s| {
+                                matches!(
+                                    s.borrow().definition,
+                                    Some(Definition::Tentative)
+                                )
+                            })
+                            .cloned()
+                    })
+            })
+            .collect()
+    }
+
+    fn has_concrete_def(&self, name: &str) -> bool {
+        self.get(name).is_some_and(|syms| {
+            syms.iter().any(|s| {
+                matches!(s.borrow().definition, Some(Definition::Concrete))
+            })
+        })
+    }
+
+    fn has_extern_decl(&self, name: &str) -> bool {
+        self.get(name).is_some_and(|syms| {
+            syms.iter()
+                .any(|s| matches!(s.borrow().linkage, Some(Linkage::External)))
+        })
+    }
+
+    fn add_sym(&mut self, name: &str, sym: SymRef) {
+        self.entry(name.to_string()).or_default().push(sym.clone());
+    }
+}
+
+pub fn new() -> ScopeRef {
+    Rc::new(RefCell::new(Scope {
+        next_id: Rc::new(Cell::new(1usize)),
+        id: 0,
+        parent: None,
+        kind: ScopeKind::File,
+        symbols: HashMap::new(),
+        externs: Rc::new(RefCell::new(HashMap::new())),
+        labels: HashMap::new(),
+        offset: 0,
+        size: 0,
+    }))
+}
+
+pub fn open(scope: ScopeRef, kind: ScopeKind) -> ScopeRef {
+    let id = scope.borrow().next_id.get();
+    scope.borrow().next_id.set(id + 1);
+
+    Rc::new(RefCell::new(Scope {
+        next_id: scope.borrow().next_id.clone(),
+        id,
+        parent: Some(scope.clone()),
+        kind,
+        symbols: HashMap::new(),
+        externs: get_externs(&scope),
+        labels: HashMap::new(),
+        offset: scope.borrow().offset,
+        size: 0,
+    }))
+}
+
+pub fn get_externs(scope: &ScopeRef) -> Rc<RefCell<SymTab>> {
+    scope.borrow().externs.clone()
+}
+
+pub fn close(scope: &ScopeRef) -> ScopeRef {
+    parent_of(scope)
+}
+
+pub fn parent_of(scope: &ScopeRef) -> ScopeRef {
+    let sc = scope.borrow();
+
+    assert!(sc.kind != ScopeKind::File);
+    assert!(sc.parent.is_some());
+
+    if let Some(parent) = sc.parent.as_ref() {
+        parent.clone()
+    } else {
+        unreachable!();
+    }
+}
+
+pub fn has_parent(scope: &ScopeRef) -> bool {
+    let sc = scope.borrow();
+    sc.parent.is_some()
+}
+
+pub fn kind_of(scope: &ScopeRef) -> ScopeKind {
+    scope.borrow().kind
+}
+
+pub fn upto(mut scope: ScopeRef, kind: ScopeKind) -> Option<ScopeRef> {
+    while kind_of(&scope) != kind {
+        if has_parent(&scope) {
+            scope = parent_of(&scope);
+        } else {
+            break;
         }
+    }
 
-        assert!(alignment.is_power_of_two());
-        self.offset = (self.offset + (alignment - 1)) & !(alignment - 1);
-        let offset = self.offset;
-        self.offset += size;
-        self.depth = self.offset;
-        self.update_depth(self.depth);
+    if kind_of(&scope) == kind {
+        Some(scope.clone())
+    } else {
+        None
+    }
+}
 
-        let symbol = Rc::new(RefCell::new(Symbol {
-            name: name.to_string(),
-            node: node.as_ref().map(Rc::downgrade),
-            offset,
+pub fn upto_any(mut scope: ScopeRef, kinds: &[ScopeKind]) -> Option<ScopeRef> {
+    let mut kind = kind_of(&scope);
+
+    while !kinds.contains(&kind) {
+        if has_parent(&scope) {
+            scope = parent_of(&scope);
+            kind = kind_of(&scope);
+        } else {
+            break;
+        }
+    }
+
+    if kinds.contains(&kind) {
+        Some(scope.clone())
+    } else {
+        None
+    }
+}
+
+pub fn upto_top(mut scope: ScopeRef) -> ScopeRef {
+    while kind_of(&scope) != ScopeKind::File {
+        if has_parent(&scope) {
+            scope = parent_of(&scope);
+        } else {
+            break;
+        }
+    }
+
+    assert!(kind_of(&scope) == ScopeKind::File);
+
+    scope.clone()
+}
+
+pub fn add_sym(
+    scope: ScopeRef,
+    name: &str,
+    kind: SymKind,
+    size: usize,
+    alignment: usize,
+    storage_class: Option<StorageClass>,
+    definition: Option<Definition>,
+    node: Option<AstRef>,
+) -> Result<SymRef, String> {
+    if let Some(StorageClass::Static) = storage_class {
+        if has_parent(&scope) && matches!(kind, SymKind::Function) {
+            return Err(format!(
+                "invalid storage class for function '{}'",
+                name
+            ));
+        }
+    }
+
+    let linkage = determine_linkage(&scope, kind, &storage_class);
+
+    match linkage {
+        Some(Linkage::External) => add_extern_sym(
+            scope.clone(),
+            name,
+            kind,
             size,
             alignment,
-            linkage: linkage.clone(),
-            defined: if let Some(Linkage::External) = linkage {
-                false
-            } else {
-                true
-            },
-        }));
+            definition,
+            node,
+        ),
 
-        self.symbols.insert(name.to_string(), Rc::clone(&symbol));
+        Some(Linkage::Internal) => add_intern_sym(
+            scope.clone(),
+            name,
+            kind,
+            size,
+            alignment,
+            definition,
+            node,
+        ),
 
-        if matches!(linkage, Some(Linkage::External)) {
-            let mut maybe_scope = self.parent.as_ref().map(Rc::clone);
+        None => {
+            let at_file_scope = scope.borrow().id == 0;
 
-            while let Some(scope_rc) = maybe_scope {
-                let is_global = scope_rc.borrow().parent.is_none();
-
-                if is_global {
-                    let mut global = scope_rc.borrow_mut();
-                    if !global.symbols.contains_key(name) {
-                        global
-                            .symbols
-                            .insert(name.to_string(), Rc::clone(&symbol));
+            if at_file_scope {
+                if let Some(Definition::Concrete) = definition {
+                    if scope.borrow().symbols.has_concrete_def(name) {
+                        return Err(format!(
+                            "multiple definitions of {}",
+                            name
+                        ));
                     }
-                    break;
+                }
+            } else {
+                if scope.borrow().symbols.decl(name).is_some() {
+                    return Err(format!("multiple definitions of {}", name));
                 }
 
-                maybe_scope = scope_rc.borrow().parent.as_ref().map(Rc::clone);
+                if let Some(decl) = get_sym(scope.clone(), name) {
+                    let sym = decl.borrow();
+
+                    if sym.linkage.is_some()
+                        && sym.at_scope == scope.borrow().id
+                    {
+                        return Err(format!(
+                            "redeclaration of {} with no linkage",
+                            name
+                        ));
+                    }
+                }
             }
+
+            let pos = if let Some(StorageClass::Static) = storage_class {
+                0
+            } else {
+                make_space(scope.clone(), size, alignment)
+            };
+
+            let mangled_name = if let Some(StorageClass::Static) = storage_class
+            {
+                format!("{}.{}", name, scope.borrow().id)
+            } else {
+                name.to_string()
+            };
+
+            let sym = Rc::new(RefCell::new(Symbol {
+                at_scope: scope.borrow().id,
+                kind,
+                name: mangled_name.clone(),
+                node: node.as_ref().map(Rc::downgrade),
+                pos,
+                size,
+                alignment,
+                linkage,
+                storage_class,
+                definition,
+            }));
+
+            scope.borrow_mut().symbols.add_sym(name, sym.clone());
+
+            if let Some(StorageClass::Static) = storage_class {
+                let top = upto_top(scope.clone());
+                top.borrow_mut().symbols.add_sym(&mangled_name, sym.clone());
+            }
+
+            Ok(sym.clone())
+        }
+    }
+}
+
+pub fn get_sym(mut scope: ScopeRef, name: &str) -> Option<SymRef> {
+    let initial_scope = scope.clone();
+
+    loop {
+        if let Some(sym) = scope.borrow().symbols.decl(name) {
+            return Some(sym);
         }
 
-        Ok(())
+        if has_parent(&scope) {
+            scope = parent_of(&scope);
+        } else {
+            break;
+        }
     }
-}
 
-fn compatible_linkage(a: &Option<Linkage>, b: &Option<Linkage>) -> bool {
-    match (a, b) {
-        (None, None) => false,
-        (Some(x), Some(y)) => x == y,
-        _ => false,
-    }
-}
+    if let Some(decls) = get_externs(&scope).borrow().decls(name) {
+        let syms: Vec<SymRef> = decls.to_vec();
+        scope = initial_scope;
 
-pub fn add_label(
-    scope: ScopeRef,
-    name: &str,
-    stmt: ASTRef,
-) -> Result<(), String> {
-    assert!(scope.as_ref().borrow().kind != ScopeKind::Global);
+        loop {
+            let scope_id = scope.borrow().id;
 
-    if !matches!(scope.as_ref().borrow().kind, ScopeKind::Function) {
-        add_label(
-            scope.as_ref().borrow().parent.as_ref().unwrap().clone(),
-            name,
-            stmt,
-        )
-    } else if scope.borrow().labels.contains_key(name) {
-        Err(format!("'{}' label already exists", name))
-    } else {
-        scope
-            .borrow_mut()
-            .labels
-            .insert(name.to_string(), Rc::downgrade(&stmt));
-        Ok(())
-    }
-}
-
-pub fn loop_or_switch_scope(scope: ScopeRef) -> Option<ScopeRef> {
-    if scope.as_ref().borrow().kind == ScopeKind::Loop
-        || scope.borrow().kind == ScopeKind::Switch
-    {
-        Some(scope.clone())
-    } else if scope.borrow().parent.is_some() {
-        loop_or_switch_scope(
-            scope.as_ref().borrow().parent.as_ref().unwrap().clone(),
-        )
-    } else {
-        None
-    }
-}
-
-pub fn loop_scope(scope: ScopeRef) -> Option<ScopeRef> {
-    scope_of(scope, ScopeKind::Loop)
-}
-
-pub fn switch_scope(scope: ScopeRef) -> Option<ScopeRef> {
-    scope_of(scope, ScopeKind::Switch)
-}
-
-fn scope_of(scope: ScopeRef, kind: ScopeKind) -> Option<ScopeRef> {
-    if scope.as_ref().borrow().kind == kind {
-        Some(scope.clone())
-    } else if scope.borrow().parent.is_some() {
-        scope_of(
-            scope.as_ref().borrow().parent.as_ref().unwrap().clone(),
-            kind,
-        )
-    } else {
-        None
-    }
-}
-
-pub fn find_label(scope: ScopeRef, name: &str) -> Option<ASTRef> {
-    if let Some(sc) = scope_of(scope, ScopeKind::Function) {
-        sc.as_ref()
-            .borrow()
-            .labels
-            .get(name)
-            .and_then(|w| w.upgrade())
-    } else {
-        None
-    }
-}
-
-pub fn global_scope(scope: ScopeRef) -> ScopeRef {
-    if let Some(parent) = scope.as_ref().borrow().parent.clone() {
-        global_scope(parent.clone())
-    } else {
-        scope.clone()
-    }
-}
-
-pub fn get_sym(
-    scope: ScopeRef,
-    name: &str,
-    before: Option<ASTRef>,
-) -> Option<SymRef> {
-    if let Some(sym) = scope.as_ref().borrow().symbols.get(name) {
-        if let Some(node) = before.as_ref() {
-            if sym.as_ref().borrow().node.is_some() {
-                let sym_node =
-                    sym.as_ref().borrow().node.as_ref().unwrap().upgrade();
-                if sym_node.as_ref().unwrap().borrow().preceeds(&node.borrow())
-                {
+            for sym in &syms {
+                if sym.borrow().at_scope == scope_id {
                     return Some(sym.clone());
                 }
             }
-        } else {
-            return Some(sym.clone());
+
+            if has_parent(&scope) {
+                scope = parent_of(&scope);
+            } else {
+                break;
+            }
         }
     }
 
     None
 }
 
-pub fn find_sym(
-    scope: ScopeRef,
+pub fn get_all_named_sym_decls(
+    mut scope: ScopeRef,
     name: &str,
-    before: Option<ASTRef>,
-) -> Option<SymRef> {
-    let mut sym = get_sym(scope.clone(), name, before.clone());
+) -> Option<Vec<SymRef>> {
+    let mut syms: Vec<SymRef> = vec![];
+    let mut has_externs: bool = false;
 
-    if sym.is_none() {
-        if scope.as_ref().borrow().parent.is_some() {
-            sym = find_sym(
-                scope.as_ref().borrow().parent.as_ref().unwrap().clone(),
-                name,
-                before,
-            );
+    loop {
+        if scope.borrow().symbols.has_extern_decl(name) {
+            has_externs = true;
+        }
+
+        if let Some(decls) = scope.borrow().symbols.decls(name) {
+            syms = decls.to_vec();
+            break;
+        }
+
+        if has_parent(&scope) {
+            scope = parent_of(&scope);
+        } else {
+            break;
         }
     }
 
-    sym
+    if has_externs {
+        if let Some(extern_syms) = get_externs(&scope).borrow().decls(name) {
+            let extern_syms: Vec<SymRef> = extern_syms.to_vec();
+            syms.extend(extern_syms);
+        }
+    }
+
+    if !syms.is_empty() { Some(syms) } else { None }
+}
+
+pub fn get_label(scope: ScopeRef, name: &str) -> Option<AstRef> {
+    if let Some(s) = upto(scope.clone(), ScopeKind::Function) {
+        return s
+            .as_ref()
+            .borrow()
+            .labels
+            .get(name)
+            .and_then(|w| w.upgrade());
+    }
+
+    None
+}
+
+pub fn has_def(mut scope: ScopeRef, name: &str) -> bool {
+    loop {
+        if scope.borrow().symbols.def(name).is_some() {
+            return true;
+        }
+
+        if has_parent(&scope) {
+            scope = parent_of(&scope);
+        } else {
+            return false;
+        }
+    }
+}
+
+pub fn resolve(identifier: &AstRef) -> Option<SymRef> {
+    let binding = identifier.borrow();
+
+    match &binding.kind {
+        AstKind::Identifier { sym, .. } => {
+            sym.as_ref().and_then(|weak| weak.upgrade())
+        }
+        AstKind::Parameter { name, .. } => {
+            if let Some(n) = name {
+                get_sym(binding.scope.clone(), n)
+            } else {
+                None
+            }
+        }
+        AstKind::Variable { name, .. } => get_sym(binding.scope.clone(), name),
+        _ => None,
+    }
+}
+
+pub fn has_linkage(sym: SymRef) -> bool {
+    sym.borrow().linkage.is_some()
+}
+
+pub fn has_static_storage_duration(sym: SymRef) -> bool {
+    if sym.borrow().at_scope == 0 {
+        return true;
+    }
+
+    let storage_class = sym.borrow().storage_class;
+
+    match storage_class {
+        Some(StorageClass::Static) | Some(StorageClass::Extern) => {
+            return true;
+        }
+        _ => {}
+    }
+
+    false
+}
+
+pub fn sym_as_node(sym: SymRef) -> Option<AstRef> {
+    sym.as_ref()
+        .borrow()
+        .node
+        .clone()
+        .and_then(|weak| weak.upgrade())
 }
 
 #[allow(dead_code)]
-fn find_node(
+pub fn sym_as_type(sym: SymRef) -> Option<TypeRef> {
+    sym_as_node(sym.clone()).map(|node| node.borrow().ty.clone())
+}
+
+fn align_to(value: usize, alignment: usize) -> usize {
+    assert!(alignment.is_power_of_two());
+    (value + (alignment - 1)) & !(alignment - 1)
+}
+
+pub fn make_space(mut scope: ScopeRef, size: usize, alignment: usize) -> usize {
+    assert!(alignment.is_power_of_two());
+
+    let offset;
+    let depth;
+
+    {
+        let mut scope_mut = scope.borrow_mut();
+        scope_mut.offset = align_to(scope_mut.offset + size, alignment);
+        offset = scope_mut.offset;
+        scope_mut.offset += size;
+        scope_mut.size = scope_mut.offset;
+        depth = scope_mut.size;
+    }
+
+    while has_parent(&scope) {
+        scope = parent_of(&scope);
+        let mut scope_mut = scope.borrow_mut();
+
+        if scope_mut.size < depth {
+            scope_mut.size = depth;
+        }
+    }
+
+    offset
+}
+
+fn add_extern_sym(
     scope: ScopeRef,
     name: &str,
-    before: Option<ASTRef>,
-) -> Option<ASTRef> {
-    if let Some(sym) = find_sym(scope.clone(), name, before) {
-        if let Some(sym_node) = &sym.borrow_mut().node {
-            sym_node.upgrade()
+    kind: SymKind,
+    size: usize,
+    alignment: usize,
+    definition: Option<Definition>,
+    node: Option<AstRef>,
+) -> Result<SymRef, String> {
+    let externs = get_externs(&scope);
+    let top = upto_top(scope.clone());
+
+    if let Some(Definition::Concrete) = definition {
+        if has_parent(&scope) {
+            return Err(format!(
+                "extern definition of {} not allowed here",
+                name
+            ));
+        } else if externs.borrow().has_concrete_def(name) {
+            return Err(format!("multiple definitions of {}", name));
+        } else if let Some(def) = top.borrow().symbols.def(name) {
+            if let Some(StorageClass::Static) = def.borrow().storage_class {
+                return Err(format!(
+                    "non-static declaration of '{}' follows static declaration",
+                    name
+                ));
+            }
+        }
+    }
+
+    if let Some(decl) = scope.borrow().symbols.decl(name) {
+        if decl.borrow().linkage.is_none() {
+            return Err(format!(
+                "extern declaration of {} follows declaration with no linkage",
+                name
+            ));
+        }
+    }
+
+    let (linkage, storage_class) =
+        if let Some(sym_def) = top.borrow().symbols.decl(name) {
+            (sym_def.borrow().linkage, sym_def.borrow().storage_class)
         } else {
+            (Some(Linkage::External), Some(StorageClass::Extern))
+        };
+
+    let sym = Rc::new(RefCell::new(Symbol {
+        at_scope: scope.borrow().id,
+        kind,
+        name: name.to_string(),
+        node: node.as_ref().map(Rc::downgrade),
+        pos: 0,
+        size,
+        alignment,
+        linkage,
+        storage_class,
+        definition,
+    }));
+
+    if let Some(Linkage::External) = linkage {
+        externs.borrow_mut().add_sym(name, sym.clone());
+    }
+
+    scope.borrow_mut().symbols.add_sym(name, sym.clone());
+
+    Ok(sym.clone())
+}
+
+fn add_intern_sym(
+    scope: ScopeRef,
+    name: &str,
+    kind: SymKind,
+    size: usize,
+    alignment: usize,
+    definition: Option<Definition>,
+    node: Option<AstRef>,
+) -> Result<SymRef, String> {
+    let top = upto_top(scope.clone());
+    let externs = get_externs(&scope);
+
+    if let Some(decl) = externs.borrow().decl(name) {
+        if let Some(Linkage::External) = decl.borrow().linkage {
+            return Err(format!(
+                "static declaration of '{}' follows non-static declaration",
+                name
+            ));
+        }
+    }
+
+    if top.borrow().symbols.has_concrete_def(name) {
+        if let Some(Definition::Concrete) = definition {
+            return Err(format!("multiple definitions of {}", name));
+        }
+    }
+
+    let sym = Rc::new(RefCell::new(Symbol {
+        at_scope: top.borrow().id,
+        kind,
+        name: name.to_string(),
+        node: node.as_ref().map(Rc::downgrade),
+        pos: 0,
+        size,
+        alignment,
+        linkage: Some(Linkage::Internal),
+        storage_class: Some(StorageClass::Static),
+        definition,
+    }));
+
+    top.borrow_mut().symbols.add_sym(name, sym.clone());
+
+    if !has_parent(&scope) {
+        externs.borrow_mut().add_sym(name, sym.clone());
+    }
+
+    Ok(sym.clone())
+}
+
+fn determine_linkage(
+    scope: &ScopeRef,
+    kind: SymKind,
+    storage_class: &Option<StorageClass>,
+) -> Option<Linkage> {
+    match storage_class {
+        Some(StorageClass::Static) => {
+            if kind_of(scope) == ScopeKind::File {
+                Some(Linkage::Internal)
+            } else {
+                None
+            }
+        }
+        Some(StorageClass::Extern) => Some(Linkage::External),
+        Some(StorageClass::Auto) | Some(StorageClass::Register) => {
+            assert!(kind_of(scope) != ScopeKind::File);
             None
         }
-    } else {
-        None
+        None => {
+            if kind_of(scope) == ScopeKind::File
+                || matches!(kind, SymKind::Function)
+            {
+                Some(Linkage::External)
+            } else {
+                None
+            }
+        }
     }
 }
 
-pub fn find_offset(
+pub fn add_label(
     scope: ScopeRef,
     name: &str,
-    before: Option<ASTRef>,
-) -> Option<usize> {
-    if let Some(sym) = find_sym(scope.clone(), name, before) {
-        Some(sym.borrow_mut().offset)
-    } else {
-        None
-    }
-}
+    stmt: AstRef,
+) -> Result<(), String> {
+    assert!(kind_of(&scope) != ScopeKind::File);
 
-pub fn resolve(identifier: ASTRef) -> Option<SymRef> {
-    let scope = identifier.borrow().scope.clone();
+    if let Some(s) = upto(scope.clone(), ScopeKind::Function) {
+        let mut scope_mut = s.borrow_mut();
 
-    match &identifier.borrow().kind {
-        ASTKind::Identifier { name, sym: _ } => {
-            return find_sym(scope, name, Some(identifier.clone()));
+        if scope_mut.labels.contains_key(name) {
+            Err(format!("'{}' label already exists", name))
+        } else {
+            scope_mut
+                .labels
+                .insert(name.to_string(), Rc::downgrade(&stmt));
+
+            Ok(())
         }
-        _ => return None,
+    } else {
+        unreachable!();
     }
 }

@@ -26,13 +26,13 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use crate::ast::*;
+use crate::codegen::CodeGenerator;
 use crate::ir;
 use crate::lexer;
 use crate::parser;
-use crate::resolver::*;
 use crate::semantics::*;
 use crate::types::*;
-use crate::x64::codegen::CodeGenerator;
+use crate::x64::codegen::CodeGenerator as X64CodeGenerator;
 use crate::x64::out;
 
 #[derive(Debug, PartialEq, Clone)]
@@ -56,7 +56,7 @@ pub struct Translation {
 
 fn build_translations(
     files: Vec<PathBuf>,
-    args: &Vec<Argument>,
+    args: &[Argument],
 ) -> Vec<Translation> {
     let mut translations: Vec<Translation> = Vec::new();
     let temp_dir = env::temp_dir();
@@ -153,13 +153,11 @@ pub fn process_args(args: &[String]) -> (Vec<Translation>, Vec<Argument>) {
             if let Some(path) = c_file.parent() {
                 if let Some(stem) = c_file.file_stem() {
                     if arguments.iter().any(|i| matches!(i, Argument::NoLink)) {
-                        arguments.push(Argument::OutputTo(PathBuf::from(
+                        arguments.push(Argument::OutputTo(
                             path.join(format!("{}.o", stem.to_string_lossy())),
-                        )));
+                        ));
                     } else {
-                        arguments.push(Argument::OutputTo(PathBuf::from(
-                            path.join(stem),
-                        )));
+                        arguments.push(Argument::OutputTo(path.join(stem)));
                     }
                 } else {
                     eprintln!("invalid C file path: {}", c_file.display());
@@ -209,18 +207,10 @@ fn lex(translations: &[Translation], arguments: &[Argument]) {
     }
 }
 
-fn verify(ast: Vec<ASTRef>) {
-    let resolver = Resolver::new();
-
-    let mut res = resolver.run(&ast);
-
-    if res.is_err() {
-        panic!("unable to resolve AST: {:?}", res);
-    }
-
+fn verify(ast: Vec<AstRef>) {
     let annotator = Annotator::new();
 
-    res = annotator.run(&ast);
+    let mut res = annotator.run(&ast);
 
     if res.is_err() {
         panic!("Type checking failed: {:?}", res);
@@ -242,7 +232,7 @@ fn parse_translation(translation: &Translation, arguments: &[Argument]) {
 
     let validate = arguments.iter().any(|i| matches!(i, Argument::Validate));
 
-    let mut parser = parser::Parser::new(i_file, validate);
+    let mut parser = parser::Parser::new(i_file);
 
     let ast = parser.parse().unwrap();
 
@@ -264,21 +254,21 @@ fn codegen_translation(translation: &Translation, arguments: &[Argument]) {
     let i_file = translation.i_file.to_str().unwrap();
     preprocess_gcc(c_file, i_file);
 
-    let mut parser = parser::Parser::new(i_file, true);
+    let mut parser = parser::Parser::new(i_file);
     let ast = parser.parse().unwrap();
 
     verify(ast.clone());
 
     let mut irgen = ir::IrGenerator::new();
 
-    let ir = irgen.generate(ast.clone());
+    let ir = irgen.lower(ast.clone());
 
     if arguments.iter().any(|i| matches!(i, Argument::Codegen)) {
-        println!("TAC: {:#?}", &ir);
+        println!("Tac: {:#?}", &ir);
     }
 
-    let codegen = CodeGenerator::new();
-    let asm = codegen.generate(ir);
+    let mut codegen = X64CodeGenerator::new();
+    let asm = codegen.lower(ir);
 
     if arguments.iter().any(|i| matches!(i, Argument::Codegen)) {
         println!("ASM: {:#?}", asm);
@@ -301,21 +291,13 @@ fn codegen(translations: &[Translation], arguments: &[Argument]) {
         s_files.push(s_file.to_string());
     }
 
-    match arguments
+    if let Some(Argument::OutputTo(output)) = arguments
         .iter()
         .find(|i| matches!(i, Argument::OutputTo(_)))
     {
-        Some(Argument::OutputTo(output)) => {
-            let link =
-                if arguments.iter().any(|i| matches!(i, Argument::NoLink)) {
-                    false
-                } else {
-                    true
-                };
+        let link = !arguments.iter().any(|i| matches!(i, Argument::NoLink));
 
-            assemble_gcc(&s_files, output.to_str().unwrap(), link);
-        }
-        _ => {}
+        assemble_gcc(&s_files, output.to_str().unwrap(), link);
     }
 
     if !arguments.iter().any(|i| matches!(i, Argument::OutputAsm)) {
@@ -336,7 +318,7 @@ fn preprocess_gcc(c_file: &str, i_file: &str) {
         .expect("failed to preprocess {c_file}");
 }
 
-fn assemble_gcc(s_files: &Vec<String>, o_file: &str, link: bool) {
+fn assemble_gcc(s_files: &[String], o_file: &str, link: bool) {
     let mut cmd = Command::new("gcc");
 
     if !link {
@@ -344,6 +326,7 @@ fn assemble_gcc(s_files: &Vec<String>, o_file: &str, link: bool) {
     }
 
     cmd.args(s_files.iter().map(|s| s.as_str()))
+        .arg("-no-pie")
         .arg("-o")
         .arg(o_file);
 
@@ -353,9 +336,9 @@ fn assemble_gcc(s_files: &Vec<String>, o_file: &str, link: bool) {
 pub fn run(translations: &[Translation], arguments: &[Argument]) {
     if arguments.iter().any(|i| matches!(i, Argument::Codegen)) {
         codegen(translations, arguments);
-    } else if arguments.iter().any(|i| matches!(i, Argument::Validate)) {
-        parse(translations, arguments);
-    } else if arguments.iter().any(|i| matches!(i, Argument::Parse)) {
+    } else if arguments.iter().any(|i| matches!(i, Argument::Validate))
+        || arguments.iter().any(|i| matches!(i, Argument::Parse))
+    {
         parse(translations, arguments);
     } else if arguments.iter().any(|i| matches!(i, Argument::Lex)) {
         lex(translations, arguments);

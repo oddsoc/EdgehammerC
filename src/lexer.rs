@@ -92,6 +92,10 @@ pub enum TokenKind {
     Default,
     Break,
     Continue,
+    Static,
+    Extern,
+    Auto,
+    Register,
     Identifier(String),
     Label(String),
     ConstInt(i64),
@@ -114,7 +118,7 @@ impl Lexer {
         let mut buffer = Vec::new();
         file.read_to_end(&mut buffer).unwrap();
         Self {
-            buffer: buffer,
+            buffer,
             position: 0,
             line: 1,
             column: 1,
@@ -129,13 +133,13 @@ impl Lexer {
         column: usize,
     ) -> Option<Token> {
         let len = self.position - pos;
-        return Some(Token {
-            kind: kind,
-            pos: pos,
-            len: len,
+        Some(Token {
+            kind,
+            pos,
+            len,
             line: self.line,
-            column: column,
-        });
+            column,
+        })
     }
 
     pub fn push_expr(&mut self) {
@@ -150,7 +154,7 @@ impl Lexer {
     #[allow(dead_code)]
     pub fn as_str<'a>(&'a self, token: &Token) -> &'a str {
         let utf8 = str::from_utf8(&self.buffer).expect("not utf8!");
-        return &utf8[token.pos..token.len];
+        &utf8[token.pos..token.len]
     }
 
     fn peek(&self) -> Option<u8> {
@@ -173,7 +177,7 @@ impl Lexer {
             self.column += 1;
         }
 
-        return Some(byte);
+        Some(byte)
     }
 
     fn skip_comment(&mut self) -> Result<(), ()> {
@@ -305,6 +309,18 @@ impl Lexer {
             }
             "int" => {
                 return self.new_tok(TokenKind::Int, pos, start);
+            }
+            "static" => {
+                return self.new_tok(TokenKind::Static, pos, start);
+            }
+            "extern" => {
+                return self.new_tok(TokenKind::Extern, pos, start);
+            }
+            "auto" => {
+                return self.new_tok(TokenKind::Auto, pos, start);
+            }
+            "register" => {
+                return self.new_tok(TokenKind::Register, pos, start);
             }
             _ => {}
         }

@@ -32,12 +32,12 @@ use super::codegen::CondCode;
 
 fn cc_to_str(cc: &CondCode) -> String {
     match cc {
-        CondCode::E => "e",
-        CondCode::NE => "ne",
-        CondCode::L => "l",
-        CondCode::LE => "le",
-        CondCode::G => "g",
-        CondCode::GE => "ge",
+        CondCode::Eq => "e",
+        CondCode::NotEq => "ne",
+        CondCode::Less => "l",
+        CondCode::LessOrEq => "le",
+        CondCode::Greater => "g",
+        CondCode::GreaterOrEq => "ge",
     }
     .to_string()
 }
@@ -49,66 +49,70 @@ fn code_to_str(code: Rc<RefCell<Code>>) -> String {
             format!("{}(%rbp)", -off)
         }
 
+        Code::Data { name, .. } => {
+            format!("{}(%rip)", name)
+        }
+
         Code::Label(idx) => format!(".L{}", idx),
         Code::FunctionRef(name, defined) => {
             if *defined {
-                format!("{}", name)
+                name.to_string()
             } else {
                 format!("{}@PLT", name)
             }
         }
 
-        Code::Reg { reg, size, .. } => match &*reg {
-            Register::RAX => match size {
+        Code::Reg { reg, size, .. } => match reg {
+            Register::Rax => match size {
                 1 => "%al".to_string(),
                 2 => "%ax".to_string(),
                 4 => "%eax".to_string(),
                 8 => "%rax".to_string(),
                 _ => unreachable!(),
             },
-            Register::RBX => match size {
+            Register::Rbx => match size {
                 1 => "%bl".to_string(),
                 2 => "%bx".to_string(),
                 4 => "%ebx".to_string(),
                 8 => "%rbx".to_string(),
                 _ => unreachable!(),
             },
-            Register::RCX => match size {
+            Register::Rcx => match size {
                 1 => "%cl".to_string(),
                 2 => "%cx".to_string(),
                 4 => "%ecx".to_string(),
                 8 => "%rcx".to_string(),
                 _ => unreachable!(),
             },
-            Register::RDX => match size {
+            Register::Rdx => match size {
                 1 => "%dl".to_string(),
                 2 => "%dx".to_string(),
                 4 => "%edx".to_string(),
                 8 => "%rdx".to_string(),
                 _ => unreachable!(),
             },
-            Register::RSI => match size {
+            Register::Rsi => match size {
                 1 => "%sil".to_string(),
                 2 => "%si".to_string(),
                 4 => "%esi".to_string(),
                 8 => "%rsi".to_string(),
                 _ => unreachable!(),
             },
-            Register::RDI => match size {
+            Register::Rdi => match size {
                 1 => "%dil".to_string(),
                 2 => "%di".to_string(),
                 4 => "%edi".to_string(),
                 8 => "%rdi".to_string(),
                 _ => unreachable!(),
             },
-            Register::RSP => match size {
+            Register::Rsp => match size {
                 1 => "%spl".to_string(),
                 2 => "%sp".to_string(),
                 4 => "%esp".to_string(),
                 8 => "%rsp".to_string(),
                 _ => unreachable!(),
             },
-            Register::RBP => match size {
+            Register::Rbp => match size {
                 1 => "%bpl".to_string(),
                 2 => "%bp".to_string(),
                 4 => "%ebp".to_string(),
@@ -198,7 +202,7 @@ fn emit_op(file: &mut std::fs::File, instr: Rc<RefCell<Code>>) {
             emit_operand(file, src.clone());
             write!(file, ", ").unwrap();
             emit_operand(file, dst.clone());
-            writeln!(file, "").unwrap();
+            writeln!(file).unwrap();
         }
 
         Code::MovSignExt(src, dst, size) => {
@@ -206,7 +210,7 @@ fn emit_op(file: &mut std::fs::File, instr: Rc<RefCell<Code>>) {
             emit_operand(file, src.clone());
             write!(file, ", ").unwrap();
             emit_operand(file, dst.clone());
-            writeln!(file, "").unwrap();
+            writeln!(file).unwrap();
         }
 
         Code::MovZeroExt(src, dst, size) => {
@@ -214,19 +218,19 @@ fn emit_op(file: &mut std::fs::File, instr: Rc<RefCell<Code>>) {
             emit_operand(file, src.clone());
             write!(file, ", ").unwrap();
             emit_operand(file, dst.clone());
-            writeln!(file, "").unwrap();
+            writeln!(file).unwrap();
         }
 
         Code::Neg(dst, size) => {
             write!(file, "\tneg{}\t", op_suffix(*size)).unwrap();
             emit_operand(file, dst.clone());
-            writeln!(file, "").unwrap();
+            writeln!(file).unwrap();
         }
 
         Code::Not(dst, size) => {
             write!(file, "\tnot{}\t", op_suffix(*size)).unwrap();
             emit_operand(file, dst.clone());
-            writeln!(file, "").unwrap();
+            writeln!(file).unwrap();
         }
 
         Code::IMul(src, dst, size) => {
@@ -234,13 +238,13 @@ fn emit_op(file: &mut std::fs::File, instr: Rc<RefCell<Code>>) {
             emit_operand(file, src.clone());
             write!(file, ", ").unwrap();
             emit_operand(file, dst.clone());
-            writeln!(file, "").unwrap();
+            writeln!(file).unwrap();
         }
 
         Code::IDiv(src, size) => {
             write!(file, "\tidiv{}\t", op_suffix(*size)).unwrap();
             emit_operand(file, src.clone());
-            writeln!(file, "").unwrap();
+            writeln!(file).unwrap();
         }
 
         Code::Add(src, dst, size) => {
@@ -248,7 +252,7 @@ fn emit_op(file: &mut std::fs::File, instr: Rc<RefCell<Code>>) {
             emit_operand(file, src.clone());
             write!(file, ", ").unwrap();
             emit_operand(file, dst.clone());
-            writeln!(file, "").unwrap();
+            writeln!(file).unwrap();
         }
 
         Code::Sub(src, dst, size) => {
@@ -256,7 +260,7 @@ fn emit_op(file: &mut std::fs::File, instr: Rc<RefCell<Code>>) {
             emit_operand(file, src.clone());
             write!(file, ", ").unwrap();
             emit_operand(file, dst.clone());
-            writeln!(file, "").unwrap();
+            writeln!(file).unwrap();
         }
 
         Code::Shl(src, dst, size) => {
@@ -264,7 +268,7 @@ fn emit_op(file: &mut std::fs::File, instr: Rc<RefCell<Code>>) {
             emit_operand(file, src.clone());
             write!(file, ", ").unwrap();
             emit_operand(file, dst.clone());
-            writeln!(file, "").unwrap();
+            writeln!(file).unwrap();
         }
 
         Code::Sar(src, dst, size) => {
@@ -272,7 +276,7 @@ fn emit_op(file: &mut std::fs::File, instr: Rc<RefCell<Code>>) {
             emit_operand(file, src.clone());
             write!(file, ", ").unwrap();
             emit_operand(file, dst.clone());
-            writeln!(file, "").unwrap();
+            writeln!(file).unwrap();
         }
 
         Code::And(src, dst, size) => {
@@ -280,7 +284,7 @@ fn emit_op(file: &mut std::fs::File, instr: Rc<RefCell<Code>>) {
             emit_operand(file, src.clone());
             write!(file, ", ").unwrap();
             emit_operand(file, dst.clone());
-            writeln!(file, "").unwrap();
+            writeln!(file).unwrap();
         }
 
         Code::Or(src, dst, size) => {
@@ -288,7 +292,7 @@ fn emit_op(file: &mut std::fs::File, instr: Rc<RefCell<Code>>) {
             emit_operand(file, src.clone());
             write!(file, ", ").unwrap();
             emit_operand(file, dst.clone());
-            writeln!(file, "").unwrap();
+            writeln!(file).unwrap();
         }
 
         Code::Xor(src, dst, size) => {
@@ -296,7 +300,7 @@ fn emit_op(file: &mut std::fs::File, instr: Rc<RefCell<Code>>) {
             emit_operand(file, src.clone());
             write!(file, ", ").unwrap();
             emit_operand(file, dst.clone());
-            writeln!(file, "").unwrap();
+            writeln!(file).unwrap();
         }
 
         Code::Cdq => {
@@ -314,27 +318,27 @@ fn emit_op(file: &mut std::fs::File, instr: Rc<RefCell<Code>>) {
             emit_operand(file, src.clone());
             write!(file, ", ").unwrap();
             emit_operand(file, dst.clone());
-            writeln!(file, "").unwrap();
+            writeln!(file).unwrap();
         }
 
         Code::Jmp(label) => {
             write!(file, "\tjmp\t").unwrap();
             emit_operand(file, label.clone());
-            writeln!(file, "").unwrap();
+            writeln!(file).unwrap();
         }
 
         Code::JmpCC { cond, label } => {
             let cc = cc_to_str(cond);
             write!(file, "\tj{} \t", cc).unwrap();
             emit_operand(file, label.clone());
-            writeln!(file, "").unwrap();
+            writeln!(file).unwrap();
         }
 
         Code::SetCC { cond, dst } => {
             let cc = cc_to_str(cond);
             write!(file, "\tset{}\t", cc).unwrap();
             emit_operand(file, dst.clone());
-            writeln!(file, "").unwrap();
+            writeln!(file).unwrap();
         }
 
         Code::Label(idx) => {
@@ -344,23 +348,41 @@ fn emit_op(file: &mut std::fs::File, instr: Rc<RefCell<Code>>) {
         Code::Call(func) => {
             write!(file, "\tcall\t").unwrap();
             emit_operand(file, func.clone());
-            writeln!(file, "").unwrap();
+            writeln!(file).unwrap();
         }
 
         Code::Push(val) => {
             write!(file, "\tpushq\t").unwrap();
             emit_operand(file, val.clone());
-            writeln!(file, "").unwrap();
+            writeln!(file).unwrap();
         }
 
         Code::PushBytes(n) => {
-            write!(file, "\tsubq\t${}, %rsp\n", n).unwrap();
+            writeln!(file, "\tsubq\t${}, %rsp", n).unwrap();
         }
 
         Code::PopBytes(n) => {
-            write!(file, "\taddq\t${}, %rsp\n", n).unwrap();
+            writeln!(file, "\taddq\t${}, %rsp", n).unwrap();
         }
 
+        Code::StaticVar { name, global, init } => {
+            if *global {
+                writeln!(file, "\t.globl {}", name).unwrap();
+            }
+
+            if *init != 0 {
+                writeln!(file, "\t.data").unwrap();
+                writeln!(file, "\t.align 4").unwrap();
+                writeln!(file, "{}:", name).unwrap();
+                writeln!(file, "\t.long {}", init).unwrap();
+            } else {
+                writeln!(file, "\t.bss").unwrap();
+                writeln!(file, "\t.align 4").unwrap();
+                writeln!(file, "{}:", name).unwrap();
+                writeln!(file, "\t.zero 4").unwrap();
+            }
+            writeln!(file).unwrap();
+        }
         _ => {
             println!("Cannot emit {:?}", instr);
             unreachable!();
@@ -379,8 +401,16 @@ pub fn emit(filepath: &str, code: Vec<Rc<RefCell<Code>>>) {
 
     for instr in code {
         match &*instr.borrow() {
-            Code::Function { name, stack, code } => {
-                writeln!(file, "\t.globl {}", name).unwrap();
+            Code::Function {
+                name,
+                global,
+                stack,
+                code,
+            } => {
+                writeln!(file, "\t.text").unwrap();
+                if *global {
+                    writeln!(file, "\t.globl {}", name).unwrap();
+                }
                 writeln!(file, "\t.type {}, @function", name).unwrap();
                 writeln!(file, "{}:", name).unwrap();
 
@@ -392,7 +422,7 @@ pub fn emit(filepath: &str, code: Vec<Rc<RefCell<Code>>>) {
                     emit_op(&mut file, instr.clone());
                 }
 
-                writeln!(file, "").unwrap();
+                writeln!(file).unwrap();
             }
 
             _ => {

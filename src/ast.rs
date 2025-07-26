@@ -27,257 +27,221 @@ use std::rc::{Rc, Weak};
 use crate::scope::*;
 use crate::types::*;
 
-pub type ASTRef = Rc<RefCell<AST>>;
+pub type AstRef = Rc<RefCell<Ast>>;
+pub type AstWeakRef = Weak<RefCell<Ast>>;
 
 #[derive(Debug)]
 #[allow(dead_code)]
-pub struct AST {
+pub struct Ast {
     pub id: usize,
     pub ty: TypeRef,
-    pub kind: ASTKind,
+    pub kind: AstKind,
     pub scope: ScopeRef,
 }
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
-pub enum ASTKind {
+pub enum AstKind {
     ConstInt(i64),
     Void,
     Int,
     Function {
         name: String,
-        params: Vec<ASTRef>,
-        block: Option<ASTRef>,
-        ty: ASTRef,
+        sym: Option<SymWeakRef>,
+        params: Vec<AstRef>,
+        block: Option<AstRef>,
+        type_spec: AstRef,
         scope: ScopeRef,
     },
     Parameter {
         name: Option<String>,
+        sym: Option<SymWeakRef>,
         idx: usize,
-        ty: ASTRef,
+        type_spec: AstRef,
     },
     Block {
-        body: Vec<ASTRef>,
+        body: Vec<AstRef>,
     },
     Variable {
         name: String,
-        ty: ASTRef,
-        init: Option<ASTRef>,
+        sym: Option<SymWeakRef>,
+        type_spec: AstRef,
+        init: Option<AstRef>,
     },
     Identifier {
         name: String,
-        sym: Option<Weak<RefCell<Symbol>>>,
+        sym: Option<SymWeakRef>,
     },
     Return {
-        expr: ASTRef,
+        expr: AstRef,
     },
     If {
-        cond: ASTRef,
-        then: ASTRef,
-        otherwise: Option<ASTRef>,
+        cond: AstRef,
+        then: AstRef,
+        otherwise: Option<AstRef>,
     },
     Break {
-        to: Option<ASTRef>,
+        to: Option<AstRef>,
     },
     Continue {
-        to: Option<ASTRef>,
+        to: Option<AstRef>,
     },
     While {
-        cond: ASTRef,
-        body: ASTRef,
+        cond: AstRef,
+        body: AstRef,
     },
     DoWhile {
-        cond: ASTRef,
-        body: ASTRef,
+        cond: AstRef,
+        body: AstRef,
     },
     For {
-        init: Option<ASTRef>,
-        cond: Option<ASTRef>,
-        post: Option<ASTRef>,
-        body: ASTRef,
+        init: Option<AstRef>,
+        cond: Option<AstRef>,
+        post: Option<AstRef>,
+        body: AstRef,
     },
     Switch {
-        cond: ASTRef,
-        body: ASTRef,
-        cases: Vec<ASTRef>,
+        cond: AstRef,
+        body: AstRef,
+        cases: Vec<AstRef>,
     },
     ExprStmt {
-        expr: ASTRef,
+        expr: AstRef,
     },
     GoTo {
         label: String,
     },
     Label {
         name: String,
-        stmt: ASTRef,
+        stmt: AstRef,
     },
     Case {
-        expr: ASTRef,
-        stmt: ASTRef,
+        expr: AstRef,
+        stmt: AstRef,
         idx: usize,
     },
     Default {
-        stmt: ASTRef,
+        stmt: AstRef,
     },
     EmptyStmt,
-    Conditional {
-        left: ASTRef,
-        middle: ASTRef,
-        right: ASTRef,
+    Ternary {
+        left: AstRef,
+        middle: AstRef,
+        right: AstRef,
     },
     Complement {
-        expr: ASTRef,
+        expr: AstRef,
     },
     Negate {
-        expr: ASTRef,
+        expr: AstRef,
     },
     Not {
-        expr: ASTRef,
-    },
-    PreIncr {
-        expr: ASTRef,
-    },
-    PreDecr {
-        expr: ASTRef,
+        expr: AstRef,
     },
     PostIncr {
-        expr: ASTRef,
+        expr: AstRef,
     },
     PostDecr {
-        expr: ASTRef,
+        expr: AstRef,
     },
     Add {
-        left: ASTRef,
-        right: ASTRef,
+        left: AstRef,
+        right: AstRef,
     },
     Subtract {
-        left: ASTRef,
-        right: ASTRef,
+        left: AstRef,
+        right: AstRef,
     },
     Multiply {
-        left: ASTRef,
-        right: ASTRef,
+        left: AstRef,
+        right: AstRef,
     },
     Divide {
-        left: ASTRef,
-        right: ASTRef,
+        left: AstRef,
+        right: AstRef,
     },
     Modulo {
-        left: ASTRef,
-        right: ASTRef,
+        left: AstRef,
+        right: AstRef,
     },
     LShift {
-        left: ASTRef,
-        right: ASTRef,
+        left: AstRef,
+        right: AstRef,
     },
     RShift {
-        left: ASTRef,
-        right: ASTRef,
+        left: AstRef,
+        right: AstRef,
     },
     And {
-        left: ASTRef,
-        right: ASTRef,
+        left: AstRef,
+        right: AstRef,
     },
     Or {
-        left: ASTRef,
-        right: ASTRef,
+        left: AstRef,
+        right: AstRef,
     },
     Xor {
-        left: ASTRef,
-        right: ASTRef,
+        left: AstRef,
+        right: AstRef,
     },
     LogicAnd {
-        left: ASTRef,
-        right: ASTRef,
+        left: AstRef,
+        right: AstRef,
     },
     LogicOr {
-        left: ASTRef,
-        right: ASTRef,
+        left: AstRef,
+        right: AstRef,
     },
     Equal {
-        left: ASTRef,
-        right: ASTRef,
+        left: AstRef,
+        right: AstRef,
     },
     NotEq {
-        left: ASTRef,
-        right: ASTRef,
+        left: AstRef,
+        right: AstRef,
     },
     LessThan {
-        left: ASTRef,
-        right: ASTRef,
+        left: AstRef,
+        right: AstRef,
     },
     LessOrEq {
-        left: ASTRef,
-        right: ASTRef,
+        left: AstRef,
+        right: AstRef,
     },
     GreaterThan {
-        left: ASTRef,
-        right: ASTRef,
+        left: AstRef,
+        right: AstRef,
     },
     GreaterOrEq {
-        left: ASTRef,
-        right: ASTRef,
+        left: AstRef,
+        right: AstRef,
     },
     Assign {
-        left: ASTRef,
-        right: ASTRef,
+        left: AstRef,
+        right: AstRef,
     },
     Call {
-        expr: ASTRef,
-        args: Vec<ASTRef>,
+        expr: AstRef,
+        args: Vec<AstRef>,
     },
 }
 
-impl AST {
+impl Ast {
     pub fn new(
         id: usize,
-        kind: ASTKind,
+        kind: AstKind,
         ty: Option<TypeRef>,
         scope: ScopeRef,
-    ) -> ASTRef {
-        Rc::new(RefCell::new(AST {
-            id: id,
-            ty: if ty.is_some() {
-                ty.unwrap().clone()
+    ) -> AstRef {
+        Rc::new(RefCell::new(Ast {
+            id,
+            ty: if let Some(t) = ty {
+                t.clone()
             } else {
                 undefined_type()
             },
-            kind: kind,
-            scope: scope,
+            kind,
+            scope,
         }))
     }
-
-    pub fn preceeds(&self, other: &AST) -> bool {
-        self.id < other.id
-    }
-
-    pub fn resolve(&self) -> Option<SymRef> {
-        if let ASTKind::Identifier { sym, .. } = &self.kind {
-            if let Some(sym_ref) = sym {
-                if let Some(sym_rc) = sym_ref.upgrade() {
-                    return Some(sym_rc);
-                }
-            }
-        }
-
-        None
-    }
-
-    pub fn resolve_node(&self) -> Option<ASTRef> {
-        if let Some(sym) = self.resolve() {
-            if let Some(node) = &sym.borrow().node {
-                return node.upgrade();
-            }
-        }
-
-        None
-    }
 }
-
-/*
-impl Drop for AST {
-    fn drop(&mut self) {
-        println!("Dropping AST: {:?}", self);
-    }
-}
-*/

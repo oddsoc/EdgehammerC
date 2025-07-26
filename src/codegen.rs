@@ -21,33 +21,12 @@
  *  DEALINGS IN THE SOFTWARE.
  */
 
-use std::env;
+use crate::ir::TacRef;
 
-mod ast;
-mod codegen;
-mod driver;
-mod expr;
-mod ir;
-mod lexer;
-mod parser;
-mod scope;
-mod semantics;
-mod types;
-mod x64;
+pub trait CodeGenerator {
+    type Code;
 
-fn main() -> Result<(), ()> {
-    let args: Vec<String> = env::args().collect();
+    fn new() -> Self;
 
-    if args.len() < 2 {
-        eprintln!(
-            "Usage: {} [--lex|--parse|--validate|--codegen] [-S] [-o <output>] <c-file> [<c-file> ...]",
-            args[0]
-        );
-        std::process::exit(1);
-    }
-
-    let (translations, arguments) = driver::process_args(&args);
-    driver::run(&translations, &arguments);
-
-    Ok(())
+    fn lower(&mut self, ir: Vec<TacRef>) -> Self::Code;
 }
