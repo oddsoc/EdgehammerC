@@ -1,23 +1,23 @@
 //  SPDX-License-Identifier: MIT
 /*
- *  Copyright (c) 2025 Andrew Scott-Jones <andrew@edgehammer.io>
+ *  Copyright (c) 2025 Andrew Scott-Jones
  *
- *  Permission is hereby granted, free of charge, to any person obtaining a 
- *  copy of this software and associated documentation files (the "Software"), 
- *  to deal in the Software without restriction, including without limitation 
- *  the rights to use, copy, modify, merge, publish, distribute, sublicense, 
- *  and/or sell copies of the Software, and to permit persons to whom the 
+ *  Permission is hereby granted, free of charge, to any person obtaining a
+ *  copy of this software and associated documentation files (the "Software"),
+ *  to deal in the Software without restriction, including without limitation
+ *  the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ *  and/or sell copies of the Software, and to permit persons to whom the
  *  Software is furnished to do so, subject to the following conditions:
  *
- *  The above copyright notice and this permission notice shall be included in 
+ *  The above copyright notice and this permission notice shall be included in
  *  all copies or substantial portions of the Software.
  *
- *  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS 
- *  OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, 
- *  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE 
- *  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER 
- *  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING 
- *  FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER 
+ *  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+ *  OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ *  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ *  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ *  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ *  FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
  *  DEALINGS IN THE SOFTWARE.
  */
 
@@ -26,7 +26,7 @@ use std::io::Write;
 use std::path::Path;
 use std::rc::Rc;
 
-use crate::x64::codegen::{Code, Register};
+use crate::x64::linux::codegen::{Code, Register};
 
 use super::codegen::CondCode;
 
@@ -206,7 +206,7 @@ fn emit_op(file: &mut std::fs::File, instr: Rc<RefCell<Code>>) {
         }
 
         Code::MovSignExt(src, dst, size) => {
-            write!(file, "\tmovsx{}\t", op_suffix(*size)).unwrap();
+            write!(file, "\tmovsl{}\t", op_suffix(*size)).unwrap();
             emit_operand(file, src.clone());
             write!(file, ", ").unwrap();
             emit_operand(file, dst.clone());
@@ -215,6 +215,14 @@ fn emit_op(file: &mut std::fs::File, instr: Rc<RefCell<Code>>) {
 
         Code::MovZeroExt(src, dst, size) => {
             write!(file, "\tmovzx{}\t", op_suffix(*size)).unwrap();
+            emit_operand(file, src.clone());
+            write!(file, ", ").unwrap();
+            emit_operand(file, dst.clone());
+            writeln!(file).unwrap();
+        }
+
+        Code::MovAbs(src, dst, size) => {
+            write!(file, "\tmovabs{}\t", op_suffix(*size)).unwrap();
             emit_operand(file, src.clone());
             write!(file, ", ").unwrap();
             emit_operand(file, dst.clone());
@@ -303,8 +311,12 @@ fn emit_op(file: &mut std::fs::File, instr: Rc<RefCell<Code>>) {
             writeln!(file).unwrap();
         }
 
-        Code::Cdq => {
-            writeln!(file, "\tcdq").unwrap();
+        Code::Cdq(size) => {
+            if *size == 8 {
+                writeln!(file, "\tcqo").unwrap();
+            } else {
+                writeln!(file, "\tcdq").unwrap();
+            }
         }
 
         Code::Ret => {
@@ -370,17 +382,36 @@ fn emit_op(file: &mut std::fs::File, instr: Rc<RefCell<Code>>) {
                 writeln!(file, "\t.globl {}", name).unwrap();
             }
 
-            if *init != 0 {
-                writeln!(file, "\t.data").unwrap();
-                writeln!(file, "\t.align 4").unwrap();
-                writeln!(file, "{}:", name).unwrap();
-                writeln!(file, "\t.long {}", init).unwrap();
-            } else {
-                writeln!(file, "\t.bss").unwrap();
-                writeln!(file, "\t.align 4").unwrap();
-                writeln!(file, "{}:", name).unwrap();
-                writeln!(file, "\t.zero 4").unwrap();
+            match &*init.borrow() {
+                Code::InitInt(value) => {
+                    if *value != 0 {
+                        writeln!(file, "\t.data").unwrap();
+                        writeln!(file, "\t.align 4").unwrap();
+                        writeln!(file, "{}:", name).unwrap();
+                        writeln!(file, "\t.long {}", *value).unwrap();
+                    } else {
+                        writeln!(file, "\t.bss").unwrap();
+                        writeln!(file, "\t.align 4").unwrap();
+                        writeln!(file, "{}:", name).unwrap();
+                        writeln!(file, "\t.zero 4").unwrap();
+                    }
+                }
+                Code::InitLong(value) => {
+                    if *value != 0 {
+                        writeln!(file, "\t.data").unwrap();
+                        writeln!(file, "\t.align 8").unwrap();
+                        writeln!(file, "{}:", name).unwrap();
+                        writeln!(file, "\t.quad {}", *value).unwrap();
+                    } else {
+                        writeln!(file, "\t.bss").unwrap();
+                        writeln!(file, "\t.align 8").unwrap();
+                        writeln!(file, "{}:", name).unwrap();
+                        writeln!(file, "\t.zero 8").unwrap();
+                    }
+                }
+                _ => unreachable!(),
             }
+
             writeln!(file).unwrap();
         }
         _ => {

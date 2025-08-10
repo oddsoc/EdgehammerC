@@ -1,23 +1,23 @@
 //  SPDX-License-Identifier: MIT
 /*
- *  Copyright (c) 2025 Andrew Scott-Jones <andrew@edgehammer.io>
+ *  Copyright (c) 2025 Andrew Scott-Jones
  *
- *  Permission is hereby granted, free of charge, to any person obtaining a 
- *  copy of this software and associated documentation files (the "Software"), 
- *  to deal in the Software without restriction, including without limitation 
- *  the rights to use, copy, modify, merge, publish, distribute, sublicense, 
- *  and/or sell copies of the Software, and to permit persons to whom the 
+ *  Permission is hereby granted, free of charge, to any person obtaining a
+ *  copy of this software and associated documentation files (the "Software"),
+ *  to deal in the Software without restriction, including without limitation
+ *  the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ *  and/or sell copies of the Software, and to permit persons to whom the
  *  Software is furnished to do so, subject to the following conditions:
  *
- *  The above copyright notice and this permission notice shall be included in 
+ *  The above copyright notice and this permission notice shall be included in
  *  all copies or substantial portions of the Software.
  *
- *  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS 
- *  OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, 
- *  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE 
- *  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER 
- *  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING 
- *  FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER 
+ *  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+ *  OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ *  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ *  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ *  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ *  FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
  *  DEALINGS IN THE SOFTWARE.
  */
 
@@ -28,9 +28,431 @@ use crate::ast::*;
 use crate::scope::*;
 use crate::types::*;
 
-fn is_callable(expr: AstRef) -> bool {
+fn as_const_int(n: i32, scope: &ScopeRef) -> AstRef {
+    Rc::new(RefCell::new(Ast {
+        id: 0,
+        ty: int_type(true),
+        kind: AstKind::ConstInt(n),
+        scope: scope.clone(),
+    }))
+}
+
+fn as_const_long(n: i64, scope: &ScopeRef) -> AstRef {
+    Rc::new(RefCell::new(Ast {
+        id: 0,
+        ty: long_type(true),
+        kind: AstKind::ConstLong(n),
+        scope: scope.clone(),
+    }))
+}
+
+pub fn fold(ast: &AstRef) -> AstRef {
+    let scope = scope_of(ast);
+
+    match &ast.borrow().kind {
+        AstKind::Identifier { .. } => ast.clone(),
+        AstKind::Assign { .. } => ast.clone(),
+        AstKind::LogicAnd { left, right } => {
+            replace(left, &fold(left));
+            replace(right, &fold(right));
+
+            match (&left.borrow().kind, &right.borrow().kind) {
+                (AstKind::ConstInt(lhs), AstKind::ConstInt(rhs)) => {
+                    let res = if *lhs != 0 && *rhs != 0 { 1 } else { 0 };
+                    as_const_int(res, &scope)
+                }
+                (AstKind::ConstLong(lhs), AstKind::ConstLong(rhs)) => {
+                    let res = if *lhs != 0 && *rhs != 0 { 1 } else { 0 };
+                    as_const_long(res, &scope)
+                }
+                _ => ast.clone(),
+            }
+        }
+        AstKind::LogicOr { left, right } => {
+            replace(left, &fold(left));
+            replace(right, &fold(right));
+
+            match (&left.borrow().kind, &right.borrow().kind) {
+                (AstKind::ConstInt(lhs), AstKind::ConstInt(rhs)) => {
+                    let res = if *lhs != 0 || *rhs != 0 { 1 } else { 0 };
+                    as_const_int(res, &scope)
+                }
+                (AstKind::ConstLong(lhs), AstKind::ConstLong(rhs)) => {
+                    let res = if *lhs != 0 || *rhs != 0 { 1 } else { 0 };
+                    as_const_long(res, &scope)
+                }
+                _ => ast.clone(),
+            }
+        }
+        AstKind::Add { left, right } => {
+            replace(left, &fold(left));
+            replace(right, &fold(right));
+
+            match (&left.borrow().kind, &right.borrow().kind) {
+                (AstKind::ConstInt(lhs), AstKind::ConstInt(rhs)) => {
+                    let res = (*lhs).wrapping_add(*rhs);
+                    as_const_int(res, &scope)
+                }
+                (AstKind::ConstLong(lhs), AstKind::ConstLong(rhs)) => {
+                    let res = (*lhs).wrapping_add(*rhs);
+                    as_const_long(res, &scope)
+                }
+                _ => ast.clone(),
+            }
+        }
+        AstKind::Subtract { left, right } => {
+            replace(left, &fold(left));
+            replace(right, &fold(right));
+
+            match (&left.borrow().kind, &right.borrow().kind) {
+                (AstKind::ConstInt(lhs), AstKind::ConstInt(rhs)) => {
+                    let res = (*lhs).wrapping_sub(*rhs);
+                    as_const_int(res, &scope)
+                }
+                (AstKind::ConstLong(lhs), AstKind::ConstLong(rhs)) => {
+                    let res = (*lhs).wrapping_sub(*rhs);
+                    as_const_long(res, &scope)
+                }
+                _ => ast.clone(),
+            }
+        }
+        AstKind::Multiply { left, right } => {
+            replace(left, &fold(left));
+            replace(right, &fold(right));
+
+            match (&left.borrow().kind, &right.borrow().kind) {
+                (AstKind::ConstInt(lhs), AstKind::ConstInt(rhs)) => {
+                    let res = (*lhs).wrapping_mul(*rhs);
+                    as_const_int(res, &scope)
+                }
+                (AstKind::ConstLong(lhs), AstKind::ConstLong(rhs)) => {
+                    let res = (*lhs).wrapping_mul(*rhs);
+                    as_const_long(res, &scope)
+                }
+                _ => ast.clone(),
+            }
+        }
+        AstKind::Divide { left, right } => {
+            replace(left, &fold(left));
+            replace(right, &fold(right));
+
+            match (&left.borrow().kind, &right.borrow().kind) {
+                (AstKind::ConstInt(lhs), AstKind::ConstInt(rhs)) => {
+                    let res = if *rhs == 0 { 0 } else { *lhs / *rhs };
+                    as_const_int(res, &scope)
+                }
+                (AstKind::ConstLong(lhs), AstKind::ConstLong(rhs)) => {
+                    let res = if *rhs == 0 { 0 } else { *lhs / *rhs };
+                    as_const_long(res, &scope)
+                }
+                _ => ast.clone(),
+            }
+        }
+        AstKind::Modulo { left, right } => {
+            replace(left, &fold(left));
+            replace(right, &fold(right));
+
+            match (&left.borrow().kind, &right.borrow().kind) {
+                (AstKind::ConstInt(lhs), AstKind::ConstInt(rhs)) => {
+                    let res = if *rhs == 0 { 0 } else { *lhs % *rhs };
+                    as_const_int(res, &scope)
+                }
+                (AstKind::ConstLong(lhs), AstKind::ConstLong(rhs)) => {
+                    let res = if *rhs == 0 { 0 } else { *lhs % *rhs };
+                    as_const_long(res, &scope)
+                }
+                _ => ast.clone(),
+            }
+        }
+        AstKind::And { left, right } => {
+            replace(left, &fold(left));
+            replace(right, &fold(right));
+
+            match (&left.borrow().kind, &right.borrow().kind) {
+                (AstKind::ConstInt(lhs), AstKind::ConstInt(rhs)) => {
+                    let res = *lhs & *rhs;
+                    as_const_int(res, &scope)
+                }
+                (AstKind::ConstLong(lhs), AstKind::ConstLong(rhs)) => {
+                    let res = *lhs & *rhs;
+                    as_const_long(res, &scope)
+                }
+                _ => ast.clone(),
+            }
+        }
+        AstKind::Or { left, right } => {
+            replace(left, &fold(left));
+            replace(right, &fold(right));
+
+            match (&left.borrow().kind, &right.borrow().kind) {
+                (AstKind::ConstInt(lhs), AstKind::ConstInt(rhs)) => {
+                    let res = *lhs | *rhs;
+                    as_const_int(res, &scope)
+                }
+                (AstKind::ConstLong(lhs), AstKind::ConstLong(rhs)) => {
+                    let res = *lhs | *rhs;
+                    as_const_long(res, &scope)
+                }
+                _ => ast.clone(),
+            }
+        }
+        AstKind::LShift { left, right } => {
+            replace(left, &fold(left));
+            replace(right, &fold(right));
+
+            match (&left.borrow().kind, &right.borrow().kind) {
+                (AstKind::ConstInt(lhs), AstKind::ConstInt(rhs)) => {
+                    let res = (*lhs).wrapping_shl(*rhs as u32);
+                    as_const_int(res, &scope)
+                }
+                (AstKind::ConstLong(lhs), AstKind::ConstLong(rhs)) => {
+                    let res = (*lhs).wrapping_shl(*rhs as u32);
+                    as_const_long(res, &scope)
+                }
+                _ => ast.clone(),
+            }
+        }
+        AstKind::RShift { left, right } => {
+            replace(left, &fold(left));
+            replace(right, &fold(right));
+
+            match (&left.borrow().kind, &right.borrow().kind) {
+                (AstKind::ConstInt(lhs), AstKind::ConstInt(rhs)) => {
+                    let res = if *rhs >= 0 { *lhs >> *rhs } else { 0 };
+                    as_const_int(res, &scope)
+                }
+                (AstKind::ConstLong(lhs), AstKind::ConstLong(rhs)) => {
+                    let res = if *rhs >= 0 { *lhs >> *rhs } else { 0 };
+                    as_const_long(res, &scope)
+                }
+                _ => ast.clone(),
+            }
+        }
+        AstKind::Xor { left, right } => {
+            replace(left, &fold(left));
+            replace(right, &fold(right));
+
+            match (&left.borrow().kind, &right.borrow().kind) {
+                (AstKind::ConstInt(lhs), AstKind::ConstInt(rhs)) => {
+                    let res = *lhs ^ *rhs;
+                    as_const_int(res, &scope)
+                }
+                (AstKind::ConstLong(lhs), AstKind::ConstLong(rhs)) => {
+                    let res = *lhs ^ *rhs;
+                    as_const_long(res, &scope)
+                }
+                _ => ast.clone(),
+            }
+        }
+        AstKind::Equal { left, right } => {
+            replace(left, &fold(left));
+            replace(right, &fold(right));
+
+            match (&left.borrow().kind, &right.borrow().kind) {
+                (AstKind::ConstInt(lhs), AstKind::ConstInt(rhs)) => {
+                    let res = if *lhs == *rhs { 1 } else { 0 };
+                    as_const_int(res, &scope)
+                }
+                (AstKind::ConstLong(lhs), AstKind::ConstLong(rhs)) => {
+                    let res = if *lhs == *rhs { 1 } else { 0 };
+                    as_const_long(res, &scope)
+                }
+                _ => ast.clone(),
+            }
+        }
+        AstKind::NotEq { left, right } => {
+            replace(left, &fold(left));
+            replace(right, &fold(right));
+
+            match (&left.borrow().kind, &right.borrow().kind) {
+                (AstKind::ConstInt(lhs), AstKind::ConstInt(rhs)) => {
+                    let res = if *lhs != *rhs { 1 } else { 0 };
+                    as_const_int(res, &scope)
+                }
+                (AstKind::ConstLong(lhs), AstKind::ConstLong(rhs)) => {
+                    let res = if *lhs != *rhs { 1 } else { 0 };
+                    as_const_long(res, &scope)
+                }
+                _ => ast.clone(),
+            }
+        }
+        AstKind::LessThan { left, right } => {
+            replace(left, &fold(left));
+            replace(right, &fold(right));
+
+            match (&left.borrow().kind, &right.borrow().kind) {
+                (AstKind::ConstInt(lhs), AstKind::ConstInt(rhs)) => {
+                    let res = if *lhs < *rhs { 1 } else { 0 };
+                    as_const_int(res, &scope)
+                }
+                (AstKind::ConstLong(lhs), AstKind::ConstLong(rhs)) => {
+                    let res = if *lhs < *rhs { 1 } else { 0 };
+                    as_const_long(res, &scope)
+                }
+                _ => ast.clone(),
+            }
+        }
+        AstKind::LessOrEq { left, right } => {
+            replace(left, &fold(left));
+            replace(right, &fold(right));
+
+            match (&left.borrow().kind, &right.borrow().kind) {
+                (AstKind::ConstInt(lhs), AstKind::ConstInt(rhs)) => {
+                    let res = if *lhs <= *rhs { 1 } else { 0 };
+                    as_const_int(res, &scope)
+                }
+                (AstKind::ConstLong(lhs), AstKind::ConstLong(rhs)) => {
+                    let res = if *lhs <= *rhs { 1 } else { 0 };
+                    as_const_long(res, &scope)
+                }
+                _ => ast.clone(),
+            }
+        }
+        AstKind::GreaterThan { left, right } => {
+            replace(left, &fold(left));
+            replace(right, &fold(right));
+
+            match (&left.borrow().kind, &right.borrow().kind) {
+                (AstKind::ConstInt(lhs), AstKind::ConstInt(rhs)) => {
+                    let res = if *lhs > *rhs { 1 } else { 0 };
+                    as_const_int(res, &scope)
+                }
+                (AstKind::ConstLong(lhs), AstKind::ConstLong(rhs)) => {
+                    let res = if *lhs > *rhs { 1 } else { 0 };
+                    as_const_long(res, &scope)
+                }
+                _ => ast.clone(),
+            }
+        }
+        AstKind::GreaterOrEq { left, right } => {
+            replace(left, &fold(left));
+            replace(right, &fold(right));
+
+            match (&left.borrow().kind, &right.borrow().kind) {
+                (AstKind::ConstInt(lhs), AstKind::ConstInt(rhs)) => {
+                    let res = if *lhs >= *rhs { 1 } else { 0 };
+                    as_const_int(res, &scope)
+                }
+                (AstKind::ConstLong(lhs), AstKind::ConstLong(rhs)) => {
+                    let res = if *lhs >= *rhs { 1 } else { 0 };
+                    as_const_long(res, &scope)
+                }
+                _ => ast.clone(),
+            }
+        }
+
+        AstKind::Ternary {
+            left,
+            middle,
+            right,
+        } => {
+            replace(left, &fold(left));
+            replace(middle, &fold(middle));
+            replace(right, &fold(right));
+
+            match &left.borrow().kind {
+                AstKind::ConstInt(n) => {
+                    if *n != 0 {
+                        fold(middle).clone()
+                    } else {
+                        fold(right).clone()
+                    }
+                }
+                AstKind::ConstLong(n) => {
+                    if *n != 0 {
+                        fold(middle).clone()
+                    } else {
+                        fold(right).clone()
+                    }
+                }
+                _ => ast.clone(),
+            }
+        }
+
+        AstKind::Not { expr: inner } => {
+            replace(inner, &fold(inner));
+
+            match &inner.borrow().kind {
+                AstKind::ConstInt(n) => {
+                    if *n != 0 {
+                        as_const_int(0, &scope)
+                    } else {
+                        as_const_int(1, &scope)
+                    }
+                }
+                AstKind::ConstLong(n) => {
+                    if *n != 0 {
+                        as_const_int(0, &scope)
+                    } else {
+                        as_const_int(1, &scope)
+                    }
+                }
+                _ => ast.clone(),
+            }
+        }
+        AstKind::Negate { expr: inner } => {
+            replace(inner, &fold(inner));
+            match &inner.borrow().kind {
+                AstKind::ConstInt(n) => as_const_int(-(*n), &scope),
+                AstKind::ConstLong(n) => as_const_long(-(*n), &scope),
+                _ => ast.clone(),
+            }
+        }
+        AstKind::Complement { expr: inner } => {
+            replace(inner, &fold(inner));
+
+            match &inner.borrow().kind {
+                AstKind::ConstInt(n) => as_const_int(!(*n), &scope),
+                AstKind::ConstLong(n) => as_const_long(!(*n), &scope),
+                _ => ast.clone(),
+            }
+        }
+        AstKind::PostIncr { expr: inner }
+        | AstKind::PostDecr { expr: inner } => {
+            replace(inner, &fold(inner));
+            ast.clone()
+        }
+        AstKind::Cast { expr: inner, .. } => {
+            replace(inner, &fold(inner));
+            let ty = type_of(ast);
+
+            match &inner.borrow().kind {
+                AstKind::ConstInt(n) => match ty.borrow().kind {
+                    TypeKind::Int => inner.clone(),
+                    TypeKind::Long => as_const_long(*n as i64, &scope),
+                    _ => ast.clone(),
+                },
+                AstKind::ConstLong(n) => match ty.borrow().kind {
+                    TypeKind::Int => as_const_int(*n as i32, &scope),
+                    TypeKind::Long => as_const_long(*n, &scope),
+                    _ => ast.clone(),
+                },
+                _ => ast.clone(),
+            }
+        }
+        AstKind::Call { expr: callee, .. } => {
+            replace(callee, &fold(callee));
+            ast.clone()
+        }
+        AstKind::ConstInt(_) => ast.clone(),
+        AstKind::ConstLong(_) => ast.clone(),
+        AstKind::StaticInitializer(c_expr) => {
+            replace(c_expr, &fold(c_expr));
+            c_expr.clone()
+        }
+        AstKind::Initializer(expr) => {
+            replace(expr, &fold(expr));
+            expr.clone()
+        }
+        _ => {
+            unreachable!();
+        }
+    }
+}
+
+pub fn is_callable(expr: &AstRef) -> bool {
     if let AstKind::Identifier { .. } = &expr.borrow().kind {
-        if let Some(sym) = resolve(&expr) {
+        if let Some(sym) = resolve(expr) {
             if let Some(node) = sym_as_node(sym.clone()) {
                 match &node.borrow().kind {
                     AstKind::Function { .. } => return true,
@@ -43,29 +465,48 @@ fn is_callable(expr: AstRef) -> bool {
     false
 }
 
-fn is_lvalue(expr: AstRef) -> bool {
+pub fn is_lvalue(expr: &AstRef) -> bool {
     matches!(&expr.borrow().kind, AstKind::Identifier { .. })
 }
 
-pub fn eval(expr: AstRef) -> Result<AstRef, String> {
+pub fn is_const_int_expr(expr: &AstRef) -> bool {
+    match &expr.borrow().kind {
+        AstKind::StaticInitializer(subexpr) => is_const_int_expr(subexpr),
+        AstKind::Initializer(subexpr) => is_const_int_expr(subexpr),
+        AstKind::ConstInt(_) | AstKind::ConstLong(_) => true,
+        _ => false,
+    }
+}
+
+pub fn const_int_value(expr: &AstRef) -> i64 {
+    assert!(is_const_int_expr(expr));
+    match &expr.borrow().kind {
+        AstKind::ConstInt(value) => *value as i64,
+        AstKind::ConstLong(value) => *value,
+        _ => unreachable!(),
+    }
+}
+
+pub fn check(expr: &AstRef) -> Result<(), String> {
     let node = expr.borrow();
     match &node.kind {
         AstKind::Identifier { name, .. } => {
             if resolve(&expr).is_some() {
-                Ok(expr.clone())
+                Ok(())
             } else {
                 Err(format!("{} not found", name))
             }
         }
 
         AstKind::Assign { left, right } => {
-            if is_lvalue(left.clone()) {
-                eval(left.clone())?;
-                eval(right.clone())?;
-                Ok(expr.clone())
+            if !is_lvalue(left) {
+                return Err("not an lvalue".to_string());
             } else {
-                Err("not an lvalue".to_string())
+                check(left)?;
+                check(right)?;
             }
+
+            Ok(())
         }
 
         AstKind::Add { left, right }
@@ -78,103 +519,18 @@ pub fn eval(expr: AstRef) -> Result<AstRef, String> {
         | AstKind::And { left, right }
         | AstKind::Or { left, right }
         | AstKind::Xor { left, right } => {
-            let left_eval = eval(left.clone())?;
-            let right_eval = eval(right.clone())?;
+            check(left)?;
+            check(right)?;
 
-            if let (AstKind::ConstInt(lhs), AstKind::ConstInt(rhs)) =
-                (&left_eval.borrow().kind, &right_eval.borrow().kind)
-            {
-                let result = match &node.kind {
-                    AstKind::Add { .. } => lhs + rhs,
-                    AstKind::Subtract { .. } => lhs - rhs,
-                    AstKind::Multiply { .. } => lhs * rhs,
-                    AstKind::Divide { .. } => {
-                        if *rhs == 0 {
-                            return Err("attempt to divide by 0".to_string());
-                        }
-                        lhs / rhs
-                    }
-                    AstKind::Modulo { .. } => {
-                        if *rhs == 0 {
-                            return Err("attempt to divide by 0".to_string());
-                        }
-                        lhs % rhs
-                    }
-                    AstKind::LShift { .. } => lhs << rhs,
-                    AstKind::RShift { .. } => lhs >> rhs,
-                    AstKind::And { .. } => lhs & rhs,
-                    AstKind::Or { .. } => lhs | rhs,
-                    AstKind::Xor { .. } => lhs ^ rhs,
-                    _ => unreachable!(),
-                };
-
-                return Ok(Rc::new(RefCell::new(Ast {
-                    id: 0,
-                    ty: int_type(),
-                    kind: AstKind::ConstInt(result),
-                    scope: node.scope.clone(),
-                })));
-            }
-
-            Ok(expr.clone())
+            Ok(())
         }
 
         AstKind::LogicAnd { left, right }
         | AstKind::LogicOr { left, right } => {
-            let left_eval = eval(left.clone())?;
+            check(left)?;
+            check(right)?;
 
-            if let AstKind::ConstInt(lhs) = left_eval.borrow().kind {
-                let result = match &node.kind {
-                    AstKind::LogicAnd { .. } => {
-                        if lhs == 0 {
-                            return Ok(Rc::new(RefCell::new(Ast {
-                                id: 0,
-                                ty: int_type(),
-                                kind: AstKind::ConstInt(0),
-                                scope: node.scope.clone(),
-                            })));
-                        }
-                        let right_eval = eval(right.clone())?;
-                        let rhs = if let AstKind::ConstInt(rhs) =
-                            right_eval.borrow().kind
-                        {
-                            rhs
-                        } else {
-                            return Ok(expr.clone());
-                        };
-                        ((lhs != 0 && rhs != 0) as i32).into()
-                    }
-                    AstKind::LogicOr { .. } => {
-                        if lhs != 0 {
-                            return Ok(Rc::new(RefCell::new(Ast {
-                                id: 0,
-                                ty: int_type(),
-                                kind: AstKind::ConstInt(1),
-                                scope: node.scope.clone(),
-                            })));
-                        }
-                        let right_eval = eval(right.clone())?;
-                        let rhs = if let AstKind::ConstInt(rhs) =
-                            right_eval.borrow().kind
-                        {
-                            rhs
-                        } else {
-                            return Ok(expr.clone());
-                        };
-                        ((lhs != 0 || rhs != 0) as i32).into()
-                    }
-                    _ => unreachable!(),
-                };
-
-                return Ok(Rc::new(RefCell::new(Ast {
-                    id: 0,
-                    ty: int_type(),
-                    kind: AstKind::ConstInt(result),
-                    scope: node.scope.clone(),
-                })));
-            }
-
-            Ok(expr.clone())
+            Ok(())
         }
 
         AstKind::Equal { left, right }
@@ -183,31 +539,10 @@ pub fn eval(expr: AstRef) -> Result<AstRef, String> {
         | AstKind::LessOrEq { left, right }
         | AstKind::GreaterThan { left, right }
         | AstKind::GreaterOrEq { left, right } => {
-            let left_eval = eval(left.clone())?;
-            let right_eval = eval(right.clone())?;
+            check(left)?;
+            check(right)?;
 
-            if let (AstKind::ConstInt(lhs), AstKind::ConstInt(rhs)) =
-                (&left_eval.borrow().kind, &right_eval.borrow().kind)
-            {
-                let result = match &node.kind {
-                    AstKind::Equal { .. } => (lhs == rhs) as i64,
-                    AstKind::NotEq { .. } => (lhs != rhs) as i64,
-                    AstKind::LessThan { .. } => (lhs < rhs) as i64,
-                    AstKind::LessOrEq { .. } => (lhs <= rhs) as i64,
-                    AstKind::GreaterThan { .. } => (lhs > rhs) as i64,
-                    AstKind::GreaterOrEq { .. } => (lhs >= rhs) as i64,
-                    _ => unreachable!(),
-                };
-
-                return Ok(Rc::new(RefCell::new(Ast {
-                    id: 0,
-                    ty: int_type(),
-                    kind: AstKind::ConstInt(result),
-                    scope: node.scope.clone(),
-                })));
-            }
-
-            Ok(expr.clone())
+            Ok(())
         }
 
         AstKind::Ternary {
@@ -215,66 +550,66 @@ pub fn eval(expr: AstRef) -> Result<AstRef, String> {
             middle,
             right,
         } => {
-            let cond_eval = eval(left.clone())?;
+            check(left)?;
+            check(middle)?;
+            check(right)?;
 
-            if let AstKind::ConstInt(cond_value) = cond_eval.borrow().kind {
-                let branch = if cond_value != 0 {
-                    middle.clone()
-                } else {
-                    right.clone()
-                };
-
-                return eval(branch);
-            }
-
-            Ok(expr.clone())
+            Ok(())
         }
 
         AstKind::Negate { expr: inner }
         | AstKind::Complement { expr: inner }
         | AstKind::Not { expr: inner } => {
-            let eval_expr = eval(inner.clone())?;
+            check(inner)?;
 
-            if let AstKind::ConstInt(value) = eval_expr.borrow().kind {
-                let result = match &node.kind {
-                    AstKind::Negate { .. } => -value,
-                    AstKind::Complement { .. } => !value,
-                    AstKind::Not { .. } => ((value == 0) as i32).into(),
-                    _ => unreachable!(),
-                };
-
-                return Ok(Rc::new(RefCell::new(Ast {
-                    id: 0,
-                    ty: int_type(),
-                    kind: AstKind::ConstInt(result),
-                    scope: node.scope.clone(),
-                })));
-            }
-
-            Ok(expr.clone())
+            Ok(())
         }
 
         AstKind::PostIncr { expr: inner }
         | AstKind::PostDecr { expr: inner } => {
-            if !is_lvalue(eval(inner.clone())?) {
+            check(inner)?;
+            if !is_lvalue(inner) {
                 return Err("not an lvalue".to_string());
             }
 
-            Ok(expr.clone())
+            Ok(())
         }
 
         AstKind::Call {
             expr: callee,
             args: _,
         } => {
-            if !is_callable(eval(callee.clone())?) {
+            check(callee)?;
+
+            if !is_callable(callee) {
                 return Err("not a function".to_string());
             }
 
-            Ok(expr.clone())
+            Ok(())
         }
 
-        AstKind::ConstInt(_) => Ok(expr.clone()),
+        AstKind::Cast {
+            type_spec: _,
+            expr: subexpr,
+        } => {
+            check(subexpr)?;
+
+            Ok(())
+        }
+
+        AstKind::ConstInt(_) => Ok(()),
+
+        AstKind::ConstLong(_) => Ok(()),
+
+        AstKind::StaticInitializer(c_expr) => {
+            check(c_expr)?;
+            Ok(())
+        }
+
+        AstKind::Initializer(expr) => {
+            check(expr)?;
+            Ok(())
+        }
 
         _ => unreachable!(),
     }

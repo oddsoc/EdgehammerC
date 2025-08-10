@@ -1,23 +1,23 @@
 //  SPDX-License-Identifier: MIT
 /*
- *  Copyright (c) 2025 Andrew Scott-Jones <andrew@edgehammer.io>
+ *  Copyright (c) 2025 Andrew Scott-Jones
  *
- *  Permission is hereby granted, free of charge, to any person obtaining a 
- *  copy of this software and associated documentation files (the "Software"), 
- *  to deal in the Software without restriction, including without limitation 
- *  the rights to use, copy, modify, merge, publish, distribute, sublicense, 
- *  and/or sell copies of the Software, and to permit persons to whom the 
+ *  Permission is hereby granted, free of charge, to any person obtaining a
+ *  copy of this software and associated documentation files (the "Software"),
+ *  to deal in the Software without restriction, including without limitation
+ *  the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ *  and/or sell copies of the Software, and to permit persons to whom the
  *  Software is furnished to do so, subject to the following conditions:
  *
- *  The above copyright notice and this permission notice shall be included in 
+ *  The above copyright notice and this permission notice shall be included in
  *  all copies or substantial portions of the Software.
  *
- *  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS 
- *  OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, 
- *  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE 
- *  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER 
- *  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING 
- *  FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER 
+ *  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+ *  OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ *  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ *  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ *  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ *  FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
  *  DEALINGS IN THE SOFTWARE.
  */
 
@@ -30,7 +30,7 @@ use crate::types::*;
 pub type AstRef = Rc<RefCell<Ast>>;
 pub type AstWeakRef = Weak<RefCell<Ast>>;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct Ast {
     pub id: usize,
@@ -42,7 +42,10 @@ pub struct Ast {
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub enum AstKind {
-    ConstInt(i64),
+    StaticInitializer(AstRef),
+    Initializer(AstRef),
+    ConstInt(i32),
+    ConstLong(i64),
     Void,
     Int,
     Function {
@@ -74,6 +77,7 @@ pub enum AstKind {
     },
     Return {
         expr: AstRef,
+        func: SymWeakRef,
     },
     If {
         cond: AstRef,
@@ -224,6 +228,10 @@ pub enum AstKind {
         expr: AstRef,
         args: Vec<AstRef>,
     },
+    Cast {
+        type_spec: Option<AstRef>,
+        expr: AstRef,
+    },
 }
 
 impl Ast {
@@ -243,5 +251,15 @@ impl Ast {
             kind,
             scope,
         }))
+    }
+}
+
+pub fn deep_clone(node: &AstRef) -> AstRef {
+    Rc::new(RefCell::new(node.borrow().clone()))
+}
+
+pub fn replace(node: &AstRef, with: &AstRef) {
+    if !Rc::ptr_eq(node, with) {
+        *node.borrow_mut() = with.borrow().clone();
     }
 }

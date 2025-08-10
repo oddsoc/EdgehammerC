@@ -1,23 +1,23 @@
 //  SPDX-License-Identifier: MIT
 /*
- *  Copyright (c) 2025 Andrew Scott-Jones <andrew@edgehammer.io>
+ *  Copyright (c) 2025 Andrew Scott-Jones
  *
- *  Permission is hereby granted, free of charge, to any person obtaining a 
- *  copy of this software and associated documentation files (the "Software"), 
- *  to deal in the Software without restriction, including without limitation 
- *  the rights to use, copy, modify, merge, publish, distribute, sublicense, 
- *  and/or sell copies of the Software, and to permit persons to whom the 
+ *  Permission is hereby granted, free of charge, to any person obtaining a
+ *  copy of this software and associated documentation files (the "Software"),
+ *  to deal in the Software without restriction, including without limitation
+ *  the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ *  and/or sell copies of the Software, and to permit persons to whom the
  *  Software is furnished to do so, subject to the following conditions:
  *
- *  The above copyright notice and this permission notice shall be included in 
+ *  The above copyright notice and this permission notice shall be included in
  *  all copies or substantial portions of the Software.
  *
- *  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS 
- *  OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, 
- *  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE 
- *  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER 
- *  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING 
- *  FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER 
+ *  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+ *  OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ *  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ *  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ *  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ *  FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
  *  DEALINGS IN THE SOFTWARE.
  */
 
@@ -63,17 +63,14 @@ impl Analyser {
             } => {
                 self.walk(type_spec)?;
                 if let Some(init) = init {
+                    check(init)?;
+                    //replace(init, &fold(init));
                     if let Some(sym) = resolve(ast) {
                         if has_static_storage_duration(sym) {
-                            let e = eval(init.clone())?;
-                            let initializer = e.as_ref().borrow();
-                            match initializer.kind {
-                                AstKind::ConstInt(_) => {}
-                                _ => {
-                                    return Err(
-                                        "not a const expression".to_string()
-                                    );
-                                }
+                            if !is_const_int_expr(init) {
+                                return Err(
+                                    "not a const expression".to_string()
+                                );
                             }
                         }
                     }
@@ -81,9 +78,9 @@ impl Analyser {
 
                 Ok(())
             }
-
-            AstKind::Return { expr } => {
-                _ = eval(expr.clone())?;
+            AstKind::Return { expr, .. } => {
+                check(expr)?;
+                replace(expr, &fold(expr));
                 Ok(())
             }
             AstKind::If {
@@ -91,7 +88,8 @@ impl Analyser {
                 then,
                 otherwise,
             } => {
-                _ = eval(cond.clone())?;
+                check(cond)?;
+                replace(cond, &fold(cond));
                 self.walk(then)?;
                 if let Some(otherwise) = otherwise {
                     self.walk(otherwise)?;
@@ -99,12 +97,14 @@ impl Analyser {
                 Ok(())
             }
             AstKind::DoWhile { cond, body } => {
-                _ = eval(cond.clone())?;
+                check(cond)?;
+                replace(cond, &fold(cond));
                 self.walk(body)?;
                 Ok(())
             }
             AstKind::While { cond, body } => {
-                _ = eval(cond.clone())?;
+                check(cond)?;
+                replace(cond, &fold(cond));
                 self.walk(body)?;
                 Ok(())
             }
@@ -119,7 +119,8 @@ impl Analyser {
                 }
 
                 if let Some(cond) = cond {
-                    _ = eval(cond.clone())?;
+                    check(cond)?;
+                    replace(cond, &fold(cond));
                 }
 
                 if let Some(post) = post {
@@ -152,7 +153,8 @@ impl Analyser {
                 }
             }
             AstKind::ExprStmt { expr } => {
-                let _ = eval(expr.clone())?;
+                check(expr)?;
+                replace(expr, &fold(expr));
                 Ok(())
             }
             AstKind::GoTo { label } => {
@@ -170,13 +172,11 @@ impl Analyser {
 
             AstKind::Case { expr, stmt, idx: _ } => {
                 if upto(scope.clone(), ScopeKind::Switch).is_some() {
-                    let e = eval(expr.clone())?;
+                    check(expr)?;
+                    replace(expr, &fold(expr));
 
-                    match e.as_ref().borrow().kind {
-                        AstKind::ConstInt(_) => {}
-                        _ => {
-                            return Err("not a const expression".to_string());
-                        }
+                    if !is_const_int_expr(expr) {
+                        return Err("not a const expression".to_string());
                     }
 
                     self.walk(stmt)?;
@@ -197,17 +197,16 @@ impl Analyser {
             }
 
             AstKind::Switch { cond, body, cases } => {
-                _ = eval(cond.clone())?;
+                check(cond)?;
+                replace(cond, &fold(cond));
+                self.walk(body)?;
                 let mut case_values = std::collections::HashSet::new();
                 let mut has_default = false;
                 for case in cases {
                     match &case.borrow().kind {
                         AstKind::Case { expr, stmt, .. } => {
-                            let case_eval = eval(expr.clone())?;
-                            if let AstKind::ConstInt(value) =
-                                case_eval.borrow().kind
-                            {
-                                if !case_values.insert(value) {
+                            if is_const_int_expr(expr) {
+                                if !case_values.insert(const_int_value(expr)) {
                                     return Err(
                                         "duplicate case expression".to_string()
                                     );
@@ -217,6 +216,7 @@ impl Analyser {
                                     "not a const expression".to_string()
                                 );
                             }
+
                             self.walk(stmt)?;
                         }
                         AstKind::Default { stmt } => {
@@ -231,10 +231,15 @@ impl Analyser {
                         _ => unreachable!(),
                     }
                 }
-                self.walk(body)?;
                 Ok(())
             }
             AstKind::EmptyStmt => Ok(()),
+
+            AstKind::StaticInitializer(c_expr) => {
+                check(c_expr)?;
+                replace(c_expr, &fold(c_expr));
+                Ok(())
+            }
 
             _ => Ok(()),
         }

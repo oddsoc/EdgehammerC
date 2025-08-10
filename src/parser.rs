@@ -1,23 +1,23 @@
 //  SPDX-License-Identifier: MIT
 /*
- *  Copyright (c) 2025 Andrew Scott-Jones <andrew@edgehammer.io>
+ *  Copyright (c) 2025 Andrew Scott-Jones
  *
- *  Permission is hereby granted, free of charge, to any person obtaining a 
- *  copy of this software and associated documentation files (the "Software"), 
- *  to deal in the Software without restriction, including without limitation 
- *  the rights to use, copy, modify, merge, publish, distribute, sublicense, 
- *  and/or sell copies of the Software, and to permit persons to whom the 
+ *  Permission is hereby granted, free of charge, to any person obtaining a
+ *  copy of this software and associated documentation files (the "Software"),
+ *  to deal in the Software without restriction, including without limitation
+ *  the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ *  and/or sell copies of the Software, and to permit persons to whom the
  *  Software is furnished to do so, subject to the following conditions:
  *
- *  The above copyright notice and this permission notice shall be included in 
+ *  The above copyright notice and this permission notice shall be included in
  *  all copies or substantial portions of the Software.
  *
- *  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS 
- *  OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, 
- *  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE 
- *  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER 
- *  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING 
- *  FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER 
+ *  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+ *  OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ *  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ *  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ *  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ *  FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
  *  DEALINGS IN THE SOFTWARE.
  */
 
@@ -28,6 +28,7 @@ use crate::lexer::Lexer;
 use crate::lexer::Token;
 use crate::lexer::TokenKind;
 use crate::scope;
+use crate::types::*;
 use scope::*;
 
 macro_rules! accept {
@@ -137,6 +138,7 @@ pub struct Parser {
     nr_nodes: usize,
     scope: ScopeRef,
     cases: Vec<Vec<AstRef>>,
+    function: Option<SymRef>,
 }
 
 fn precedence_of(kind: &TokenKind) -> i32 {
@@ -177,6 +179,7 @@ impl Parser {
             nr_nodes: 0,
             scope: crate::scope::new(),
             cases: vec![],
+            function: None,
         };
 
         parser.advance();
@@ -212,7 +215,7 @@ impl Parser {
     }
 
     fn declaration(&mut self) -> Result<AstRef, String> {
-        let (ty_spec, storage_class) = self.type_spec_and_storage_class()?;
+        let (ty_spec, storage_class) = self.decl_spec()?;
         expect!(self, TokenKind::Identifier, _);
         let name = yank!(self, TokenKind::Identifier);
 
@@ -230,19 +233,83 @@ impl Parser {
             || peek!(self, TokenKind::Register)
     }
 
-    fn is_type_spec_or_storage_class(&mut self) -> bool {
-        self.is_type_spec() || self.is_storage_class()
+    fn is_decl_spec(&mut self) -> bool {
+        self.is_type_spec()
+            || self.is_type_qualifier()
+            || self.is_storage_class()
     }
 
-    fn type_spec_and_storage_class(
+    fn canonicalise_type_spec(
         &mut self,
-    ) -> Result<(AstRef, Option<StorageClass>), String> {
-        let mut type_specs: Vec<AstRef> = vec![];
+        type_specs: &[Token],
+    ) -> Result<AstRef, String> {
+        let mut is_signed = false;
+        let mut is_unsigned = false;
+        let mut has_int = false;
+        let mut long_count = 0;
+
+        for spec in type_specs {
+            match spec.kind {
+                TokenKind::Signed => {
+                    if is_unsigned || is_signed {
+                        return Err("invalid type specifier".into());
+                    }
+                    is_signed = true;
+                }
+                TokenKind::Unsigned => {
+                    if is_signed || is_unsigned {
+                        return Err("invalid type specifier".into());
+                    }
+                    is_unsigned = true;
+                }
+                TokenKind::Int => {
+                    if has_int {
+                        return Err("invalid type specifier".into());
+                    }
+                    has_int = true;
+                }
+                TokenKind::Long => {
+                    if long_count >= 2 {
+                        return Err("invalid type specifier".into());
+                    }
+                    long_count += 1;
+                }
+                TokenKind::Void => {
+                    if type_specs.len() > 1 {
+                        return Err("invalid type specifier".into());
+                    }
+                    return Ok(new_node!(self, Void));
+                }
+                _ => unreachable!("unexpected token kind"),
+            }
+        }
+
+        if !is_unsigned {
+            is_signed = true;
+        }
+
+        let ty = match long_count {
+            0 => int_type(is_signed),
+            1 => long_type(is_signed),
+            2 => long_long_type(is_signed),
+            _ => unreachable!(),
+        };
+
+        let node = new_node!(self, Int);
+        node.borrow_mut().ty = ty;
+
+        Ok(node)
+    }
+
+    fn decl_spec(&mut self) -> Result<(AstRef, Option<StorageClass>), String> {
+        let mut type_specs: Vec<Token> = vec![];
         let mut storage_classes: Vec<StorageClass> = vec![];
 
         loop {
             if self.is_type_spec() {
                 type_specs.push(self.type_spec()?);
+            } else if self.is_type_qualifier() {
+                todo!();
             } else if self.is_storage_class() {
                 storage_classes.push(self.storage_class()?);
             } else {
@@ -250,18 +317,20 @@ impl Parser {
             }
         }
 
-        if type_specs.len() != 1 {
+        if type_specs.len() < 1 {
             return Err("invalid type specifier".to_string());
         }
+
+        let ty_spec = self.canonicalise_type_spec(&type_specs)?;
 
         if storage_classes.len() > 1 {
             return Err("invalid storage class".to_string());
         }
 
         if storage_classes.len() == 1 {
-            Ok((type_specs[0].clone(), Some(storage_classes[0])))
+            Ok((ty_spec, Some(storage_classes[0])))
         } else {
-            Ok((type_specs[0].clone(), None))
+            Ok((ty_spec, None))
         }
     }
 
@@ -287,7 +356,15 @@ impl Parser {
     }
 
     fn parameter(&mut self, idx: usize) -> Result<AstRef, String> {
-        let ty_spec = self.type_spec()?;
+        let (ty_spec, storage_class) = self.decl_spec()?;
+        let ty = type_of(&ty_spec);
+
+        if storage_class.is_some() {
+            if let Some(StorageClass::Register) = storage_class {
+            } else {
+                return Err("invalid storage class".to_string());
+            }
+        }
 
         if peek!(self, TokenKind::RParen) {
             Ok(new_node!(
@@ -307,8 +384,8 @@ impl Parser {
                 self.scope.clone(),
                 &name,
                 SymKind::Parameter,
-                4,
-                4,
+                ty.borrow().size,
+                ty.borrow().alignment,
                 None,
                 Some(Definition::Concrete),
                 None,
@@ -380,6 +457,8 @@ impl Parser {
                 None,
             )?;
 
+            self.function = Some(sym.clone());
+
             let body = self.function_body()?;
             self.close_scope();
 
@@ -403,6 +482,8 @@ impl Parser {
 
             sym.borrow_mut().node = Some(Rc::downgrade(&function));
 
+            self.function = None;
+
             Ok(function)
         }
     }
@@ -424,6 +505,31 @@ impl Parser {
         }
     }
 
+    fn initializer(
+        &mut self,
+        storage_class: &Option<StorageClass>,
+    ) -> Result<AstRef, String> {
+        let mut is_static = if let Some(class) = storage_class {
+            if matches!(class, StorageClass::Static) {
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        if !is_static && kind_of(&self.scope) == ScopeKind::File {
+            is_static = true;
+        }
+
+        if is_static {
+            Ok(new_node!(self, StaticInitializer(self.expr(0)?)))
+        } else {
+            Ok(new_node!(self, Initializer(self.expr(0)?)))
+        }
+    }
+
     fn variable_decl(
         &mut self,
         ty_spec: AstRef,
@@ -432,19 +538,21 @@ impl Parser {
     ) -> Result<AstRef, String> {
         let definition = self.determine_definition_type(storage_class);
 
+        let ty = type_of(&ty_spec);
+
         let sym = add_sym(
             self.scope.clone(),
             &name,
             SymKind::Variable,
-            4,
-            4,
+            ty.borrow().size,
+            ty.borrow().alignment,
             storage_class,
             definition,
             None,
         )?;
 
-        let initializer = if accept!(self, TokenKind::Assign) {
-            Some(self.expr(0)?)
+        let init = if accept!(self, TokenKind::Assign) {
+            Some(self.initializer(&storage_class)?)
         } else {
             None
         };
@@ -457,7 +565,7 @@ impl Parser {
                 name: name.clone(),
                 sym: Some(Rc::downgrade(&sym)),
                 type_spec: ty_spec.clone(),
-                init: initializer,
+                init: init,
             }
         );
 
@@ -467,15 +575,29 @@ impl Parser {
     }
 
     fn is_type_spec(&self) -> bool {
-        peek!(self, TokenKind::Int) || peek!(self, TokenKind::Void)
+        match peek_any!(self) {
+            TokenKind::Int | TokenKind::Long | TokenKind::Void => true,
+            _ => false,
+        }
     }
 
-    fn type_spec(&mut self) -> Result<AstRef, String> {
+    fn is_type_qualifier(&self) -> bool {
+        false
+    }
+
+    fn type_spec(&mut self) -> Result<Token, String> {
         if accept!(self, TokenKind::Int) {
-            Ok(new_node!(self, Int))
+            Ok(self.last.clone().unwrap())
+        } else if accept!(self, TokenKind::Long) {
+            Ok(self.last.clone().unwrap())
+        } else if accept!(self, TokenKind::Signed) {
+            Ok(self.last.clone().unwrap())
+        } else if accept!(self, TokenKind::Unsigned) {
+            Ok(self.last.clone().unwrap())
+        } else if accept!(self, TokenKind::Void) {
+            Ok(self.last.clone().unwrap())
         } else {
-            expect!(self, TokenKind::Void);
-            Ok(new_node!(self, Void))
+            Err("invalid type specifier".to_string())
         }
     }
 
@@ -565,9 +687,8 @@ impl Parser {
     }
 
     fn for_init(&mut self) -> Result<AstRef, String> {
-        if self.is_type_spec_or_storage_class() {
-            let (ty_spec, storage_class) =
-                self.type_spec_and_storage_class()?;
+        if self.is_decl_spec() {
+            let (ty_spec, storage_class) = self.decl_spec()?;
             expect!(self, TokenKind::Identifier, _);
             let name = yank!(self, TokenKind::Identifier);
 
@@ -726,7 +847,7 @@ impl Parser {
     }
 
     fn stmt_or_decl(&mut self) -> Result<AstRef, String> {
-        if self.is_type_spec_or_storage_class() {
+        if self.is_decl_spec() {
             self.declaration()
         } else {
             self.statement()
@@ -795,7 +916,13 @@ impl Parser {
         expect!(self, TokenKind::Return);
         let expr = self.expr(0)?;
         expect!(self, TokenKind::Semicolon);
-        Ok(new_node!(self, Return { expr: expr }))
+        Ok(new_node!(
+            self,
+            Return {
+                expr: expr,
+                func: Rc::downgrade(&self.function.as_ref().unwrap()),
+            }
+        ))
     }
 
     fn expr_stmt(&mut self) -> Result<AstRef, String> {
@@ -1136,7 +1263,7 @@ impl Parser {
                 right: new_node!(
                     self,
                     Add {
-                        left: expr.clone(),
+                        left: deep_clone(&expr),
                         right: new_node!(self, ConstInt(1))
                     }
                 ),
@@ -1152,7 +1279,7 @@ impl Parser {
                 right: new_node!(
                     self,
                     Subtract {
-                        left: expr.clone(),
+                        left: deep_clone(&expr),
                         right: new_node!(self, ConstInt(1))
                     }
                 ),
@@ -1172,7 +1299,7 @@ impl Parser {
                 right: new_node!(
                     self,
                     Add {
-                        left: left.clone(),
+                        left: deep_clone(&left),
                         right: right.clone()
                     }
                 ),
@@ -1192,7 +1319,7 @@ impl Parser {
                 right: new_node!(
                     self,
                     Subtract {
-                        left: left.clone(),
+                        left: deep_clone(&left),
                         right: right.clone()
                     }
                 ),
@@ -1212,7 +1339,7 @@ impl Parser {
                 right: new_node!(
                     self,
                     Multiply {
-                        left: left.clone(),
+                        left: deep_clone(&left),
                         right: right.clone()
                     }
                 ),
@@ -1232,7 +1359,7 @@ impl Parser {
                 right: new_node!(
                     self,
                     Divide {
-                        left: left.clone(),
+                        left: deep_clone(&left),
                         right: right.clone()
                     }
                 ),
@@ -1252,7 +1379,7 @@ impl Parser {
                 right: new_node!(
                     self,
                     Modulo {
-                        left: left.clone(),
+                        left: deep_clone(&left),
                         right: right.clone()
                     }
                 ),
@@ -1272,7 +1399,7 @@ impl Parser {
                 right: new_node!(
                     self,
                     And {
-                        left: left.clone(),
+                        left: deep_clone(&left),
                         right: right.clone()
                     }
                 ),
@@ -1288,7 +1415,7 @@ impl Parser {
                 right: new_node!(
                     self,
                     Or {
-                        left: left.clone(),
+                        left: deep_clone(&left),
                         right: right.clone()
                     }
                 ),
@@ -1308,7 +1435,7 @@ impl Parser {
                 right: new_node!(
                     self,
                     Xor {
-                        left: left.clone(),
+                        left: deep_clone(&left),
                         right: right.clone()
                     }
                 ),
@@ -1328,7 +1455,7 @@ impl Parser {
                 right: new_node!(
                     self,
                     LShift {
-                        left: left.clone(),
+                        left: deep_clone(&left),
                         right: right.clone()
                     }
                 ),
@@ -1348,7 +1475,7 @@ impl Parser {
                 right: new_node!(
                     self,
                     RShift {
-                        left: left.clone(),
+                        left: deep_clone(&left),
                         right: right.clone()
                     }
                 ),
@@ -1382,6 +1509,8 @@ impl Parser {
     fn factor(&mut self) -> Result<AstRef, String> {
         if peek!(self, TokenKind::ConstInt, _) {
             self.const_int()
+        } else if peek!(self, TokenKind::ConstLong, _) {
+            self.const_long()
         } else if accept!(self, TokenKind::Tilde) {
             return Ok(new_node!(
                 self,
@@ -1410,6 +1539,10 @@ impl Parser {
             let subexpr = self.factor()?;
             return self.pre_decr(subexpr);
         } else if accept!(self, TokenKind::LParen) {
+            if self.is_type_spec() || self.is_type_qualifier() {
+                return self.cast_expr();
+            }
+
             let mut inner_expr = self.expr(0)?;
             expect!(self, TokenKind::RParen);
 
@@ -1444,10 +1577,40 @@ impl Parser {
         }
     }
 
+    fn cast_expr(&mut self) -> Result<AstRef, String> {
+        let (ty_spec, storage_class) = self.decl_spec()?;
+
+        if storage_class.is_some() {
+            return Err("a cast cannot have a storage class".into());
+        }
+
+        expect!(self, TokenKind::RParen);
+
+        Ok(new_node!(
+            self,
+            Cast {
+                type_spec: Some(ty_spec),
+                expr: self.factor()?,
+            }
+        ))
+    }
+
     fn const_int(&mut self) -> Result<AstRef, String> {
         expect!(self, TokenKind::ConstInt, _);
         let value = yank!(self, TokenKind::ConstInt);
-        Ok(new_node!(self, ConstInt(value)))
+        let node = new_node!(self, ConstInt(value as i32));
+        node.borrow_mut().ty = int_type(true);
+
+        Ok(node)
+    }
+
+    fn const_long(&mut self) -> Result<AstRef, String> {
+        expect!(self, TokenKind::ConstLong, _);
+        let value = yank!(self, TokenKind::ConstLong);
+        let node = new_node!(self, ConstLong(value));
+        node.borrow_mut().ty = long_type(true);
+
+        Ok(node)
     }
 
     fn oops(&self, why: &str) -> Result<AstRef, String> {

@@ -1,23 +1,23 @@
 //  SPDX-License-Identifier: MIT
 /*
- *  Copyright (c) 2025 Andrew Scott-Jones <andrew@edgehammer.io>
+ *  Copyright (c) 2025 Andrew Scott-Jones
  *
- *  Permission is hereby granted, free of charge, to any person obtaining a 
- *  copy of this software and associated documentation files (the "Software"), 
- *  to deal in the Software without restriction, including without limitation 
- *  the rights to use, copy, modify, merge, publish, distribute, sublicense, 
- *  and/or sell copies of the Software, and to permit persons to whom the 
+ *  Permission is hereby granted, free of charge, to any person obtaining a
+ *  copy of this software and associated documentation files (the "Software"),
+ *  to deal in the Software without restriction, including without limitation
+ *  the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ *  and/or sell copies of the Software, and to permit persons to whom the
  *  Software is furnished to do so, subject to the following conditions:
  *
- *  The above copyright notice and this permission notice shall be included in 
+ *  The above copyright notice and this permission notice shall be included in
  *  all copies or substantial portions of the Software.
  *
- *  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS 
- *  OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, 
- *  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE 
- *  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER 
- *  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING 
- *  FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER 
+ *  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+ *  OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ *  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ *  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ *  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ *  FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
  *  DEALINGS IN THE SOFTWARE.
  */
 
@@ -80,6 +80,9 @@ pub enum TokenKind {
     Incr,
     Void,
     Int,
+    Long,
+    Signed,
+    Unsigned,
     GoTo,
     Return,
     If,
@@ -99,8 +102,23 @@ pub enum TokenKind {
     Identifier(String),
     Label(String),
     ConstInt(i64),
+    ConstLong(i64),
+    ConstLongLong(i64),
+    ConstUnsignedInt(u64),
+    ConstUnsignedLong(u64),
+    ConstUnsignedLongLong(u64),
     Bad,
     EOF,
+}
+
+#[allow(dead_code)]
+enum ConstKind {
+    Int,
+    Long,
+    LongLong,
+    UnsignedInt,
+    UnsignedLong,
+    UnsignedLongLong,
 }
 
 #[derive(Debug)]
@@ -218,6 +236,55 @@ impl Lexer {
         Ok(())
     }
 
+    fn consume_const_integer_suffix(&mut self) -> Result<ConstKind, ()> {
+        let mut is_unsigned = false;
+        let mut long_count = 0;
+        let mut prev_b = 0;
+
+        while let Some(b) = self.peek() {
+            match b {
+                b'u' | b'U' if !is_unsigned => {
+                    self.consume();
+                    is_unsigned = true;
+                }
+                b'l' if long_count < 2 => {
+                    if prev_b == b'L' {
+                        return Err(());
+                    }
+
+                    self.consume();
+                    long_count += 1;
+                    prev_b = b'l';
+                }
+                b'L' if long_count < 2 => {
+                    if prev_b == b'l' {
+                        return Err(());
+                    }
+
+                    self.consume();
+                    long_count += 1;
+                    prev_b = b'L';
+                }
+                b if b.is_ascii_alphabetic() || b == b'_' => return Err(()),
+                _ => break,
+            }
+        }
+
+        match (is_unsigned, long_count) {
+            (false, 0) => Ok(ConstKind::Int),
+            (true, 0) => Ok(ConstKind::UnsignedInt),
+            (false, 1) => Ok(ConstKind::Long),
+            (true, 1) => Ok(ConstKind::UnsignedLong),
+            (false, 2) => Ok(ConstKind::LongLong),
+            (true, 2) => Ok(ConstKind::UnsignedLongLong),
+            _ => Err(()),
+        }
+    }
+
+    fn is_integer_suffix_char(b: u8) -> bool {
+        b == b'u' || b == b'U' || b == b'l' || b == b'L'
+    }
+
     fn const_integer(&mut self) -> Option<Token> {
         let pos = self.position;
         let start = self.column;
@@ -226,13 +293,19 @@ impl Lexer {
 
         if byte == b'0' {
             lexeme.push(self.consume().unwrap() as char);
-            byte = self.peek().unwrap();
-            if byte.is_ascii_alphabetic() || byte == b'_' {
+
+            if (!Self::is_integer_suffix_char(byte))
+                && byte.is_ascii_alphabetic()
+            {
                 return self.new_tok(TokenKind::Bad, pos, start);
             }
         } else {
             while self.position < self.buffer.len() {
                 byte = self.peek().unwrap();
+
+                if Self::is_integer_suffix_char(byte) {
+                    break;
+                }
 
                 if byte.is_ascii_digit() {
                     lexeme.push(self.consume().unwrap() as char);
@@ -244,11 +317,54 @@ impl Lexer {
             }
         }
 
-        self.new_tok(
-            TokenKind::ConstInt(lexeme.parse::<i64>().unwrap()),
-            pos,
-            start,
-        )
+        let int_value = lexeme.parse::<i64>().unwrap();
+
+        match self.consume_const_integer_suffix() {
+            Ok(suffix) => match suffix {
+                ConstKind::Int => self.new_tok(
+                    if int_value >= i32::MIN as i64
+                        && int_value <= i32::MAX as i64
+                    {
+                        TokenKind::ConstInt(int_value)
+                    } else {
+                        TokenKind::ConstLong(int_value)
+                    },
+                    pos,
+                    start,
+                ),
+                ConstKind::Long => {
+                    self.new_tok(TokenKind::ConstLong(int_value), pos, start)
+                }
+                ConstKind::LongLong => self.new_tok(
+                    TokenKind::ConstLongLong(lexeme.parse::<i64>().unwrap()),
+                    pos,
+                    start,
+                ),
+                ConstKind::UnsignedInt => self.new_tok(
+                    TokenKind::ConstUnsignedInt(lexeme.parse::<u64>().unwrap()),
+                    pos,
+                    start,
+                ),
+                ConstKind::UnsignedLong => self.new_tok(
+                    TokenKind::ConstUnsignedLong(
+                        lexeme.parse::<u64>().unwrap(),
+                    ),
+                    pos,
+                    start,
+                ),
+                ConstKind::UnsignedLongLong => self.new_tok(
+                    TokenKind::ConstUnsignedLongLong(
+                        lexeme.parse::<u64>().unwrap(),
+                    ),
+                    pos,
+                    start,
+                ),
+            },
+            Err(_) => {
+                println!("HEREEEEEEE2");
+                self.new_tok(TokenKind::Bad, pos, start)
+            }
+        }
     }
 
     fn identifier_or_keyword(&mut self) -> Option<Token> {
@@ -309,6 +425,15 @@ impl Lexer {
             }
             "int" => {
                 return self.new_tok(TokenKind::Int, pos, start);
+            }
+            "long" => {
+                return self.new_tok(TokenKind::Long, pos, start);
+            }
+            "signed" => {
+                return self.new_tok(TokenKind::Signed, pos, start);
+            }
+            "unsigned" => {
+                return self.new_tok(TokenKind::Unsigned, pos, start);
             }
             "static" => {
                 return self.new_tok(TokenKind::Static, pos, start);
