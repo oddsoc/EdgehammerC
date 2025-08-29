@@ -21,6 +21,7 @@
  *  DEALINGS IN THE SOFTWARE.
  */
 
+use std::convert::TryFrom;
 use std::fs::File;
 use std::io::Read;
 use std::str;
@@ -238,39 +239,46 @@ impl Lexer {
 
     fn consume_const_integer_suffix(&mut self) -> Result<ConstKind, ()> {
         let mut is_unsigned = false;
-        let mut long_count = 0;
-        let mut prev_b = 0;
+        let mut nr_longs = 0;
 
-        while let Some(b) = self.peek() {
+        if let Some(b) = self.peek() {
             match b {
-                b'u' | b'U' if !is_unsigned => {
+                b'u' | b'U' => {
                     self.consume();
                     is_unsigned = true;
-                }
-                b'l' if long_count < 2 => {
-                    if prev_b == b'L' {
-                        return Err(());
+                    if let Some(b2) = self.peek() {
+                        if b2 == b'l' || b2 == b'L' {
+                            self.consume();
+                            nr_longs = 1;
+                            if self.peek() == Some(b2) {
+                                self.consume();
+                                nr_longs = 2;
+                            }
+                        }
                     }
-
-                    self.consume();
-                    long_count += 1;
-                    prev_b = b'l';
                 }
-                b'L' if long_count < 2 => {
-                    if prev_b == b'l' {
-                        return Err(());
+                b'l' | b'L' => {
+                    self.consume();
+                    nr_longs = 1;
+                    if self.peek() == Some(b) {
+                        self.consume();
+                        nr_longs = 2;
+                    } else if matches!(self.peek(), Some(b'u' | b'U')) {
+                        self.consume();
+                        is_unsigned = true;
                     }
-
-                    self.consume();
-                    long_count += 1;
-                    prev_b = b'L';
                 }
-                b if b.is_ascii_alphabetic() || b == b'_' => return Err(()),
-                _ => break,
+                _ => {}
             }
         }
 
-        match (is_unsigned, long_count) {
+        if let Some(b) = self.peek() {
+            if b.is_ascii_alphabetic() || b == b'_' {
+                return Err(());
+            }
+        }
+
+        match (is_unsigned, nr_longs) {
             (false, 0) => Ok(ConstKind::Int),
             (true, 0) => Ok(ConstKind::UnsignedInt),
             (false, 1) => Ok(ConstKind::Long),
@@ -317,53 +325,55 @@ impl Lexer {
             }
         }
 
-        let int_value = lexeme.parse::<i64>().unwrap();
+        let int_value = match lexeme.parse::<u64>() {
+            Ok(val) => val,
+            Err(_) => return self.new_tok(TokenKind::Bad, pos, start),
+        };
 
         match self.consume_const_integer_suffix() {
             Ok(suffix) => match suffix {
-                ConstKind::Int => self.new_tok(
-                    if int_value >= i32::MIN as i64
-                        && int_value <= i32::MAX as i64
-                    {
-                        TokenKind::ConstInt(int_value)
+                ConstKind::Int => {
+                    if let Ok(int_value_i64) = i64::try_from(int_value) {
+                        if int_value_i64 >= i32::MIN as i64
+                            && int_value_i64 <= i32::MAX as i64
+                        {
+                            self.new_tok(
+                                TokenKind::ConstInt(int_value_i64),
+                                pos,
+                                start,
+                            )
+                        } else {
+                            self.new_tok(
+                                TokenKind::ConstLong(int_value_i64),
+                                pos,
+                                start,
+                            )
+                        }
                     } else {
-                        TokenKind::ConstLong(int_value)
-                    },
-                    pos,
-                    start,
-                ),
-                ConstKind::Long => {
-                    self.new_tok(TokenKind::ConstLong(int_value), pos, start)
+                        self.new_tok(TokenKind::Bad, pos, start)
+                    }
                 }
-                ConstKind::LongLong => self.new_tok(
-                    TokenKind::ConstLongLong(lexeme.parse::<i64>().unwrap()),
-                    pos,
-                    start,
-                ),
-                ConstKind::UnsignedInt => self.new_tok(
-                    TokenKind::ConstUnsignedInt(lexeme.parse::<u64>().unwrap()),
-                    pos,
-                    start,
-                ),
-                ConstKind::UnsignedLong => self.new_tok(
-                    TokenKind::ConstUnsignedLong(
-                        lexeme.parse::<u64>().unwrap(),
-                    ),
-                    pos,
-                    start,
-                ),
-                ConstKind::UnsignedLongLong => self.new_tok(
-                    TokenKind::ConstUnsignedLongLong(
-                        lexeme.parse::<u64>().unwrap(),
-                    ),
+                ConstKind::Long => match i64::try_from(int_value) {
+                    Ok(val) => {
+                        self.new_tok(TokenKind::ConstLong(val), pos, start)
+                    }
+                    Err(_) => self.new_tok(TokenKind::Bad, pos, start),
+                },
+                ConstKind::LongLong => match lexeme.parse::<i64>() {
+                    Ok(val) => {
+                        self.new_tok(TokenKind::ConstLongLong(val), pos, start)
+                    }
+                    Err(_) => self.new_tok(TokenKind::Bad, pos, start),
+                },
+                ConstKind::UnsignedInt
+                | ConstKind::UnsignedLong
+                | ConstKind::UnsignedLongLong => self.new_tok(
+                    TokenKind::ConstUnsignedLongLong(int_value),
                     pos,
                     start,
                 ),
             },
-            Err(_) => {
-                println!("HEREEEEEEE2");
-                self.new_tok(TokenKind::Bad, pos, start)
-            }
+            Err(_) => self.new_tok(TokenKind::Bad, pos, start),
         }
     }
 

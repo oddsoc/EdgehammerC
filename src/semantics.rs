@@ -21,6 +21,8 @@
  *  DEALINGS IN THE SOFTWARE.
  */
 
+use std::collections::HashSet;
+
 use crate::ast::*;
 use crate::expr::*;
 use crate::scope::*;
@@ -67,7 +69,9 @@ impl Analyser {
                     //replace(init, &fold(init));
                     if let Some(sym) = resolve(ast) {
                         if has_static_storage_duration(sym) {
-                            if !is_const_int_expr(init) {
+                            if !is_const_int_expr(init)
+                                && !is_const_unsigned_int_expr(init)
+                            {
                                 return Err(
                                     "not a const expression".to_string()
                                 );
@@ -200,13 +204,23 @@ impl Analyser {
                 check(cond)?;
                 replace(cond, &fold(cond));
                 self.walk(body)?;
-                let mut case_values = std::collections::HashSet::new();
+                let mut case_values: HashSet<u64> = HashSet::new();
                 let mut has_default = false;
                 for case in cases {
                     match &case.borrow().kind {
                         AstKind::Case { expr, stmt, .. } => {
-                            if is_const_int_expr(expr) {
-                                if !case_values.insert(const_int_value(expr)) {
+                            if is_const_unsigned_int_expr(expr) {
+                                if !case_values
+                                    .insert(const_unsigned_int_value(expr))
+                                {
+                                    return Err(
+                                        "duplicate case expression".to_string()
+                                    );
+                                }
+                            } else if is_const_int_expr(expr) {
+                                if !case_values
+                                    .insert(const_int_value(expr) as u64)
+                                {
                                     return Err(
                                         "duplicate case expression".to_string()
                                     );

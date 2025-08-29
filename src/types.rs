@@ -148,9 +148,21 @@ fn is_scalar_type(ty: &TypeRef) -> bool {
 
 fn get_common_type(ty0: &TypeRef, ty1: &TypeRef) -> TypeRef {
     if *ty0.borrow() == *ty1.borrow() {
-        ty0.clone()
+        return ty0.clone();
+    }
+
+    if ty0.borrow().size == ty1.borrow().size {
+        if is_signed(ty0) {
+            return ty1.clone();
+        } else {
+            return ty0.clone();
+        }
+    }
+
+    if ty0.borrow().size > ty1.borrow().size {
+        return ty0.clone();
     } else {
-        long_type(true)
+        return ty1.clone();
     }
 }
 
@@ -711,6 +723,21 @@ impl Annotator {
 
             AstKind::ConstInt(_) => {
                 let ty = int_type(true);
+                node_ty = ty.clone();
+            }
+
+            AstKind::ConstLong(_) => {
+                let ty = long_type(true);
+                node_ty = ty.clone();
+            }
+
+            AstKind::ConstUnsignedInt(_) => {
+                let ty = int_type(false);
+                node_ty = ty.clone();
+            }
+
+            AstKind::ConstUnsignedLong(_) => {
+                let ty = long_type(false);
                 node_ty = ty.clone();
             }
 

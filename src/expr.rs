@@ -37,10 +37,28 @@ fn as_const_int(n: i32, scope: &ScopeRef) -> AstRef {
     }))
 }
 
+fn as_const_unsigned_int(n: i32, scope: &ScopeRef) -> AstRef {
+    Rc::new(RefCell::new(Ast {
+        id: 0,
+        ty: int_type(false),
+        kind: AstKind::ConstInt(n),
+        scope: scope.clone(),
+    }))
+}
+
 fn as_const_long(n: i64, scope: &ScopeRef) -> AstRef {
     Rc::new(RefCell::new(Ast {
         id: 0,
         ty: long_type(true),
+        kind: AstKind::ConstLong(n),
+        scope: scope.clone(),
+    }))
+}
+
+fn as_const_unsigned_long(n: i64, scope: &ScopeRef) -> AstRef {
+    Rc::new(RefCell::new(Ast {
+        id: 0,
+        ty: long_type(false),
         kind: AstKind::ConstLong(n),
         scope: scope.clone(),
     }))
@@ -65,6 +83,20 @@ pub fn fold(ast: &AstRef) -> AstRef {
                     let res = if *lhs != 0 && *rhs != 0 { 1 } else { 0 };
                     as_const_long(res, &scope)
                 }
+                (
+                    AstKind::ConstUnsignedInt(lhs),
+                    AstKind::ConstUnsignedInt(rhs),
+                ) => {
+                    let res = if *lhs != 0 && *rhs != 0 { 1 } else { 0 };
+                    as_const_unsigned_int(res, &scope)
+                }
+                (
+                    AstKind::ConstUnsignedLong(lhs),
+                    AstKind::ConstUnsignedLong(rhs),
+                ) => {
+                    let res = if *lhs != 0 && *rhs != 0 { 1 } else { 0 };
+                    as_const_unsigned_long(res, &scope)
+                }
                 _ => ast.clone(),
             }
         }
@@ -80,6 +112,20 @@ pub fn fold(ast: &AstRef) -> AstRef {
                 (AstKind::ConstLong(lhs), AstKind::ConstLong(rhs)) => {
                     let res = if *lhs != 0 || *rhs != 0 { 1 } else { 0 };
                     as_const_long(res, &scope)
+                }
+                (
+                    AstKind::ConstUnsignedInt(lhs),
+                    AstKind::ConstUnsignedInt(rhs),
+                ) => {
+                    let res = if *lhs != 0 || *rhs != 0 { 1 } else { 0 };
+                    as_const_unsigned_int(res, &scope)
+                }
+                (
+                    AstKind::ConstUnsignedLong(lhs),
+                    AstKind::ConstUnsignedLong(rhs),
+                ) => {
+                    let res = if *lhs != 0 || *rhs != 0 { 1 } else { 0 };
+                    as_const_unsigned_long(res, &scope)
                 }
                 _ => ast.clone(),
             }
@@ -97,6 +143,20 @@ pub fn fold(ast: &AstRef) -> AstRef {
                     let res = (*lhs).wrapping_add(*rhs);
                     as_const_long(res, &scope)
                 }
+                (
+                    AstKind::ConstUnsignedInt(lhs),
+                    AstKind::ConstUnsignedInt(rhs),
+                ) => {
+                    let res = (*lhs as u32).wrapping_add(*rhs as u32) as i32;
+                    as_const_unsigned_int(res, &scope)
+                }
+                (
+                    AstKind::ConstUnsignedLong(lhs),
+                    AstKind::ConstUnsignedLong(rhs),
+                ) => {
+                    let res = (*lhs as u64).wrapping_add(*rhs as u64) as i64;
+                    as_const_unsigned_long(res, &scope)
+                }
                 _ => ast.clone(),
             }
         }
@@ -112,6 +172,20 @@ pub fn fold(ast: &AstRef) -> AstRef {
                 (AstKind::ConstLong(lhs), AstKind::ConstLong(rhs)) => {
                     let res = (*lhs).wrapping_sub(*rhs);
                     as_const_long(res, &scope)
+                }
+                (
+                    AstKind::ConstUnsignedInt(lhs),
+                    AstKind::ConstUnsignedInt(rhs),
+                ) => {
+                    let res = (*lhs as u32).wrapping_sub(*rhs as u32) as i32;
+                    as_const_unsigned_int(res, &scope)
+                }
+                (
+                    AstKind::ConstUnsignedLong(lhs),
+                    AstKind::ConstUnsignedLong(rhs),
+                ) => {
+                    let res = (*lhs as u64).wrapping_sub(*rhs as u64) as i64;
+                    as_const_unsigned_long(res, &scope)
                 }
                 _ => ast.clone(),
             }
@@ -129,6 +203,20 @@ pub fn fold(ast: &AstRef) -> AstRef {
                     let res = (*lhs).wrapping_mul(*rhs);
                     as_const_long(res, &scope)
                 }
+                (
+                    AstKind::ConstUnsignedInt(lhs),
+                    AstKind::ConstUnsignedInt(rhs),
+                ) => {
+                    let res = (*lhs as u32).wrapping_mul(*rhs as u32) as i32;
+                    as_const_unsigned_int(res, &scope)
+                }
+                (
+                    AstKind::ConstUnsignedLong(lhs),
+                    AstKind::ConstUnsignedLong(rhs),
+                ) => {
+                    let res = (*lhs as u64).wrapping_mul(*rhs as u64) as i64;
+                    as_const_unsigned_long(res, &scope)
+                }
                 _ => ast.clone(),
             }
         }
@@ -144,6 +232,28 @@ pub fn fold(ast: &AstRef) -> AstRef {
                 (AstKind::ConstLong(lhs), AstKind::ConstLong(rhs)) => {
                     let res = if *rhs == 0 { 0 } else { *lhs / *rhs };
                     as_const_long(res, &scope)
+                }
+                (
+                    AstKind::ConstUnsignedInt(lhs),
+                    AstKind::ConstUnsignedInt(rhs),
+                ) => {
+                    let res = if *rhs == 0 {
+                        0
+                    } else {
+                        (*lhs as u32) / (*rhs as u32) as u32
+                    } as i32;
+                    as_const_unsigned_int(res, &scope)
+                }
+                (
+                    AstKind::ConstUnsignedLong(lhs),
+                    AstKind::ConstUnsignedLong(rhs),
+                ) => {
+                    let res = if *rhs == 0 {
+                        0
+                    } else {
+                        (*lhs as u64) / (*rhs as u64) as u64
+                    } as i64;
+                    as_const_unsigned_long(res, &scope)
                 }
                 _ => ast.clone(),
             }
@@ -161,6 +271,28 @@ pub fn fold(ast: &AstRef) -> AstRef {
                     let res = if *rhs == 0 { 0 } else { *lhs % *rhs };
                     as_const_long(res, &scope)
                 }
+                (
+                    AstKind::ConstUnsignedInt(lhs),
+                    AstKind::ConstUnsignedInt(rhs),
+                ) => {
+                    let res = if *rhs == 0 {
+                        0
+                    } else {
+                        (*lhs as u32) % (*rhs as u32) as u32
+                    } as i32;
+                    as_const_unsigned_int(res, &scope)
+                }
+                (
+                    AstKind::ConstUnsignedLong(lhs),
+                    AstKind::ConstUnsignedLong(rhs),
+                ) => {
+                    let res = if *rhs == 0 {
+                        0
+                    } else {
+                        (*lhs as u64) % (*rhs as u64) as u64
+                    } as i64;
+                    as_const_unsigned_long(res, &scope)
+                }
                 _ => ast.clone(),
             }
         }
@@ -176,6 +308,20 @@ pub fn fold(ast: &AstRef) -> AstRef {
                 (AstKind::ConstLong(lhs), AstKind::ConstLong(rhs)) => {
                     let res = *lhs & *rhs;
                     as_const_long(res, &scope)
+                }
+                (
+                    AstKind::ConstUnsignedInt(lhs),
+                    AstKind::ConstUnsignedInt(rhs),
+                ) => {
+                    let res = (*lhs as u32) & (*rhs as u32) as u32;
+                    as_const_unsigned_int(res as i32, &scope)
+                }
+                (
+                    AstKind::ConstUnsignedLong(lhs),
+                    AstKind::ConstUnsignedLong(rhs),
+                ) => {
+                    let res = (*lhs as u64) & (*rhs as u64) as u64;
+                    as_const_unsigned_long(res as i64, &scope)
                 }
                 _ => ast.clone(),
             }
@@ -193,6 +339,20 @@ pub fn fold(ast: &AstRef) -> AstRef {
                     let res = *lhs | *rhs;
                     as_const_long(res, &scope)
                 }
+                (
+                    AstKind::ConstUnsignedInt(lhs),
+                    AstKind::ConstUnsignedInt(rhs),
+                ) => {
+                    let res = (*lhs as u32) | (*rhs as u32) as u32;
+                    as_const_unsigned_int(res as i32, &scope)
+                }
+                (
+                    AstKind::ConstUnsignedLong(lhs),
+                    AstKind::ConstUnsignedLong(rhs),
+                ) => {
+                    let res = (*lhs as u64) | (*rhs as u64) as u64;
+                    as_const_unsigned_long(res as i64, &scope)
+                }
                 _ => ast.clone(),
             }
         }
@@ -208,6 +368,20 @@ pub fn fold(ast: &AstRef) -> AstRef {
                 (AstKind::ConstLong(lhs), AstKind::ConstLong(rhs)) => {
                     let res = (*lhs).wrapping_shl(*rhs as u32);
                     as_const_long(res, &scope)
+                }
+                (
+                    AstKind::ConstUnsignedInt(lhs),
+                    AstKind::ConstUnsignedInt(rhs),
+                ) => {
+                    let res = (*lhs as u32).wrapping_shl(*rhs as u32) as i32;
+                    as_const_unsigned_int(res, &scope)
+                }
+                (
+                    AstKind::ConstUnsignedLong(lhs),
+                    AstKind::ConstUnsignedLong(rhs),
+                ) => {
+                    let res = (*lhs as u64).wrapping_shl(*rhs as u32) as i64;
+                    as_const_unsigned_long(res, &scope)
                 }
                 _ => ast.clone(),
             }
@@ -225,6 +399,20 @@ pub fn fold(ast: &AstRef) -> AstRef {
                     let res = if *rhs >= 0 { *lhs >> *rhs } else { 0 };
                     as_const_long(res, &scope)
                 }
+                (
+                    AstKind::ConstUnsignedInt(lhs),
+                    AstKind::ConstUnsignedInt(rhs),
+                ) => {
+                    let res = (*lhs as u32) >> (*rhs as u32);
+                    as_const_unsigned_int(res as i32, &scope)
+                }
+                (
+                    AstKind::ConstUnsignedLong(lhs),
+                    AstKind::ConstUnsignedLong(rhs),
+                ) => {
+                    let res = (*lhs as u64) >> (*rhs as u32);
+                    as_const_unsigned_long(res as i64, &scope)
+                }
                 _ => ast.clone(),
             }
         }
@@ -240,6 +428,20 @@ pub fn fold(ast: &AstRef) -> AstRef {
                 (AstKind::ConstLong(lhs), AstKind::ConstLong(rhs)) => {
                     let res = *lhs ^ *rhs;
                     as_const_long(res, &scope)
+                }
+                (
+                    AstKind::ConstUnsignedInt(lhs),
+                    AstKind::ConstUnsignedInt(rhs),
+                ) => {
+                    let res = (*lhs as u32) ^ (*rhs as u32) as u32;
+                    as_const_unsigned_int(res as i32, &scope)
+                }
+                (
+                    AstKind::ConstUnsignedLong(lhs),
+                    AstKind::ConstUnsignedLong(rhs),
+                ) => {
+                    let res = (*lhs as u64) ^ (*rhs as u64) as u64;
+                    as_const_unsigned_long(res as i64, &scope)
                 }
                 _ => ast.clone(),
             }
@@ -257,6 +459,20 @@ pub fn fold(ast: &AstRef) -> AstRef {
                     let res = if *lhs == *rhs { 1 } else { 0 };
                     as_const_long(res, &scope)
                 }
+                (
+                    AstKind::ConstUnsignedInt(lhs),
+                    AstKind::ConstUnsignedInt(rhs),
+                ) => {
+                    let res = if *lhs == *rhs { 1 } else { 0 };
+                    as_const_unsigned_int(res, &scope)
+                }
+                (
+                    AstKind::ConstUnsignedLong(lhs),
+                    AstKind::ConstUnsignedLong(rhs),
+                ) => {
+                    let res = if *lhs == *rhs { 1 } else { 0 };
+                    as_const_unsigned_long(res, &scope)
+                }
                 _ => ast.clone(),
             }
         }
@@ -272,6 +488,20 @@ pub fn fold(ast: &AstRef) -> AstRef {
                 (AstKind::ConstLong(lhs), AstKind::ConstLong(rhs)) => {
                     let res = if *lhs != *rhs { 1 } else { 0 };
                     as_const_long(res, &scope)
+                }
+                (
+                    AstKind::ConstUnsignedInt(lhs),
+                    AstKind::ConstUnsignedInt(rhs),
+                ) => {
+                    let res = if *lhs != *rhs { 1 } else { 0 };
+                    as_const_unsigned_int(res, &scope)
+                }
+                (
+                    AstKind::ConstUnsignedLong(lhs),
+                    AstKind::ConstUnsignedLong(rhs),
+                ) => {
+                    let res = if *lhs != *rhs { 1 } else { 0 };
+                    as_const_unsigned_long(res, &scope)
                 }
                 _ => ast.clone(),
             }
@@ -289,6 +519,20 @@ pub fn fold(ast: &AstRef) -> AstRef {
                     let res = if *lhs < *rhs { 1 } else { 0 };
                     as_const_long(res, &scope)
                 }
+                (
+                    AstKind::ConstUnsignedInt(lhs),
+                    AstKind::ConstUnsignedInt(rhs),
+                ) => {
+                    let res = if (*lhs as u32) < (*rhs as u32) { 1 } else { 0 };
+                    as_const_unsigned_int(res, &scope)
+                }
+                (
+                    AstKind::ConstUnsignedLong(lhs),
+                    AstKind::ConstUnsignedLong(rhs),
+                ) => {
+                    let res = if (*lhs as u64) < (*rhs as u64) { 1 } else { 0 };
+                    as_const_unsigned_long(res, &scope)
+                }
                 _ => ast.clone(),
             }
         }
@@ -304,6 +548,22 @@ pub fn fold(ast: &AstRef) -> AstRef {
                 (AstKind::ConstLong(lhs), AstKind::ConstLong(rhs)) => {
                     let res = if *lhs <= *rhs { 1 } else { 0 };
                     as_const_long(res, &scope)
+                }
+                (
+                    AstKind::ConstUnsignedInt(lhs),
+                    AstKind::ConstUnsignedInt(rhs),
+                ) => {
+                    let res =
+                        if (*lhs as u32) <= (*rhs as u32) { 1 } else { 0 };
+                    as_const_unsigned_int(res, &scope)
+                }
+                (
+                    AstKind::ConstUnsignedLong(lhs),
+                    AstKind::ConstUnsignedLong(rhs),
+                ) => {
+                    let res =
+                        if (*lhs as u64) <= (*rhs as u64) { 1 } else { 0 };
+                    as_const_unsigned_long(res, &scope)
                 }
                 _ => ast.clone(),
             }
@@ -321,6 +581,20 @@ pub fn fold(ast: &AstRef) -> AstRef {
                     let res = if *lhs > *rhs { 1 } else { 0 };
                     as_const_long(res, &scope)
                 }
+                (
+                    AstKind::ConstUnsignedInt(lhs),
+                    AstKind::ConstUnsignedInt(rhs),
+                ) => {
+                    let res = if (*lhs as u32) > (*rhs as u32) { 1 } else { 0 };
+                    as_const_unsigned_int(res, &scope)
+                }
+                (
+                    AstKind::ConstUnsignedLong(lhs),
+                    AstKind::ConstUnsignedLong(rhs),
+                ) => {
+                    let res = if (*lhs as u64) > (*rhs as u64) { 1 } else { 0 };
+                    as_const_unsigned_long(res, &scope)
+                }
                 _ => ast.clone(),
             }
         }
@@ -336,6 +610,22 @@ pub fn fold(ast: &AstRef) -> AstRef {
                 (AstKind::ConstLong(lhs), AstKind::ConstLong(rhs)) => {
                     let res = if *lhs >= *rhs { 1 } else { 0 };
                     as_const_long(res, &scope)
+                }
+                (
+                    AstKind::ConstUnsignedInt(lhs),
+                    AstKind::ConstUnsignedInt(rhs),
+                ) => {
+                    let res =
+                        if (*lhs as u32) >= (*rhs as u32) { 1 } else { 0 };
+                    as_const_unsigned_int(res, &scope)
+                }
+                (
+                    AstKind::ConstUnsignedLong(lhs),
+                    AstKind::ConstUnsignedLong(rhs),
+                ) => {
+                    let res =
+                        if (*lhs as u64) >= (*rhs as u64) { 1 } else { 0 };
+                    as_const_unsigned_long(res, &scope)
                 }
                 _ => ast.clone(),
             }
@@ -387,6 +677,20 @@ pub fn fold(ast: &AstRef) -> AstRef {
                         as_const_int(1, &scope)
                     }
                 }
+                AstKind::ConstUnsignedInt(n) => {
+                    if *n != 0 {
+                        as_const_unsigned_int(0, &scope)
+                    } else {
+                        as_const_unsigned_int(1, &scope)
+                    }
+                }
+                AstKind::ConstUnsignedLong(n) => {
+                    if *n != 0 {
+                        as_const_unsigned_long(0, &scope)
+                    } else {
+                        as_const_unsigned_long(1, &scope)
+                    }
+                }
                 _ => ast.clone(),
             }
         }
@@ -395,6 +699,12 @@ pub fn fold(ast: &AstRef) -> AstRef {
             match &inner.borrow().kind {
                 AstKind::ConstInt(n) => as_const_int(-(*n), &scope),
                 AstKind::ConstLong(n) => as_const_long(-(*n), &scope),
+                AstKind::ConstUnsignedInt(n) => {
+                    as_const_int(-(*n as i32), &scope)
+                }
+                AstKind::ConstUnsignedLong(n) => {
+                    as_const_long(-(*n as i64), &scope)
+                }
                 _ => ast.clone(),
             }
         }
@@ -404,29 +714,73 @@ pub fn fold(ast: &AstRef) -> AstRef {
             match &inner.borrow().kind {
                 AstKind::ConstInt(n) => as_const_int(!(*n), &scope),
                 AstKind::ConstLong(n) => as_const_long(!(*n), &scope),
+                AstKind::ConstUnsignedInt(n) => {
+                    as_const_int(!(*n as i32), &scope)
+                }
+                AstKind::ConstUnsignedLong(n) => {
+                    as_const_long(!(*n as i64), &scope)
+                }
                 _ => ast.clone(),
             }
-        }
-        AstKind::PostIncr { expr: inner }
-        | AstKind::PostDecr { expr: inner } => {
-            replace(inner, &fold(inner));
-            ast.clone()
         }
         AstKind::Cast { expr: inner, .. } => {
             replace(inner, &fold(inner));
             let ty = type_of(ast);
+            let signed = is_signed(&ty);
 
             match &inner.borrow().kind {
-                AstKind::ConstInt(n) => match ty.borrow().kind {
-                    TypeKind::Int => inner.clone(),
-                    TypeKind::Long => as_const_long(*n as i64, &scope),
-                    _ => ast.clone(),
-                },
-                AstKind::ConstLong(n) => match ty.borrow().kind {
-                    TypeKind::Int => as_const_int(*n as i32, &scope),
-                    TypeKind::Long => as_const_long(*n, &scope),
-                    _ => ast.clone(),
-                },
+                AstKind::ConstInt(n) => {
+                    if ty.borrow().kind == TypeKind::Int {
+                        as_const_int(*n, &scope)
+                    } else if ty.borrow().kind == TypeKind::Long {
+                        as_const_long(*n as i64, &scope)
+                    } else if !signed && ty.borrow().kind == TypeKind::Int {
+                        as_const_unsigned_int(*n, &scope)
+                    } else if !signed && ty.borrow().kind == TypeKind::Long {
+                        as_const_unsigned_long(*n as i64, &scope)
+                    } else {
+                        ast.clone()
+                    }
+                }
+                AstKind::ConstLong(n) => {
+                    if ty.borrow().kind == TypeKind::Int {
+                        as_const_int(*n as i32, &scope)
+                    } else if ty.borrow().kind == TypeKind::Long {
+                        as_const_long(*n, &scope)
+                    } else if !signed && ty.borrow().kind == TypeKind::Int {
+                        as_const_unsigned_int(*n as i32, &scope)
+                    } else if !signed && ty.borrow().kind == TypeKind::Long {
+                        as_const_unsigned_long(*n, &scope)
+                    } else {
+                        ast.clone()
+                    }
+                }
+                AstKind::ConstUnsignedInt(n) => {
+                    if ty.borrow().kind == TypeKind::Int {
+                        as_const_int(*n as i32, &scope)
+                    } else if ty.borrow().kind == TypeKind::Long {
+                        as_const_long(*n as i64, &scope)
+                    } else if !signed && ty.borrow().kind == TypeKind::Int {
+                        as_const_unsigned_int(*n as i32, &scope)
+                    } else if !signed && ty.borrow().kind == TypeKind::Long {
+                        as_const_unsigned_long(*n as i64, &scope)
+                    } else {
+                        ast.clone()
+                    }
+                }
+                AstKind::ConstUnsignedLong(n) => {
+                    if ty.borrow().kind == TypeKind::Int {
+                        as_const_int(*n as i32, &scope)
+                    } else if ty.borrow().kind == TypeKind::Long {
+                        as_const_long(*n as i64, &scope)
+                    } else if !signed && ty.borrow().kind == TypeKind::Int {
+                        as_const_unsigned_int(*n as i32, &scope)
+                    } else if !signed && ty.borrow().kind == TypeKind::Long {
+                        as_const_unsigned_long(*n as i64, &scope)
+                    } else {
+                        ast.clone()
+                    }
+                }
                 _ => ast.clone(),
             }
         }
@@ -436,6 +790,8 @@ pub fn fold(ast: &AstRef) -> AstRef {
         }
         AstKind::ConstInt(_) => ast.clone(),
         AstKind::ConstLong(_) => ast.clone(),
+        AstKind::ConstUnsignedInt(_) => ast.clone(),
+        AstKind::ConstUnsignedLong(_) => ast.clone(),
         AstKind::StaticInitializer(c_expr) => {
             replace(c_expr, &fold(c_expr));
             c_expr.clone()
@@ -444,6 +800,7 @@ pub fn fold(ast: &AstRef) -> AstRef {
             replace(expr, &fold(expr));
             expr.clone()
         }
+        AstKind::PostIncr { .. } | AstKind::PostDecr { .. } => ast.clone(),
         _ => {
             unreachable!();
         }
@@ -469,6 +826,17 @@ pub fn is_lvalue(expr: &AstRef) -> bool {
     matches!(&expr.borrow().kind, AstKind::Identifier { .. })
 }
 
+pub fn is_const_unsigned_int_expr(expr: &AstRef) -> bool {
+    match &expr.borrow().kind {
+        AstKind::StaticInitializer(subexpr) => {
+            is_const_unsigned_int_expr(subexpr)
+        }
+        AstKind::Initializer(subexpr) => is_const_unsigned_int_expr(subexpr),
+        AstKind::ConstUnsignedInt(_) | AstKind::ConstUnsignedLong(_) => true,
+        _ => false,
+    }
+}
+
 pub fn is_const_int_expr(expr: &AstRef) -> bool {
     match &expr.borrow().kind {
         AstKind::StaticInitializer(subexpr) => is_const_int_expr(subexpr),
@@ -483,6 +851,15 @@ pub fn const_int_value(expr: &AstRef) -> i64 {
     match &expr.borrow().kind {
         AstKind::ConstInt(value) => *value as i64,
         AstKind::ConstLong(value) => *value,
+        _ => unreachable!(),
+    }
+}
+
+pub fn const_unsigned_int_value(expr: &AstRef) -> u64 {
+    assert!(is_const_int_expr(expr));
+    match &expr.borrow().kind {
+        AstKind::ConstUnsignedInt(value) => *value as u64,
+        AstKind::ConstUnsignedLong(value) => *value,
         _ => unreachable!(),
     }
 }
@@ -600,6 +977,10 @@ pub fn check(expr: &AstRef) -> Result<(), String> {
         AstKind::ConstInt(_) => Ok(()),
 
         AstKind::ConstLong(_) => Ok(()),
+
+        AstKind::ConstUnsignedInt(_) => Ok(()),
+
+        AstKind::ConstUnsignedLong(_) => Ok(()),
 
         AstKind::StaticInitializer(c_expr) => {
             check(c_expr)?;

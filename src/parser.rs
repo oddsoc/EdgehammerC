@@ -576,7 +576,11 @@ impl Parser {
 
     fn is_type_spec(&self) -> bool {
         match peek_any!(self) {
-            TokenKind::Int | TokenKind::Long | TokenKind::Void => true,
+            TokenKind::Unsigned
+            | TokenKind::Signed
+            | TokenKind::Int
+            | TokenKind::Long
+            | TokenKind::Void => true,
             _ => false,
         }
     }
@@ -1509,8 +1513,16 @@ impl Parser {
     fn factor(&mut self) -> Result<AstRef, String> {
         if peek!(self, TokenKind::ConstInt, _) {
             self.const_int()
+        } else if peek!(self, TokenKind::ConstUnsignedInt, _) {
+            self.const_unsigned_int()
         } else if peek!(self, TokenKind::ConstLong, _) {
             self.const_long()
+        } else if peek!(self, TokenKind::ConstLongLong, _) {
+            self.const_long_long()
+        } else if peek!(self, TokenKind::ConstUnsignedLong, _) {
+            self.const_unsigned_long()
+        } else if peek!(self, TokenKind::ConstUnsignedLongLong, _) {
+            self.const_unsigned_long_long()
         } else if accept!(self, TokenKind::Tilde) {
             return Ok(new_node!(
                 self,
@@ -1604,11 +1616,47 @@ impl Parser {
         Ok(node)
     }
 
+    fn const_unsigned_int(&mut self) -> Result<AstRef, String> {
+        expect!(self, TokenKind::ConstUnsignedInt, _);
+        let value = yank!(self, TokenKind::ConstUnsignedInt);
+        let node = new_node!(self, ConstUnsignedInt(value as u32));
+        node.borrow_mut().ty = int_type(false);
+
+        Ok(node)
+    }
+
     fn const_long(&mut self) -> Result<AstRef, String> {
         expect!(self, TokenKind::ConstLong, _);
         let value = yank!(self, TokenKind::ConstLong);
         let node = new_node!(self, ConstLong(value));
         node.borrow_mut().ty = long_type(true);
+
+        Ok(node)
+    }
+
+    fn const_long_long(&mut self) -> Result<AstRef, String> {
+        expect!(self, TokenKind::ConstLongLong, _);
+        let value = yank!(self, TokenKind::ConstLongLong);
+        let node = new_node!(self, ConstLong(value));
+        node.borrow_mut().ty = long_type(true);
+
+        Ok(node)
+    }
+
+    fn const_unsigned_long_long(&mut self) -> Result<AstRef, String> {
+        expect!(self, TokenKind::ConstUnsignedLongLong, _);
+        let value = yank!(self, TokenKind::ConstUnsignedLongLong);
+        let node = new_node!(self, ConstUnsignedLong(value));
+        node.borrow_mut().ty = long_type(false);
+
+        Ok(node)
+    }
+
+    fn const_unsigned_long(&mut self) -> Result<AstRef, String> {
+        expect!(self, TokenKind::ConstUnsignedLong, _);
+        let value = yank!(self, TokenKind::ConstUnsignedLong);
+        let node = new_node!(self, ConstUnsignedLong(value));
+        node.borrow_mut().ty = long_type(false);
 
         Ok(node)
     }
@@ -1624,6 +1672,8 @@ impl Parser {
     fn advance(&mut self) {
         self.last = self.next.clone();
         self.next = self.lexer.lex();
+
+        //println!("{:?}", self.next);
 
         if self.next.as_ref().unwrap().kind == TokenKind::Bad {
             panic!("invalid token found");
