@@ -45,7 +45,9 @@ pub enum AstKind {
     StaticInitializer(AstRef),
     Initializer(AstRef),
     ConstInt(i32),
+    ConstUnsignedInt(u32),
     ConstLong(i64),
+    ConstUnsignedLong(u64),
     Void,
     Int,
     Function {

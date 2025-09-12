@@ -54,6 +54,10 @@ pub enum CondCode {
     LessOrEq,
     Greater,
     GreaterOrEq,
+    Above,
+    AboveOrEq,
+    Below,
+    BelowOrEq,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -91,8 +95,11 @@ pub enum Code {
         global: bool,
         init: CodeRef,
     },
-    InitInt(i32),
-    InitLong(i64),
+    InitInteger {
+        signed: bool,
+        size: usize,
+        value: u64,
+    },
     Ret,
     Mov(CodeRef, CodeRef, usize),
     MovAbs(CodeRef, CodeRef, usize),
@@ -101,19 +108,22 @@ pub enum Code {
     Not(CodeRef, usize),
     Neg(CodeRef, usize),
     IMul(CodeRef, CodeRef, usize),
+    Mul(CodeRef, usize),
     IDiv(CodeRef, usize),
+    Div(CodeRef, usize),
     Add(CodeRef, CodeRef, usize),
     Sub(CodeRef, CodeRef, usize),
     Shl(CodeRef, CodeRef, usize),
+    Shr(CodeRef, CodeRef, usize),
     Sar(CodeRef, CodeRef, usize),
     And(CodeRef, CodeRef, usize),
     Or(CodeRef, CodeRef, usize),
     Xor(CodeRef, CodeRef, usize),
     Cmp(CodeRef, CodeRef, usize),
-    Push(CodeRef),
+    Push(CodeRef, usize),
     Call(CodeRef),
     Imm {
-        val: i64,
+        val: u64,
         signed: bool,
         size: usize,
     },
@@ -175,7 +185,7 @@ impl CodeGenerator {
         } = *imm.borrow()
         {
             new_node!(Imm {
-                val: val as i32 as i64,
+                val: val as i32 as u64,
                 signed: signed,
                 size: 4
             })
@@ -276,7 +286,7 @@ impl CodeGenerator {
         }
     }
 
-    fn direct_mov(&self, src: CodeRef, dst: CodeRef) -> CodeRef {
+    fn direct_mov(&mut self, src: CodeRef, dst: CodeRef) -> CodeRef {
         let src_imm = matches!(*src.borrow(), Code::Imm { .. });
 
         match &*src.borrow() {
@@ -334,11 +344,7 @@ impl CodeGenerator {
                                 *dst_size
                             ))
                         } else {
-                            new_node!(MovZeroExt(
-                                src.clone(),
-                                dst.clone(),
-                                *dst_size
-                            ))
+                            self.mov_zero_ext(&src, &dst)
                         }
                     } else {
                         new_node!(Mov(src.clone(), dst.clone(), *dst_size))
@@ -402,6 +408,20 @@ impl CodeGenerator {
         new_node!(Sar(lhs, rhs, Self::operand_size(dst.clone())))
     }
 
+    fn shr_op(&mut self, src: &mut CodeRef, dst: &CodeRef) -> CodeRef {
+        let tmp = Self::reg_for(Register::R10, dst.clone());
+        let forced_src = new_node!(Reg {
+            reg: Register::Rcx,
+            signed: false,
+            size: 1
+        });
+
+        let (lhs, rhs) =
+            self.lhs_rhs_fixup(src, dst, &tmp, Some(&forced_src), None);
+
+        new_node!(Shr(lhs, rhs, Self::operand_size(dst.clone())))
+    }
+
     fn and_op(&mut self, src: &mut CodeRef, dst: &CodeRef) -> CodeRef {
         let tmp = Self::reg_for(Register::R10, dst.clone());
 
@@ -430,8 +450,10 @@ impl CodeGenerator {
         let size = Self::operand_size(lhs.clone());
         let tmpl = Self::reg_for(Register::R10, rhs.clone());
         let tmpr = Self::reg_for(Register::R11, rhs.clone());
-        self.emit(self.direct_mov(lhs.clone(), tmpl.clone()));
-        self.emit(self.direct_mov(rhs.clone(), tmpr.clone()));
+        let mut mov = self.direct_mov(lhs.clone(), tmpl.clone());
+        self.emit(mov);
+        mov = self.direct_mov(rhs.clone(), tmpr.clone());
+        self.emit(mov);
         new_node!(Cmp(tmpl, tmpr, size))
     }
 
@@ -444,6 +466,25 @@ impl CodeGenerator {
             self.lhs_rhs_fixup(src, dst, &tmp, None, Some(&forced_dst));
 
         let mul = new_node!(IMul(lhs, rhs.clone(), size));
+        self.emit(mul);
+        self.direct_mov(rhs.clone(), dst.clone())
+    }
+
+    fn mul(&mut self, src: &mut CodeRef, dst: &CodeRef) -> CodeRef {
+        let size = Self::operand_size(dst.clone());
+        let tmp = Self::reg_for(Register::R10, dst.clone());
+        let forced_dst = Self::reg_for(Register::Rax, dst.clone());
+
+        let (lhs, rhs) =
+            self.lhs_rhs_fixup(src, dst, &tmp, None, Some(&forced_dst));
+        //        let mov = self
+        //            .direct_mov(rhs.clone(), Self::reg_for(Register::Rax, rhs.clone()));
+        //        self.emit(mov);
+        let tmp2 = Self::reg_for(Register::R11, src.clone());
+        let mov = self.direct_mov(lhs.clone(), tmp2.clone());
+        self.emit(mov);
+
+        let mul = new_node!(Mul(tmp2, size));
         self.emit(mul);
         self.direct_mov(rhs.clone(), dst.clone())
     }
@@ -461,6 +502,40 @@ impl CodeGenerator {
             new_node!(IDiv(tmp.clone(), size))
         } else {
             new_node!(IDiv(src.clone(), size))
+        }
+    }
+
+    fn div(&mut self, src: CodeRef, size: usize) -> CodeRef {
+        if is_immediate(&src) {
+            let tmp = new_node!(Reg {
+                reg: Register::R10,
+                signed: false,
+                size: size
+            });
+
+            let mov = self.direct_mov(src.clone(), tmp.clone());
+            self.emit(mov);
+
+            let edx = new_node!(Reg {
+                reg: Register::Rdx,
+                signed: false,
+                size: 4
+            });
+
+            let xor = new_node!(Xor(edx.clone(), edx.clone(), 4));
+            self.emit(xor);
+
+            new_node!(Div(tmp.clone(), size))
+        } else {
+            let edx = new_node!(Reg {
+                reg: Register::Rdx,
+                signed: false,
+                size: 4
+            });
+            let xor = new_node!(Xor(edx.clone(), edx.clone(), 4));
+            self.emit(xor);
+
+            new_node!(Div(src.clone(), size))
         }
     }
 
@@ -512,27 +587,18 @@ impl CodeGenerator {
         })
     }
 
-    fn const_int(&mut self, val: i32) -> CodeRef {
+    fn integer(&mut self, ty: &TypeRef, value: u64) -> CodeRef {
         let imm = new_node!(Imm {
-            val: val as i64,
-            signed: true,
-            size: 4
-        });
-        imm
-    }
-
-    fn const_long(&mut self, val: i64) -> CodeRef {
-        let imm = new_node!(Imm {
-            val: val as i64,
-            signed: true,
-            size: 8
+            val: value as u64,
+            signed: is_signed(ty),
+            size: ty.borrow().size
         });
         imm
     }
 
     fn multiply(
         &mut self,
-        _ty: &TypeRef,
+        ty: &TypeRef,
         lhs: &TacRef,
         rhs: &TacRef,
         dst: &TacRef,
@@ -542,7 +608,12 @@ impl CodeGenerator {
         let mov = self.mov(&mut x, &dst);
         self.emit(mov);
         let mut y = self.expr(rhs.clone());
-        self.imul(&mut y, &dst)
+
+        if is_signed(ty) {
+            self.imul(&mut y, &dst)
+        } else {
+            self.mul(&mut y, &dst)
+        }
     }
 
     fn divide(
@@ -556,11 +627,21 @@ impl CodeGenerator {
         let reg = Self::reg_for(Register::Rax, x.clone());
         let mov = self.mov(&mut x, &reg);
         self.emit(mov);
-        let cdq = new_node!(Cdq(ty.borrow().size));
-        self.emit(cdq);
+        let signed = is_signed(ty);
+        if signed {
+            let cdq = new_node!(Cdq(ty.borrow().size));
+            self.emit(cdq);
+        }
+
         let y = self.expr(rhs.clone());
-        let idiv = self.idiv(y, ty.borrow().size);
-        self.emit(idiv);
+        if signed {
+            let idiv = self.idiv(y, ty.borrow().size);
+            self.emit(idiv);
+        } else {
+            let div = self.div(y, ty.borrow().size);
+            self.emit(div);
+        }
+
         let dst = self.expr(dst.clone());
         self.mov(&mut Self::reg_for(Register::Rax, dst.clone()), &dst)
     }
@@ -576,11 +657,21 @@ impl CodeGenerator {
         let reg = Self::reg_for(Register::Rax, x.clone());
         let mov = self.mov(&mut x, &reg);
         self.emit(mov);
-        let cdq = new_node!(Cdq(ty.borrow().size));
-        self.emit(cdq);
+        let signed = is_signed(ty);
+
+        if signed {
+            let cdq = new_node!(Cdq(ty.borrow().size));
+            self.emit(cdq);
+        }
+
         let y = self.expr(rhs.clone());
-        let idiv = self.idiv(y, ty.borrow().size);
-        self.emit(idiv);
+        if signed {
+            let idiv = self.idiv(y, ty.borrow().size);
+            self.emit(idiv);
+        } else {
+            let div = self.div(y, ty.borrow().size);
+            self.emit(div);
+        }
         let dst = self.expr(dst.clone());
         self.mov(&mut Self::reg_for(Register::Rdx, dst.clone()), &dst)
     }
@@ -632,7 +723,7 @@ impl CodeGenerator {
 
     fn shift_right(
         &mut self,
-        _ty: &TypeRef,
+        ty: &TypeRef,
         lhs: &TacRef,
         rhs: &TacRef,
         dst: &TacRef,
@@ -642,7 +733,11 @@ impl CodeGenerator {
         let mov = self.mov(&mut x, &dst);
         self.emit(mov);
         let mut y = self.expr(rhs.clone());
-        self.sar_op(&mut y, &dst)
+        if is_signed(ty) {
+            self.sar_op(&mut y, &dst)
+        } else {
+            self.shr_op(&mut y, &dst)
+        }
     }
 
     fn and(
@@ -742,7 +837,7 @@ impl CodeGenerator {
 
     fn less(
         &mut self,
-        _ty: &TypeRef,
+        ty: &TypeRef,
         lhs: &TacRef,
         rhs: &TacRef,
         dst: &TacRef,
@@ -759,15 +854,22 @@ impl CodeGenerator {
         });
         let mov = self.mov(&mut imm, &dst);
         self.emit(mov);
+
+        let cond = if is_signed(ty) {
+            CondCode::Less
+        } else {
+            CondCode::Below
+        };
+
         new_node!(SetCC {
-            cond: CondCode::Less,
+            cond: cond,
             dst: dst.clone(),
         })
     }
 
     fn less_or_eq(
         &mut self,
-        _ty: &TypeRef,
+        ty: &TypeRef,
         lhs: &TacRef,
         rhs: &TacRef,
         dst: &TacRef,
@@ -784,15 +886,22 @@ impl CodeGenerator {
         });
         let mov = self.mov(&mut imm, &dst);
         self.emit(mov);
+
+        let cond = if is_signed(ty) {
+            CondCode::LessOrEq
+        } else {
+            CondCode::BelowOrEq
+        };
+
         new_node!(SetCC {
-            cond: CondCode::LessOrEq,
+            cond: cond,
             dst: dst.clone(),
         })
     }
 
     fn greater(
         &mut self,
-        _ty: &TypeRef,
+        ty: &TypeRef,
         lhs: &TacRef,
         rhs: &TacRef,
         dst: &TacRef,
@@ -809,15 +918,22 @@ impl CodeGenerator {
         });
         let mov = self.mov(&mut imm, &dst);
         self.emit(mov);
+
+        let cond = if is_signed(ty) {
+            CondCode::Greater
+        } else {
+            CondCode::Above
+        };
+
         new_node!(SetCC {
-            cond: CondCode::Greater,
+            cond: cond,
             dst: dst.clone(),
         })
     }
 
     fn greater_or_eq(
         &mut self,
-        _ty: &TypeRef,
+        ty: &TypeRef,
         lhs: &TacRef,
         rhs: &TacRef,
         dst: &TacRef,
@@ -834,8 +950,15 @@ impl CodeGenerator {
         });
         let mov = self.mov(&mut imm, &dst);
         self.emit(mov);
+
+        let cond = if is_signed(ty) {
+            CondCode::GreaterOrEq
+        } else {
+            CondCode::AboveOrEq
+        };
+
         new_node!(SetCC {
-            cond: CondCode::GreaterOrEq,
+            cond: cond,
             dst: dst.clone(),
         })
     }
@@ -848,20 +971,30 @@ impl CodeGenerator {
 
     fn truncate(
         &mut self,
-        _ty: &TypeRef,
+        ty: &TypeRef,
         src: &TacRef,
         dst: &TacRef,
     ) -> CodeRef {
-        self.copy(_ty, src, dst)
+        self.copy(ty, src, dst)
     }
 
-    fn sign_ext(
-        &mut self,
-        _ty: &TypeRef,
-        src: &TacRef,
-        dst: &TacRef,
-    ) -> CodeRef {
-        self.copy(_ty, src, dst)
+    fn mov_zero_ext(&mut self, from: &CodeRef, to: &CodeRef) -> CodeRef {
+        let reg4 = new_node!(Reg {
+            reg: Register::R11,
+            signed: false,
+            size: 4
+        });
+
+        let mov = self.direct_mov(from.clone(), reg4);
+        self.emit(mov);
+
+        let mut reg8 = new_node!(Reg {
+            reg: Register::R11,
+            signed: false,
+            size: 8
+        });
+
+        self.mov(&mut reg8, &to)
     }
 
     fn jump(&mut self, label: &TacRef) -> CodeRef {
@@ -960,11 +1093,14 @@ impl CodeGenerator {
                     dst.clone(),
                     Self::operand_size(dst.clone())
                 )));
-                self.emit(new_node!(Push(new_node!(Reg {
-                    reg: Register::Rax,
-                    signed: false,
-                    size: 8
-                }))));
+                self.emit(new_node!(Push(
+                    new_node!(Reg {
+                        reg: Register::Rax,
+                        signed: false,
+                        size: 8
+                    }),
+                    8
+                )));
             }
         }
 
@@ -991,19 +1127,23 @@ impl CodeGenerator {
 
     fn push(&mut self, src: &CodeRef) -> CodeRef {
         if is_large_immediate(src) {
-            let tmp = Self::reg_for(Register::R11, src.clone());
-            self.emit(self.direct_mov(src.clone(), tmp.clone()));
-            new_node!(Push(tmp))
+            let tmp = new_node!(Reg {
+                reg: Register::R11,
+                signed: false,
+                size: 8
+            });
+            let mov = self.direct_mov(src.clone(), tmp.clone());
+            self.emit(mov);
+            new_node!(Push(tmp.clone(), 8))
         } else {
-            new_node!(Push(src.clone()))
+            new_node!(Push(src.clone(), 8))
         }
     }
 
     #[allow(unused_variables)]
     fn expr(&mut self, node: TacRef) -> CodeRef {
         match &*node {
-            Tac::ConstInt(val) => self.const_int(*val),
-            Tac::ConstLong(val) => self.const_long(*val),
+            Tac::Integer { ty, value } => self.integer(ty, *value),
             Tac::Var(ty, off) => self.local_variable(ty, *off),
             Tac::Inv { ty, src, dst } => self.invert(ty, src, dst),
             Tac::Neg { ty, src, dst } => self.negate(ty, src, dst),
@@ -1036,7 +1176,8 @@ impl CodeGenerator {
             Tac::NotEq { ty, lhs, rhs, dst } => self.not_eq(ty, lhs, rhs, dst),
             Tac::Copy { ty, src, dst } => self.copy(ty, src, dst),
             Tac::Truncate { ty, src, dst } => self.truncate(ty, src, dst),
-            Tac::SignExt { ty, src, dst } => self.sign_ext(ty, src, dst),
+            Tac::SignExt { ty, src, dst } => self.copy(ty, src, dst),
+            Tac::ZeroExt { ty, src, dst } => self.copy(ty, src, dst),
             Tac::Jump(label) => self.jump(label),
             Tac::JumpOnZero { ty, expr, label } => {
                 self.jump_on_zero(ty, expr, label)
@@ -1132,24 +1273,17 @@ impl CodeGenerator {
 
     fn static_variable(&mut self, name: &String, global: bool, init: &TacRef) {
         if let Tac::StaticInitializer(_ty, expr) = &*init.as_ref() {
-            match expr.as_ref() {
-                Tac::ConstInt(value) => {
-                    let initializer = new_node!(InitInt(*value));
-                    self.emit(new_node!(StaticVar {
-                        name: name.clone(),
-                        global: global,
-                        init: initializer
-                    }));
-                }
-                Tac::ConstLong(value) => {
-                    let initializer = new_node!(InitLong(*value));
-                    self.emit(new_node!(StaticVar {
-                        name: name.clone(),
-                        global: global,
-                        init: initializer
-                    }));
-                }
-                _ => unreachable!(),
+            if let Tac::Integer { ty, value } = expr.as_ref() {
+                let initializer = new_node!(InitInteger {
+                    signed: is_signed(ty),
+                    size: ty.borrow().size,
+                    value: *value
+                });
+                self.emit(new_node!(StaticVar {
+                    name: name.clone(),
+                    global: global,
+                    init: initializer
+                }));
             }
         }
     }
@@ -1209,6 +1343,7 @@ impl CodeGenerator {
             | Tac::Call { .. }
             | Tac::Truncate { .. }
             | Tac::SignExt { .. }
+            | Tac::ZeroExt { .. }
             | Tac::Label(_) => {
                 let expr = self.expr(node.clone());
                 self.emit(expr);
@@ -1257,19 +1392,19 @@ fn is_immediate(code: &CodeRef) -> bool {
 
 fn is_large_immediate(code: &CodeRef) -> bool {
     match &*code.borrow() {
-        Code::Imm {
-            val: _,
-            signed: _,
-            size,
-        } => {
+        Code::Imm { val, size, .. } => {
             if *size > 4 {
                 return true;
             }
-        }
-        _ => {}
-    }
 
-    false
+            if *val > i32::MAX as u64 {
+                return true;
+            }
+
+            false
+        }
+        _ => false,
+    }
 }
 
 fn is_mem_addr(code: &CodeRef) -> bool {

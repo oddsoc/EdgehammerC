@@ -183,7 +183,7 @@ fn lex_translation(
 ) -> Result<(), ()> {
     let c_file = translation.c_file.to_str().unwrap();
     let i_file = translation.i_file.to_str().unwrap();
-    preprocess_gcc(c_file, i_file);
+    preprocess_cc(c_file, i_file);
 
     let mut lexer = lexer::Lexer::new(i_file);
     let mut token = lexer.lex().unwrap();
@@ -227,7 +227,7 @@ fn verify(ast: Vec<AstRef>) {
 fn parse_translation(translation: &Translation, arguments: &[Argument]) {
     let c_file = translation.c_file.to_str().unwrap();
     let i_file = translation.i_file.to_str().unwrap();
-    preprocess_gcc(c_file, i_file);
+    preprocess_cc(c_file, i_file);
 
     let validate = arguments.iter().any(|i| matches!(i, Argument::Validate));
 
@@ -249,7 +249,7 @@ fn parse(translations: &[Translation], arguments: &[Argument]) {
 fn codegen_translation(translation: &Translation, arguments: &[Argument]) {
     let c_file = translation.c_file.to_str().unwrap();
     let i_file = translation.i_file.to_str().unwrap();
-    preprocess_gcc(c_file, i_file);
+    preprocess_cc(c_file, i_file);
 
     let mut parser = parser::Parser::new(i_file);
     let ast = parser.parse().unwrap();
@@ -295,7 +295,7 @@ fn codegen(translations: &[Translation], arguments: &[Argument]) {
     {
         let link = !arguments.iter().any(|i| matches!(i, Argument::NoLink));
 
-        assemble_gcc(&s_files, output.to_str().unwrap(), link);
+        assemble_cc(&s_files, output.to_str().unwrap(), link);
     }
 
     if !arguments.iter().any(|i| matches!(i, Argument::OutputAsm)) {
@@ -305,8 +305,8 @@ fn codegen(translations: &[Translation], arguments: &[Argument]) {
     }
 }
 
-fn preprocess_gcc(c_file: &str, i_file: &str) {
-    Command::new("gcc")
+fn preprocess_cc(c_file: &str, i_file: &str) {
+    Command::new("cc")
         .arg("-E")
         .arg("-P")
         .arg(c_file)
@@ -316,8 +316,8 @@ fn preprocess_gcc(c_file: &str, i_file: &str) {
         .expect("failed to preprocess {c_file}");
 }
 
-fn assemble_gcc(s_files: &[String], o_file: &str, link: bool) {
-    let mut cmd = Command::new("gcc");
+fn assemble_cc(s_files: &[String], o_file: &str, link: bool) {
+    let mut cmd = Command::new("cc");
 
     if !link {
         cmd.arg("-c");

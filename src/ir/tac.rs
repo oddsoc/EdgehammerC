@@ -63,11 +63,18 @@ pub enum Tac {
         args: Vec<TacRef>,
         dst: TacRef,
     },
-    ConstInt(i32),
-    ConstLong(i64),
+    Integer {
+        ty: TypeRef,
+        value: u64,
+    },
     Var(TypeRef, usize),
     StaticVar(TypeRef, String, bool, TacRef),
     SignExt {
+        ty: TypeRef,
+        src: TacRef,
+        dst: TacRef,
+    },
+    ZeroExt {
         ty: TypeRef,
         src: TacRef,
         dst: TacRef,
@@ -347,7 +354,10 @@ impl TacGenerator {
         if incr {
             self.emit(new_node!(Add {
                 ty: ty.clone(),
-                lhs: new_node!(ConstInt(1)),
+                lhs: new_node!(Integer {
+                    ty: ty.clone(),
+                    value: 1
+                }),
                 rhs: tmp.clone(),
                 dst: dst.clone()
             }));
@@ -355,7 +365,10 @@ impl TacGenerator {
             self.emit(new_node!(Sub {
                 ty: ty.clone(),
                 lhs: tmp.clone(),
-                rhs: new_node!(ConstInt(1)),
+                rhs: new_node!(Integer {
+                    ty: ty.clone(),
+                    value: 1
+                }),
                 dst: dst.clone()
             }));
         }
@@ -393,14 +406,20 @@ impl TacGenerator {
         let dst = self.tmp_var(ty.clone(), scope);
         self.emit(new_node!(Copy {
             ty: ty.clone(),
-            src: new_node!(ConstInt(1)),
+            src: new_node!(Integer {
+                ty: ty.clone(),
+                value: 1
+            }),
             dst: dst.clone()
         }));
         self.emit(new_node!(Jump(end_label.clone())));
         self.emit(false_label);
         self.emit(new_node!(Copy {
             ty: ty.clone(),
-            src: new_node!(ConstInt(0)),
+            src: new_node!(Integer {
+                ty: ty.clone(),
+                value: 0
+            }),
             dst: dst.clone()
         }));
         self.emit(end_label);
@@ -431,14 +450,20 @@ impl TacGenerator {
         let dst = self.tmp_var(ty.clone(), scope);
         self.emit(new_node!(Copy {
             ty: ty.clone(),
-            src: new_node!(ConstInt(0)),
+            src: new_node!(Integer {
+                ty: ty.clone(),
+                value: 0
+            }),
             dst: dst.clone()
         }));
         self.emit(new_node!(Jump(end_label.clone())));
         self.emit(true_label);
         self.emit(new_node!(Copy {
             ty: ty.clone(),
-            src: new_node!(ConstInt(1)),
+            src: new_node!(Integer {
+                ty: ty.clone(),
+                value: 1
+            }),
             dst: dst.clone()
         }));
         self.emit(end_label);
@@ -792,11 +817,6 @@ impl TacGenerator {
         let src = self.expr(expr.clone());
         let src_ty = expr.borrow().ty.clone();
 
-        match src.as_ref() {
-            Tac::ConstInt(_) | Tac::ConstLong(_) => return src,
-            _ => {}
-        }
-
         if is_match(&node.ty, &src_ty) {
             return src;
         }
@@ -805,14 +825,26 @@ impl TacGenerator {
         let pos = make_space(scope.clone(), ty.size, ty.alignment);
         let dst = new_node!(Var(node.ty.clone(), pos));
 
-        if let TypeKind::Int = &ty.kind {
+        if ty.size == src_ty.borrow().size {
+            self.emit(new_node!(Copy {
+                ty: node.ty.clone(),
+                src: src,
+                dst: dst.clone()
+            }));
+        } else if ty.size < src_ty.borrow().size {
             self.emit(new_node!(Truncate {
                 ty: node.ty.clone(),
                 src: src,
                 dst: dst.clone()
             }));
-        } else {
+        } else if is_signed(&src_ty) {
             self.emit(new_node!(SignExt {
+                ty: node.ty.clone(),
+                src: src,
+                dst: dst.clone()
+            }));
+        } else {
+            self.emit(new_node!(ZeroExt {
                 ty: node.ty.clone(),
                 src: src,
                 dst: dst.clone()
@@ -861,8 +893,24 @@ impl TacGenerator {
     fn expr(&mut self, expr: AstRef) -> TacRef {
         let node = expr.borrow();
         match &node.kind {
-            AstKind::ConstInt(val) => new_node!(ConstInt(*val)),
-            AstKind::ConstLong(val) => new_node!(ConstLong(*val)),
+            AstKind::ConstInt(val) => new_node!(Integer {
+                ty: type_of(&expr),
+                value: *val as u64
+            }),
+            AstKind::ConstLong(val) => new_node!(Integer {
+                ty: type_of(&expr),
+                value: *val as u64
+            }),
+            AstKind::ConstUnsignedInt(val) => new_node!(Integer {
+                ty: type_of(&expr),
+                value: *val as u64
+            }),
+            AstKind::ConstUnsignedLong(val) => {
+                new_node!(Integer {
+                    ty: type_of(&expr),
+                    value: *val as u64
+                })
+            }
             AstKind::Complement { expr: subexpr } => {
                 self.complement(&node, subexpr)
             }
@@ -979,7 +1027,10 @@ impl TacGenerator {
                 }
             }
 
-            irgen.emit(new_node!(Return(new_node!(ConstInt(0)))));
+            irgen.emit(new_node!(Return(new_node!(Integer {
+                ty: int_type(true),
+                value: 0
+            }))));
 
             self.join(&irgen);
 
@@ -1310,19 +1361,42 @@ impl TacGenerator {
                 AstKind::ConstInt(value) => {
                     new_node!(StaticInitializer(
                         ty.clone(),
-                        new_node!(ConstInt(*value))
+                        new_node!(Integer {
+                            ty: ty.clone(),
+                            value: *value as u64
+                        })
                     ))
                 }
                 AstKind::ConstLong(value) => {
                     new_node!(StaticInitializer(
                         ty.clone(),
-                        new_node!(ConstLong(*value))
+                        new_node!(Integer {
+                            ty: ty.clone(),
+                            value: *value as u64
+                        })
+                    ))
+                }
+                AstKind::ConstUnsignedInt(value) => {
+                    new_node!(StaticInitializer(
+                        ty.clone(),
+                        new_node!(Integer {
+                            ty: ty.clone(),
+                            value: *value as u64
+                        })
+                    ))
+                }
+                AstKind::ConstUnsignedLong(value) => {
+                    new_node!(StaticInitializer(
+                        ty.clone(),
+                        new_node!(Integer {
+                            ty: ty.clone(),
+                            value: *value as u64
+                        })
                     ))
                 }
                 _ => unreachable!(),
             }
         } else {
-            println!("expr was {:#?}", init);
             unreachable!()
         }
     }
@@ -1338,7 +1412,6 @@ impl TacGenerator {
                     {
                         let initializer = self
                             .static_initializer(&ty, &init.as_ref().unwrap());
-
                         let global = !matches!(
                             s.storage_class,
                             Some(StorageClass::Static)
@@ -1363,17 +1436,13 @@ impl TacGenerator {
                         ty.clone(),
                         name.to_string(),
                         global,
-                        if node.borrow().ty.borrow().size == 8 {
-                            new_node!(StaticInitializer(
-                                ty.clone(),
-                                new_node!(ConstLong(0))
-                            ))
-                        } else {
-                            new_node!(StaticInitializer(
-                                ty.clone(),
-                                new_node!(ConstInt(0))
-                            ))
-                        },
+                        new_node!(StaticInitializer(
+                            ty.clone(),
+                            new_node!(Integer {
+                                ty: ty.clone(),
+                                value: 0
+                            })
+                        )),
                     )));
                 }
             }
