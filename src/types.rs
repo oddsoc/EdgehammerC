@@ -49,6 +49,8 @@ pub enum TypeKind {
     Int,
     Long,
     LongLong,
+    Double,
+    LongDouble,
     Function {
         param_tys: Vec<TypeRef>,
         return_ty: TypeRef,
@@ -117,6 +119,34 @@ pub fn is_signed(ty: &TypeRef) -> bool {
     ty.borrow().flags & IS_SIGNED != 0
 }
 
+pub fn size_of(ty: &TypeRef) -> usize {
+    ty.borrow().size
+}
+
+pub fn double_type() -> TypeRef {
+    let flags = IS_SCALAR;
+
+    Rc::new(RefCell::new(Type {
+        kind: TypeKind::Double,
+        basetype: None,
+        alignment: 8,
+        size: 8,
+        flags: flags,
+    }))
+}
+
+pub fn long_double_type() -> TypeRef {
+    let flags = IS_SCALAR;
+
+    Rc::new(RefCell::new(Type {
+        kind: TypeKind::LongDouble,
+        basetype: None,
+        alignment: 16,
+        size: 16,
+        flags: flags,
+    }))
+}
+
 pub fn void_type() -> TypeRef {
     Rc::new(RefCell::new(Type {
         kind: TypeKind::Void,
@@ -142,8 +172,26 @@ pub fn is_int_type(ty: &TypeRef) -> bool {
     }
 }
 
+pub fn is_double_type(ty: &TypeRef) -> bool {
+    match ty.borrow().kind {
+        TypeKind::Double => true,
+        _ => false,
+    }
+}
+
+pub fn is_long_double_type(ty: &TypeRef) -> bool {
+    match ty.borrow().kind {
+        TypeKind::LongDouble => true,
+        _ => false,
+    }
+}
+
 fn is_scalar_type(ty: &TypeRef) -> bool {
     ty.borrow().flags & IS_SCALAR != 0
+}
+
+fn int_type_rank(ty: &TypeRef) -> usize {
+    ty.borrow().size - if is_signed(ty) { 1 } else { 0 }
 }
 
 fn get_common_type(ty0: &TypeRef, ty1: &TypeRef) -> TypeRef {
@@ -151,18 +199,32 @@ fn get_common_type(ty0: &TypeRef, ty1: &TypeRef) -> TypeRef {
         return ty0.clone();
     }
 
-    if ty0.borrow().size == ty1.borrow().size {
-        if is_signed(ty0) {
-            return ty1.clone();
-        } else {
-            return ty0.clone();
-        }
+    if is_long_double_type(ty0) || is_long_double_type(ty1) {
+        return long_double_type();
     }
 
-    if ty0.borrow().size > ty1.borrow().size {
-        return ty0.clone();
-    } else {
-        return ty1.clone();
+    if is_double_type(ty0) || is_double_type(ty1) {
+        return double_type();
+    }
+
+    let rank0 = int_type_rank(ty0);
+    let rank1 = int_type_rank(ty1);
+
+    if rank0 != rank1 {
+        return if rank0 > rank1 {
+            ty0.clone()
+        } else {
+            ty1.clone()
+        };
+    }
+
+    let signed0 = is_signed(ty0);
+    let signed1 = is_signed(ty1);
+
+    match (signed0, signed1) {
+        (true, true) | (false, false) => ty0.clone(),
+        (true, false) => ty1.clone(),
+        (false, true) => ty0.clone(),
     }
 }
 
@@ -199,14 +261,14 @@ fn cast_to(expr: &AstRef, ty: &TypeRef) -> AstRef {
     cast
 }
 
-pub struct Annotator {
+pub struct TypeAnnotator {
     file_decls: HashSet<String>,
     decl_types: HashMap<usize, TypeRef>,
 }
 
-impl Annotator {
-    pub fn new() -> Annotator {
-        Annotator {
+impl TypeAnnotator {
+    pub fn new() -> TypeAnnotator {
+        TypeAnnotator {
             file_decls: HashSet::new(),
             decl_types: HashMap::new(),
         }
@@ -319,7 +381,8 @@ impl Annotator {
                 self.file_decls.insert(name.clone());
 
                 if let Some(init) = init {
-                    self.annotate(init)?;
+                    let (new_init, _init_ty) = self.annotate(init)?;
+                    replace(init, &cast_to(&new_init, &node_ty));
                 }
             }
 
@@ -510,7 +573,7 @@ impl Annotator {
                 replace(left, &lhs);
                 replace(right, &rhs);
 
-                let ty = int_type(true);
+                let ty = int_type(false);
 
                 node_ty = ty.clone();
             }
@@ -535,11 +598,7 @@ impl Annotator {
             AstKind::Add { left, right }
             | AstKind::Subtract { left, right }
             | AstKind::Multiply { left, right }
-            | AstKind::Divide { left, right }
-            | AstKind::Modulo { left, right }
-            | AstKind::And { left, right }
-            | AstKind::Or { left, right }
-            | AstKind::Xor { left, right } => {
+            | AstKind::Divide { left, right } => {
                 let (lhs, lhs_ty) = self.annotate(left)?;
                 let (rhs, rhs_ty) = self.annotate(right)?;
 
@@ -559,16 +618,39 @@ impl Annotator {
                 node_ty = common_ty.clone();
             }
 
-            AstKind::LShift { left, right }
-            | AstKind::RShift { left, right } => {
+            AstKind::Modulo { left, right }
+            | AstKind::And { left, right }
+            | AstKind::Or { left, right }
+            | AstKind::Xor { left, right } => {
                 let (lhs, lhs_ty) = self.annotate(left)?;
                 let (rhs, rhs_ty) = self.annotate(right)?;
 
-                if !is_scalar_type(&lhs_ty) {
+                if !is_int_type(&lhs_ty) {
+                    return Err("expected integer type".to_string());
+                }
+
+                if !is_int_type(&rhs_ty) {
+                    return Err("expected integer type".to_string());
+                }
+
+                let common_ty = get_common_type(&lhs_ty, &rhs_ty);
+
+                replace(left, &cast_to(&lhs, &common_ty));
+                replace(right, &cast_to(&rhs, &common_ty));
+
+                node_ty = common_ty.clone();
+            }
+
+            AstKind::LeftShift { left, right }
+            | AstKind::RightShift { left, right } => {
+                let (lhs, lhs_ty) = self.annotate(left)?;
+                let (rhs, rhs_ty) = self.annotate(right)?;
+
+                if !is_int_type(&lhs_ty) {
                     return Err("expected scalar type".to_string());
                 }
 
-                if !is_scalar_type(&rhs_ty) {
+                if !is_int_type(&rhs_ty) {
                     return Err("expected scalar type".to_string());
                 }
 
@@ -580,9 +662,9 @@ impl Annotator {
 
             AstKind::Equal { left, right }
             | AstKind::NotEq { left, right }
-            | AstKind::LessThan { left, right }
+            | AstKind::Less { left, right }
             | AstKind::LessOrEq { left, right }
-            | AstKind::GreaterThan { left, right }
+            | AstKind::Greater { left, right }
             | AstKind::GreaterOrEq { left, right } => {
                 let (lhs, lhs_ty) = self.annotate(left)?;
                 let (rhs, rhs_ty) = self.annotate(right)?;
@@ -600,9 +682,11 @@ impl Annotator {
                 replace(left, &cast_to(&lhs, &common_ty));
                 replace(right, &cast_to(&rhs, &common_ty));
 
-                let ty = common_ty.clone();
-
-                node_ty = ty.clone();
+                node_ty = if is_double_type(&common_ty) {
+                    int_type(false)
+                } else {
+                    common_ty.clone()
+                };
             }
 
             AstKind::Ternary {
@@ -651,17 +735,14 @@ impl Annotator {
 
                 replace(inner, &new_inner);
 
-                let ty = inner_ty.clone();
-
-                node_ty = ty.clone();
+                node_ty = int_type(true);
             }
 
-            AstKind::Negate { expr: inner }
-            | AstKind::Complement { expr: inner } => {
+            AstKind::Complement { expr: inner } => {
                 let (new_inner, inner_ty) = self.annotate(inner)?;
 
-                if !is_scalar_type(&inner_ty) {
-                    return Err("expected scalar type".to_string());
+                if !is_int_type(&inner_ty) {
+                    return Err("expected integer type".to_string());
                 }
 
                 replace(inner, &new_inner);
@@ -669,7 +750,8 @@ impl Annotator {
                 node_ty = inner_ty.clone();
             }
 
-            AstKind::PostIncr { expr: inner }
+            AstKind::Negate { expr: inner }
+            | AstKind::PostIncr { expr: inner }
             | AstKind::PostDecr { expr: inner } => {
                 let (new_inner, inner_ty) = self.annotate(inner)?;
 

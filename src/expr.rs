@@ -356,7 +356,7 @@ pub fn fold(ast: &AstRef) -> AstRef {
                 _ => ast.clone(),
             }
         }
-        AstKind::LShift { left, right } => {
+        AstKind::LeftShift { left, right } => {
             replace(left, &fold(left));
             replace(right, &fold(right));
 
@@ -386,7 +386,7 @@ pub fn fold(ast: &AstRef) -> AstRef {
                 _ => ast.clone(),
             }
         }
-        AstKind::RShift { left, right } => {
+        AstKind::RightShift { left, right } => {
             replace(left, &fold(left));
             replace(right, &fold(right));
 
@@ -506,7 +506,7 @@ pub fn fold(ast: &AstRef) -> AstRef {
                 _ => ast.clone(),
             }
         }
-        AstKind::LessThan { left, right } => {
+        AstKind::Less { left, right } => {
             replace(left, &fold(left));
             replace(right, &fold(right));
 
@@ -568,7 +568,7 @@ pub fn fold(ast: &AstRef) -> AstRef {
                 _ => ast.clone(),
             }
         }
-        AstKind::GreaterThan { left, right } => {
+        AstKind::Greater { left, right } => {
             replace(left, &fold(left));
             replace(right, &fold(right));
 
@@ -792,6 +792,7 @@ pub fn fold(ast: &AstRef) -> AstRef {
         AstKind::ConstLong(_) => ast.clone(),
         AstKind::ConstUnsignedInt(_) => ast.clone(),
         AstKind::ConstUnsignedLong(_) => ast.clone(),
+        AstKind::ConstDouble(_) => ast.clone(),
         AstKind::StaticInitializer(c_expr) => {
             replace(c_expr, &fold(c_expr));
             c_expr.clone()
@@ -832,6 +833,9 @@ pub fn is_const_unsigned_int_expr(expr: &AstRef) -> bool {
             is_const_unsigned_int_expr(subexpr)
         }
         AstKind::Initializer(subexpr) => is_const_unsigned_int_expr(subexpr),
+        AstKind::Cast { expr: subexpr, .. } => {
+            is_const_unsigned_int_expr(subexpr)
+        }
         AstKind::ConstUnsignedInt(_) | AstKind::ConstUnsignedLong(_) => true,
         _ => false,
     }
@@ -841,9 +845,26 @@ pub fn is_const_int_expr(expr: &AstRef) -> bool {
     match &expr.borrow().kind {
         AstKind::StaticInitializer(subexpr) => is_const_int_expr(subexpr),
         AstKind::Initializer(subexpr) => is_const_int_expr(subexpr),
+        AstKind::Cast { expr: subexpr, .. } => is_const_int_expr(subexpr),
         AstKind::ConstInt(_) | AstKind::ConstLong(_) => true,
         _ => false,
     }
+}
+
+pub fn is_const_double_expr(expr: &AstRef) -> bool {
+    match &expr.borrow().kind {
+        AstKind::StaticInitializer(subexpr) => is_const_double_expr(subexpr),
+        AstKind::Initializer(subexpr) => is_const_double_expr(subexpr),
+        AstKind::Cast { expr: subexpr, .. } => is_const_double_expr(subexpr),
+        AstKind::ConstDouble(_) => true,
+        _ => false,
+    }
+}
+
+pub fn is_const_expr(expr: &AstRef) -> bool {
+    return is_const_int_expr(expr)
+        || is_const_unsigned_int_expr(expr)
+        || is_const_double_expr(expr);
 }
 
 pub fn const_int_value(expr: &AstRef) -> i64 {
@@ -860,6 +881,15 @@ pub fn const_unsigned_int_value(expr: &AstRef) -> u64 {
     match &expr.borrow().kind {
         AstKind::ConstUnsignedInt(value) => *value as u32 as u64,
         AstKind::ConstUnsignedLong(value) => *value,
+        _ => unreachable!(),
+    }
+}
+
+#[allow(unused)]
+pub fn const_double_value(expr: &AstRef) -> f64 {
+    assert!(is_const_double_expr(expr));
+    match &expr.borrow().kind {
+        AstKind::ConstDouble(value) => *value,
         _ => unreachable!(),
     }
 }
@@ -891,8 +921,8 @@ pub fn check(expr: &AstRef) -> Result<(), String> {
         | AstKind::Multiply { left, right }
         | AstKind::Divide { left, right }
         | AstKind::Modulo { left, right }
-        | AstKind::LShift { left, right }
-        | AstKind::RShift { left, right }
+        | AstKind::LeftShift { left, right }
+        | AstKind::RightShift { left, right }
         | AstKind::And { left, right }
         | AstKind::Or { left, right }
         | AstKind::Xor { left, right } => {
@@ -912,9 +942,9 @@ pub fn check(expr: &AstRef) -> Result<(), String> {
 
         AstKind::Equal { left, right }
         | AstKind::NotEq { left, right }
-        | AstKind::LessThan { left, right }
+        | AstKind::Less { left, right }
         | AstKind::LessOrEq { left, right }
-        | AstKind::GreaterThan { left, right }
+        | AstKind::Greater { left, right }
         | AstKind::GreaterOrEq { left, right } => {
             check(left)?;
             check(right)?;
@@ -982,6 +1012,8 @@ pub fn check(expr: &AstRef) -> Result<(), String> {
 
         AstKind::ConstUnsignedLong(_) => Ok(()),
 
+        AstKind::ConstDouble(_) => Ok(()),
+
         AstKind::StaticInitializer(c_expr) => {
             check(c_expr)?;
             Ok(())
@@ -991,7 +1023,6 @@ pub fn check(expr: &AstRef) -> Result<(), String> {
             check(expr)?;
             Ok(())
         }
-
         _ => unreachable!(),
     }
 }

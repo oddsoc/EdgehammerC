@@ -22,14 +22,15 @@
  */
 
 use std::env;
+use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
 use crate::ast::*;
 use crate::codegen::CodeGenerator;
 use crate::ir::IrGenerator;
-use crate::lexer;
-use crate::parser;
+use crate::lexing::*;
+use crate::preprocessing::*;
 use crate::semantics::*;
 use crate::types::*;
 use crate::x64::linux::codegen::CodeGenerator as X64CodeGenerator;
@@ -42,6 +43,7 @@ pub enum Argument {
     Validate,
     Codegen,
     NoLink,
+    LinkTo(String),
     OutputAsm,
     OutputTo(PathBuf),
 }
@@ -93,7 +95,26 @@ fn build_translations(
     translations
 }
 
-pub fn process_args(args: &[String]) -> (Vec<Translation>, Vec<Argument>) {
+fn parse_option_with_arg<'a>(
+    args: &'a [String],
+    i: &mut usize,
+    prefix: &str,
+) -> &'a str {
+    let arg = args[*i].as_str();
+    if arg.len() > prefix.len() {
+        &arg[prefix.len()..]
+    } else {
+        *i += 1;
+        if *i < args.len() {
+            &args[*i]
+        } else {
+            eprintln!("missing argument for {}", prefix);
+            std::process::exit(1);
+        }
+    }
+}
+
+pub fn parse_args(args: &[String]) -> (Vec<Translation>, Vec<Argument>) {
     let mut arguments: Vec<Argument> = Vec::new();
     let mut o_arg = false;
     let mut s_arg = false;
@@ -102,44 +123,47 @@ pub fn process_args(args: &[String]) -> (Vec<Translation>, Vec<Argument>) {
     let mut i = 1;
 
     while i < args.len() {
-        match args[i].as_str() {
-            "-S" => {
-                arguments.push(Argument::OutputAsm);
-                s_arg = true;
+        let arg = args[i].as_str();
+        if arg == "-S" {
+            arguments.push(Argument::OutputAsm);
+            s_arg = true;
+            i += 1;
+        } else if arg == "-c" {
+            arguments.push(Argument::NoLink);
+            i += 1;
+        } else if arg == "--lex" {
+            arguments.push(Argument::Lex);
+            i += 1;
+        } else if arg == "--parse" {
+            arguments.push(Argument::Parse);
+            i += 1;
+        } else if arg == "--validate" {
+            arguments.push(Argument::Validate);
+            i += 1;
+        } else if arg == "--codegen" {
+            arguments.push(Argument::Codegen);
+            codegen_arg = true;
+            i += 1;
+        } else if arg.starts_with("-o") {
+            if o_arg {
+                eprintln!("-o already specified");
+                std::process::exit(1);
             }
-            "-o" => {
-                if o_arg {
-                    eprintln!("-o already specified");
-                    std::process::exit(1);
-                }
-                i += 1;
-                if i < args.len() {
-                    arguments.push(Argument::OutputTo(PathBuf::from(&args[i])));
-                    o_arg = true;
-                } else {
-                    eprintln!("missing argument for -o");
-                    std::process::exit(1);
-                }
-            }
-            "-c" => {
-                arguments.push(Argument::NoLink);
-            }
-            "--lex" => {
-                arguments.push(Argument::Lex);
-            }
-            "--parse" => {
-                arguments.push(Argument::Parse);
-            }
-            "--validate" => {
-                arguments.push(Argument::Validate);
-            }
-            "--codegen" => {
-                arguments.push(Argument::Codegen);
-                codegen_arg = true;
-            }
-            _ => files.push(PathBuf::from(&args[i])),
+            let out_path = parse_option_with_arg(args, &mut i, "-o");
+            arguments.push(Argument::OutputTo(PathBuf::from(out_path)));
+            o_arg = true;
+            i += 1;
+        } else if arg.starts_with("-l") {
+            let lib = parse_option_with_arg(args, &mut i, "-l");
+            arguments.push(Argument::LinkTo(lib.to_string()));
+            i += 1;
+        } else if arg.starts_with('-') {
+            eprintln!("unknown option: {}", arg);
+            std::process::exit(1);
+        } else {
+            files.push(PathBuf::from(arg));
+            i += 1;
         }
-        i += 1;
     }
 
     if files.is_empty() {
@@ -180,22 +204,17 @@ pub fn process_args(args: &[String]) -> (Vec<Translation>, Vec<Argument>) {
 fn lex_translation(
     translation: &Translation,
     _arguments: &[Argument],
-) -> Result<(), ()> {
+) -> Result<(), String> {
     let c_file = translation.c_file.to_str().unwrap();
-    let i_file = translation.i_file.to_str().unwrap();
-    preprocess_cc(c_file, i_file);
+    //let i_file = translation.i_file.to_str().unwrap();
+    //preprocess_cc(c_file, i_file);
 
-    let mut lexer = lexer::Lexer::new(i_file);
-    let mut token = lexer.lex().unwrap();
+    let bytes: Vec<u8> = fs::read(c_file).unwrap();
+    let text = preprocess(bytes).unwrap();
+    let tokeniser = Tokeniser::new(text.as_str());
 
-    while token.kind != lexer::TokenKind::EOF {
-        println!("{:?}", token);
-
-        if token.kind == lexer::TokenKind::Bad {
-            return Err(());
-        }
-
-        token = lexer.lex().unwrap();
+    for _tok in tokeniser {
+        _ = _tok?;
     }
 
     Ok(())
@@ -208,7 +227,7 @@ fn lex(translations: &[Translation], arguments: &[Argument]) {
 }
 
 fn verify(ast: Vec<AstRef>) {
-    let mut annotator = Annotator::new();
+    let mut annotator = TypeAnnotator::new();
     let mut res = annotator.run(&ast);
 
     if res.is_err() {
@@ -226,12 +245,14 @@ fn verify(ast: Vec<AstRef>) {
 
 fn parse_translation(translation: &Translation, arguments: &[Argument]) {
     let c_file = translation.c_file.to_str().unwrap();
-    let i_file = translation.i_file.to_str().unwrap();
-    preprocess_cc(c_file, i_file);
+    //let i_file = translation.i_file.to_str().unwrap();
+    //preprocess_cc(c_file, i_file);
 
+    let bytes: Vec<u8> = fs::read(c_file).unwrap();
+    let text = preprocess(bytes).unwrap();
     let validate = arguments.iter().any(|i| matches!(i, Argument::Validate));
 
-    let mut parser = parser::Parser::new(i_file);
+    let mut parser = crate::parsing::Parser::new(&text).unwrap();
 
     let ast = parser.parse().unwrap();
 
@@ -248,10 +269,13 @@ fn parse(translations: &[Translation], arguments: &[Argument]) {
 
 fn codegen_translation(translation: &Translation, arguments: &[Argument]) {
     let c_file = translation.c_file.to_str().unwrap();
-    let i_file = translation.i_file.to_str().unwrap();
-    preprocess_cc(c_file, i_file);
+    //let i_file = translation.i_file.to_str().unwrap();
+    //preprocess_cc(c_file, i_file);
 
-    let mut parser = parser::Parser::new(i_file);
+    let bytes: Vec<u8> = fs::read(c_file).unwrap();
+    let text = preprocess(bytes).unwrap();
+
+    let mut parser = crate::parsing::Parser::new(&text).unwrap();
     let ast = parser.parse().unwrap();
 
     verify(ast.clone());
@@ -295,7 +319,7 @@ fn codegen(translations: &[Translation], arguments: &[Argument]) {
     {
         let link = !arguments.iter().any(|i| matches!(i, Argument::NoLink));
 
-        assemble_cc(&s_files, output.to_str().unwrap(), link);
+        assemble_cc(&s_files, output.to_str().unwrap(), link, &arguments);
     }
 
     if !arguments.iter().any(|i| matches!(i, Argument::OutputAsm)) {
@@ -305,6 +329,7 @@ fn codegen(translations: &[Translation], arguments: &[Argument]) {
     }
 }
 
+#[allow(unused)]
 fn preprocess_cc(c_file: &str, i_file: &str) {
     Command::new("cc")
         .arg("-E")
@@ -316,7 +341,12 @@ fn preprocess_cc(c_file: &str, i_file: &str) {
         .expect("failed to preprocess {c_file}");
 }
 
-fn assemble_cc(s_files: &[String], o_file: &str, link: bool) {
+fn assemble_cc(
+    s_files: &[String],
+    o_file: &str,
+    link: bool,
+    args: &[Argument],
+) {
     let mut cmd = Command::new("cc");
 
     if !link {
@@ -327,6 +357,12 @@ fn assemble_cc(s_files: &[String], o_file: &str, link: bool) {
         .arg("-no-pie")
         .arg("-o")
         .arg(o_file);
+
+    for arg in args {
+        if let Argument::LinkTo(lib) = arg {
+            cmd.arg(format!("-l{}", lib));
+        }
+    }
 
     cmd.status().expect("failed to assemble {filename}");
 }

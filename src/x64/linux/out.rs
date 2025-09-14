@@ -42,6 +42,8 @@ fn cc_to_str(cc: &CondCode) -> String {
         CondCode::AboveOrEq => "ae",
         CondCode::Below => "b",
         CondCode::BelowOrEq => "be",
+        CondCode::Parity => "p",
+        CondCode::NoParity => "np",
     }
     .to_string()
 }
@@ -179,6 +181,22 @@ fn code_to_str(code: Rc<RefCell<Code>>) -> String {
                 8 => "%r15".to_string(),
                 _ => unreachable!(),
             },
+            Register::Xmm0 => "%xmm0".to_string(),
+            Register::Xmm1 => "%xmm1".to_string(),
+            Register::Xmm2 => "%xmm2".to_string(),
+            Register::Xmm3 => "%xmm3".to_string(),
+            Register::Xmm4 => "%xmm4".to_string(),
+            Register::Xmm5 => "%xmm5".to_string(),
+            Register::Xmm6 => "%xmm6".to_string(),
+            Register::Xmm7 => "%xmm7".to_string(),
+            Register::Xmm8 => "%xmm8".to_string(),
+            Register::Xmm9 => "%xmm9".to_string(),
+            Register::Xmm10 => "%xmm10".to_string(),
+            Register::Xmm11 => "%xmm11".to_string(),
+            Register::Xmm12 => "%xmm12".to_string(),
+            Register::Xmm13 => "%xmm13".to_string(),
+            Register::Xmm14 => "%xmm14".to_string(),
+            Register::Xmm15 => "%xmm15".to_string(),
         },
 
         _ => unreachable!(),
@@ -209,16 +227,16 @@ fn emit_op(file: &mut std::fs::File, instr: Rc<RefCell<Code>>) {
             writeln!(file).unwrap();
         }
 
-        Code::MovSignExt(src, dst, size) => {
-            write!(file, "\tmovsl{}\t", op_suffix(*size)).unwrap();
+        Code::Movsd(src, dst) => {
+            write!(file, "\tmovsd\t").unwrap();
             emit_operand(file, src.clone());
             write!(file, ", ").unwrap();
             emit_operand(file, dst.clone());
             writeln!(file).unwrap();
         }
 
-        Code::MovZeroExt(src, dst, size) => {
-            write!(file, "\tmovl{}\t", op_suffix(*size)).unwrap();
+        Code::MovSignExt(src, dst, size) => {
+            write!(file, "\tmovsl{}\t", op_suffix(*size)).unwrap();
             emit_operand(file, src.clone());
             write!(file, ", ").unwrap();
             emit_operand(file, dst.clone());
@@ -259,6 +277,14 @@ fn emit_op(file: &mut std::fs::File, instr: Rc<RefCell<Code>>) {
             writeln!(file).unwrap();
         }
 
+        Code::Mulsd(src, dst) => {
+            write!(file, "\tmulsd\t").unwrap();
+            emit_operand(file, src.clone());
+            write!(file, ", ").unwrap();
+            emit_operand(file, dst.clone());
+            writeln!(file).unwrap();
+        }
+
         Code::IDiv(src, size) => {
             write!(file, "\tidiv{}\t", op_suffix(*size)).unwrap();
             emit_operand(file, src.clone());
@@ -271,6 +297,14 @@ fn emit_op(file: &mut std::fs::File, instr: Rc<RefCell<Code>>) {
             writeln!(file).unwrap();
         }
 
+        Code::Divsd(src, dst) => {
+            write!(file, "\tdivsd\t").unwrap();
+            emit_operand(file, src.clone());
+            write!(file, ", ").unwrap();
+            emit_operand(file, dst.clone());
+            writeln!(file).unwrap();
+        }
+
         Code::Add(src, dst, size) => {
             write!(file, "\tadd{}\t", op_suffix(*size)).unwrap();
             emit_operand(file, src.clone());
@@ -279,8 +313,24 @@ fn emit_op(file: &mut std::fs::File, instr: Rc<RefCell<Code>>) {
             writeln!(file).unwrap();
         }
 
+        Code::Addsd(src, dst) => {
+            write!(file, "\taddsd\t").unwrap();
+            emit_operand(file, src.clone());
+            write!(file, ", ").unwrap();
+            emit_operand(file, dst.clone());
+            writeln!(file).unwrap();
+        }
+
         Code::Sub(src, dst, size) => {
             write!(file, "\tsub{}\t", op_suffix(*size)).unwrap();
+            emit_operand(file, src.clone());
+            write!(file, ", ").unwrap();
+            emit_operand(file, dst.clone());
+            writeln!(file).unwrap();
+        }
+
+        Code::Subsd(src, dst) => {
+            write!(file, "\tsubsd\t").unwrap();
             emit_operand(file, src.clone());
             write!(file, ", ").unwrap();
             emit_operand(file, dst.clone());
@@ -335,6 +385,29 @@ fn emit_op(file: &mut std::fs::File, instr: Rc<RefCell<Code>>) {
             writeln!(file).unwrap();
         }
 
+        Code::Xorpd(src, dst) => {
+            write!(file, "\txorpd\t").unwrap();
+            emit_operand(file, src.clone());
+            write!(file, ", ").unwrap();
+            emit_operand(file, dst.clone());
+            writeln!(file).unwrap();
+        }
+
+        Code::Cvttsd2si(src, dst, size) => {
+            write!(file, "\tcvttsd2si{}\t", op_suffix(*size)).unwrap();
+            emit_operand(file, src.clone());
+            write!(file, ", ").unwrap();
+            emit_operand(file, dst.clone());
+            writeln!(file).unwrap();
+        }
+        Code::Cvtsi2sd(src, dst, size) => {
+            write!(file, "\tcvtsi2sd{}\t", op_suffix(*size)).unwrap();
+            emit_operand(file, src.clone());
+            write!(file, ", ").unwrap();
+            emit_operand(file, dst.clone());
+            writeln!(file).unwrap();
+        }
+
         Code::Cdq(size) => {
             if *size == 8 {
                 writeln!(file, "\tcqo").unwrap();
@@ -357,8 +430,30 @@ fn emit_op(file: &mut std::fs::File, instr: Rc<RefCell<Code>>) {
             writeln!(file).unwrap();
         }
 
+        Code::Comisd(src, dst) => {
+            write!(file, "\tucomisd\t").unwrap();
+            emit_operand(file, src.clone());
+            write!(file, ", ").unwrap();
+            emit_operand(file, dst.clone());
+            writeln!(file).unwrap();
+        }
+
+        Code::Test(src, dst) => {
+            write!(file, "\ttest\t").unwrap();
+            emit_operand(file, src.clone());
+            write!(file, ", ").unwrap();
+            emit_operand(file, dst.clone());
+            writeln!(file).unwrap();
+        }
+
         Code::Jmp(label) => {
             write!(file, "\tjmp\t").unwrap();
+            emit_operand(file, label.clone());
+            writeln!(file).unwrap();
+        }
+
+        Code::JmpNotZero(label) => {
+            write!(file, "\tjnz\t").unwrap();
             emit_operand(file, label.clone());
             writeln!(file).unwrap();
         }
@@ -407,6 +502,13 @@ fn emit_op(file: &mut std::fs::File, instr: Rc<RefCell<Code>>) {
             }
 
             match &*init.borrow() {
+                Code::InitDouble(value) => {
+                    writeln!(file, "\t.data").unwrap();
+                    writeln!(file, "\t.align 16").unwrap();
+                    writeln!(file, "{}:", name).unwrap();
+                    writeln!(file, "\t.quad {}", value.to_bits() as u64)
+                        .unwrap();
+                }
                 Code::InitInteger {
                     signed,
                     size,
@@ -442,6 +544,13 @@ fn emit_op(file: &mut std::fs::File, instr: Rc<RefCell<Code>>) {
                 _ => unreachable!(),
             }
 
+            writeln!(file).unwrap();
+        }
+        Code::RoData { name, bits } => {
+            writeln!(file, "\t.section .rodata").unwrap();
+            writeln!(file, "\t.align 8").unwrap();
+            writeln!(file, "{}:", name).unwrap();
+            writeln!(file, "\t.quad 0x{:016x}", bits).unwrap();
             writeln!(file).unwrap();
         }
         _ => {

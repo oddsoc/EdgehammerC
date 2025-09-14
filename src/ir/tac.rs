@@ -67,8 +67,24 @@ pub enum Tac {
         ty: TypeRef,
         value: u64,
     },
+    Double(f64),
     Var(TypeRef, usize),
     StaticVar(TypeRef, String, bool, TacRef),
+    DoubleToInt {
+        ty: TypeRef,
+        src: TacRef,
+        dst: TacRef,
+    },
+    DoubleToUlong {
+        ty: TypeRef,
+        src: TacRef,
+        dst: TacRef,
+    },
+    IntToDouble {
+        ty: TypeRef,
+        src: TacRef,
+        dst: TacRef,
+    },
     SignExt {
         ty: TypeRef,
         src: TacRef,
@@ -129,13 +145,13 @@ pub enum Tac {
         rhs: TacRef,
         dst: TacRef,
     },
-    LShift {
+    LeftShift {
         ty: TypeRef,
         lhs: TacRef,
         rhs: TacRef,
         dst: TacRef,
     },
-    RShift {
+    RightShift {
         ty: TypeRef,
         lhs: TacRef,
         rhs: TacRef,
@@ -171,7 +187,7 @@ pub enum Tac {
         rhs: TacRef,
         dst: TacRef,
     },
-    LessThan {
+    Less {
         ty: TypeRef,
         lhs: TacRef,
         rhs: TacRef,
@@ -183,7 +199,7 @@ pub enum Tac {
         rhs: TacRef,
         dst: TacRef,
     },
-    GreaterThan {
+    Greater {
         ty: TypeRef,
         lhs: TacRef,
         rhs: TacRef,
@@ -214,12 +230,29 @@ pub enum Tac {
     Label(usize),
     FunctionRef(String, bool),
     StaticVarRef(TypeRef, String),
-    Return(TacRef),
+    Return(TypeRef, TacRef),
+    RoData(TypeRef, String, u64),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct Fp64Bits(u64);
+
+impl From<f64> for Fp64Bits {
+    fn from(f: f64) -> Self {
+        Self(f.to_bits())
+    }
+}
+
+impl From<Fp64Bits> for f64 {
+    fn from(bits: Fp64Bits) -> Self {
+        f64::from_bits(bits.0)
+    }
 }
 
 pub struct TacGenerator {
     label_idx: usize,
     label_map: HashMap<String, usize>,
+    fp_consts: HashMap<Fp64Bits, usize>,
     tac_code: Vec<TacRef>,
 }
 
@@ -230,6 +263,7 @@ impl IrGenerator for TacGenerator {
         Self {
             label_idx: 0,
             label_map: HashMap::new(),
+            fp_consts: HashMap::new(),
             tac_code: Vec::new(),
         }
     }
@@ -254,11 +288,13 @@ impl TacGenerator {
         Self {
             label_idx: parent.label_idx,
             label_map: HashMap::new(),
+            fp_consts: parent.fp_consts.clone(),
             tac_code: Vec::new(),
         }
     }
 
     pub fn join(&mut self, child: &TacGenerator) {
+        self.fp_consts.extend(child.fp_consts.clone());
         self.label_idx = child.label_idx;
     }
 
@@ -268,39 +304,55 @@ impl TacGenerator {
         idx
     }
 
-    fn add_named_label(&mut self, name: &str) -> Option<usize> {
+    fn const_double(&mut self, value: f64) -> TacRef {
+        let key: Fp64Bits = value.into();
+        let idx: usize;
+
+        if !self.fp_consts.contains_key(&key) {
+            idx = self.incr_label_idx();
+            self.fp_consts.insert(key, idx);
+        } else {
+            idx = *self.fp_consts.get(&key).unwrap();
+        }
+
+        let name = format!(".L{idx}");
+        new_node!(StaticVarRef(double_type(), name.clone()))
+    }
+
+    fn named_label(&mut self, name: &str) -> TacRef {
         if !self.label_map.contains_key(name) {
             let idx = self.incr_label_idx();
             self.label_map.insert(name.to_string(), idx);
         }
-        self.label_map.get(name).cloned()
+        new_node!(Label(*self.label_map.get(name).unwrap()))
     }
 
-    fn add_continue_label(&mut self, scope: &ScopeRef) -> Option<usize> {
+    fn label(&mut self) -> TacRef {
+        let idx = self.incr_label_idx();
+        new_node!(Label(idx))
+    }
+
+    fn continue_label(&mut self, scope: &ScopeRef) -> TacRef {
         let loop_scope = upto(scope.clone(), ScopeKind::Loop).unwrap();
         let id = loop_scope.borrow().id;
         let label = format!(".continue.{}", id);
-        self.add_named_label(&label)
+        self.named_label(&label)
     }
 
-    fn add_break_label(&mut self, scope: &ScopeRef) -> Option<usize> {
+    fn break_label(&mut self, scope: &ScopeRef) -> TacRef {
         let loop_or_switch =
             upto_any(scope.clone(), &[ScopeKind::Loop, ScopeKind::Switch])
                 .unwrap();
         let id = loop_or_switch.borrow().id;
         let label = format!(".break.{}", id);
-        self.add_named_label(&label)
+        self.named_label(&label)
     }
 
-    fn add_case_label(
-        &mut self,
-        scope: &ScopeRef,
-        case_idx: usize,
-    ) -> Option<usize> {
+    fn case_label(&mut self, scope: &ScopeRef, case_idx: usize) -> TacRef {
         let switch_scope = upto(scope.clone(), ScopeKind::Switch).unwrap();
         let id = switch_scope.borrow().id;
         let label = format!(".case.{}.{}", case_idx, id);
-        self.add_named_label(&label)
+        self.named_label(&label)
     }
 
     fn tmp_var(&mut self, ty: TypeRef, scope: &ScopeRef) -> TacRef {
@@ -351,13 +403,19 @@ impl TacGenerator {
             dst: tmp.clone()
         }));
 
+        let one = if is_double_type(ty) {
+            self.const_double(1.0)
+        } else {
+            new_node!(Integer {
+                ty: ty.clone(),
+                value: 1
+            })
+        };
+
         if incr {
             self.emit(new_node!(Add {
                 ty: ty.clone(),
-                lhs: new_node!(Integer {
-                    ty: ty.clone(),
-                    value: 1
-                }),
+                lhs: one.clone(),
                 rhs: tmp.clone(),
                 dst: dst.clone()
             }));
@@ -365,10 +423,7 @@ impl TacGenerator {
             self.emit(new_node!(Sub {
                 ty: ty.clone(),
                 lhs: tmp.clone(),
-                rhs: new_node!(Integer {
-                    ty: ty.clone(),
-                    value: 1
-                }),
+                rhs: one.clone(),
                 dst: dst.clone()
             }));
         }
@@ -389,8 +444,8 @@ impl TacGenerator {
         left: &AstRef,
         right: &AstRef,
     ) -> TacRef {
-        let false_label = new_node!(Label(self.incr_label_idx()));
-        let end_label = new_node!(Label(self.incr_label_idx()));
+        let false_label = self.label();
+        let end_label = self.label();
         let x = self.expr(left.clone());
         self.emit(new_node!(JumpOnZero {
             ty: ty.clone(),
@@ -433,8 +488,8 @@ impl TacGenerator {
         left: &AstRef,
         right: &AstRef,
     ) -> TacRef {
-        let true_label = new_node!(Label(self.incr_label_idx()));
-        let end_label = new_node!(Label(self.incr_label_idx()));
+        let true_label = self.label();
+        let end_label = self.label();
         let x = self.expr(left.clone());
         self.emit(new_node!(JumpOnNotZero {
             ty: ty.clone(),
@@ -496,10 +551,10 @@ impl TacGenerator {
         middle: &AstRef,
         right: &AstRef,
     ) -> TacRef {
-        let e2_label = new_node!(Label(self.incr_label_idx()));
+        let e2_label = self.label();
         let c = self.expr(left.clone());
         self.emit(new_node!(JumpOnZero {
-            ty: ty.clone(),
+            ty: left.borrow().ty.clone(),
             expr: c,
             label: e2_label.clone()
         }));
@@ -510,7 +565,7 @@ impl TacGenerator {
             src: e1.clone(),
             dst: res.clone()
         }));
-        let end_label = new_node!(Label(self.incr_label_idx()));
+        let end_label = self.label();
         self.emit(new_node!(Jump(end_label.clone())));
         self.emit(e2_label.clone());
         let e2 = self.expr(right.clone());
@@ -606,7 +661,7 @@ impl TacGenerator {
     ) -> TacRef {
         let (lhs, rhs, dst) = self.binop(&node, &left, &right);
 
-        self.emit(new_node!(LShift {
+        self.emit(new_node!(LeftShift {
             ty: node.ty.clone(),
             lhs: lhs,
             rhs: rhs,
@@ -624,7 +679,7 @@ impl TacGenerator {
     ) -> TacRef {
         let (lhs, rhs, dst) = self.binop(&node, &left, &right);
 
-        self.emit(new_node!(RShift {
+        self.emit(new_node!(RightShift {
             ty: node.ty.clone(),
             lhs: lhs,
             rhs: rhs,
@@ -702,7 +757,7 @@ impl TacGenerator {
     fn less(&mut self, node: &Ast, left: &AstRef, right: &AstRef) -> TacRef {
         let (lhs, rhs, dst) = self.binop(&node, &left, &right);
 
-        self.emit(new_node!(LessThan {
+        self.emit(new_node!(Less {
             ty: node.ty.clone(),
             lhs: lhs,
             rhs: rhs,
@@ -733,7 +788,7 @@ impl TacGenerator {
     fn greater(&mut self, node: &Ast, left: &AstRef, right: &AstRef) -> TacRef {
         let (lhs, rhs, dst) = self.binop(&node, &left, &right);
 
-        self.emit(new_node!(GreaterThan {
+        self.emit(new_node!(Greater {
             ty: node.ty.clone(),
             lhs: lhs,
             rhs: rhs,
@@ -812,6 +867,195 @@ impl TacGenerator {
         dst
     }
 
+    fn cast_double_to_ulong(
+        &mut self,
+        node: &Ast,
+        src: TacRef,
+        dst: TacRef,
+        scope: &ScopeRef,
+    ) {
+        let out_of_range = self.label();
+        let end = self.label();
+        let upper_bound = self.const_double((i64::MAX as u64 + 1) as f64);
+
+        let tmp0 = self.tmp_var(node.ty.clone(), scope);
+        self.emit(new_node!(GreaterOrEq {
+            ty: node.ty.clone(),
+            lhs: src.clone(),
+            rhs: upper_bound.clone(),
+            dst: tmp0.clone()
+        }));
+
+        self.emit(new_node!(JumpOnNotZero {
+            ty: node.ty.clone(),
+            expr: tmp0.clone(),
+            label: out_of_range.clone()
+        }));
+
+        self.emit(new_node!(DoubleToUlong {
+            ty: node.ty.clone(),
+            src: src.clone(),
+            dst: dst.clone()
+        }));
+        self.emit(new_node!(Jump(end.clone())));
+
+        self.emit(out_of_range.clone());
+        let tmp1 = self.tmp_var(node.ty.clone(), scope);
+        self.emit(new_node!(Sub {
+            ty: node.ty.clone(),
+            lhs: src.clone(),
+            rhs: upper_bound.clone(),
+            dst: tmp1.clone()
+        }));
+        let tmp2 = self.tmp_var(node.ty.clone(), scope);
+        self.emit(new_node!(DoubleToUlong {
+            ty: node.ty.clone(),
+            src: tmp1.clone(),
+            dst: tmp2.clone()
+        }));
+        let tmp3 = self.tmp_var(node.ty.clone(), scope);
+        self.emit(new_node!(Add {
+            ty: node.ty.clone(),
+            lhs: tmp2.clone(),
+            rhs: new_node!(Integer {
+                ty: node.ty.clone(),
+                value: 9223372036854775808
+            }),
+            dst: tmp3.clone()
+        }));
+        self.emit(new_node!(Copy {
+            ty: node.ty.clone(),
+            src: tmp3.clone(),
+            dst: dst.clone()
+        }));
+        self.emit(end.clone());
+    }
+
+    fn cast_ulong_to_double(
+        &mut self,
+        node: &Ast,
+        src: TacRef,
+        dst: TacRef,
+        scope: &ScopeRef,
+    ) {
+        let out_of_range = self.label();
+        let end = self.label();
+
+        let zero = new_node!(Integer {
+            ty: long_type(false),
+            value: 0
+        });
+        let tmp0 = self.tmp_var(int_type(true), scope);
+        self.emit(new_node!(Less {
+            ty: long_type(true),
+            lhs: src.clone(),
+            rhs: zero.clone(),
+            dst: tmp0.clone()
+        }));
+
+        self.emit(new_node!(JumpOnNotZero {
+            ty: long_type(true),
+            expr: tmp0.clone(),
+            label: out_of_range.clone()
+        }));
+
+        self.emit(new_node!(IntToDouble {
+            ty: node.ty.clone(),
+            src: src.clone(),
+            dst: dst.clone()
+        }));
+        self.emit(new_node!(Jump(end.clone())));
+
+        self.emit(out_of_range.clone());
+
+        let tmp1 = self.tmp_var(long_type(false), scope);
+
+        self.emit(new_node!(Copy {
+            ty: long_type(false),
+            src: src.clone(),
+            dst: tmp1.clone()
+        }));
+
+        let tmp2 = self.tmp_var(long_type(false), scope);
+        self.emit(new_node!(Copy {
+            ty: long_type(false),
+            src: tmp1.clone(),
+            dst: tmp2.clone()
+        }));
+        let tmp2_shr = self.tmp_var(node.ty.clone(), scope);
+        self.emit(new_node!(RightShift {
+            ty: long_type(false),
+            lhs: tmp2.clone(),
+            rhs: new_node!(Integer {
+                ty: long_type(false),
+                value: 1
+            }),
+            dst: tmp2_shr.clone()
+        }));
+
+        let tmp3 = self.tmp_var(long_type(false), scope);
+        self.emit(new_node!(And {
+            ty: long_type(false),
+            lhs: tmp1.clone(),
+            rhs: new_node!(Integer {
+                ty: long_type(false),
+                value: 1
+            }),
+            dst: tmp3.clone()
+        }));
+
+        let tmp4 = self.tmp_var(long_type(false), scope);
+        self.emit(new_node!(Or {
+            ty: long_type(false),
+            lhs: tmp2_shr.clone(),
+            rhs: tmp3.clone(),
+            dst: tmp4.clone()
+        }));
+
+        let tmp5 = self.tmp_var(node.ty.clone(), scope);
+        self.emit(new_node!(IntToDouble {
+            ty: node.ty.clone(),
+            src: tmp4.clone(),
+            dst: tmp5.clone()
+        }));
+
+        let tmp6 = self.tmp_var(node.ty.clone(), scope);
+        self.emit(new_node!(Add {
+            ty: node.ty.clone(),
+            lhs: tmp5.clone(),
+            rhs: tmp5.clone(),
+            dst: tmp6.clone()
+        }));
+
+        self.emit(new_node!(Copy {
+            ty: node.ty.clone(),
+            src: tmp6.clone(),
+            dst: dst.clone()
+        }));
+
+        self.emit(end.clone());
+    }
+
+    fn cast_double_to_uint(
+        &mut self,
+        node: &Ast,
+        src: TacRef,
+        dst: TacRef,
+        scope: &ScopeRef,
+    ) {
+        let tmp = self.tmp_var(long_type(true), scope);
+        self.emit(new_node!(DoubleToInt {
+            ty: long_type(true),
+            src: src,
+            dst: tmp.clone()
+        }));
+        self.emit(new_node!(Truncate {
+            ty: node.ty.clone(),
+            src: tmp,
+            dst: dst
+        }));
+    }
+
     fn cast(&mut self, node: &Ast, expr: &AstRef) -> TacRef {
         let scope = scope_of(expr);
         let src = self.expr(expr.clone());
@@ -825,7 +1069,50 @@ impl TacGenerator {
         let pos = make_space(scope.clone(), ty.size, ty.alignment);
         let dst = new_node!(Var(node.ty.clone(), pos));
 
-        if ty.size == src_ty.borrow().size {
+        let src_is_double = is_double_type(&src_ty);
+        let dst_is_double = is_double_type(&node.ty);
+        let src_is_int = is_int_type(&src_ty);
+        let dst_is_int = is_int_type(&node.ty);
+
+        if src_is_double && dst_is_int {
+            if is_signed(&node.ty) {
+                self.emit(new_node!(DoubleToInt {
+                    ty: node.ty.clone(),
+                    src: src,
+                    dst: dst.clone()
+                }));
+            } else {
+                if ty.size == 8 {
+                    self.cast_double_to_ulong(node, src, dst.clone(), &scope);
+                } else {
+                    self.cast_double_to_uint(node, src, dst.clone(), &scope);
+                }
+            }
+        } else if src_is_int && dst_is_double {
+            if is_signed(&src_ty) {
+                self.emit(new_node!(IntToDouble {
+                    ty: node.ty.clone(),
+                    src: src,
+                    dst: dst.clone()
+                }));
+            } else {
+                if src_ty.borrow().size == 8 {
+                    self.cast_ulong_to_double(node, src, dst.clone(), &scope);
+                } else {
+                    let tmp = self.tmp_var(src_ty.clone(), &scope);
+                    self.emit(new_node!(ZeroExt {
+                        ty: src_ty.clone(),
+                        src: src,
+                        dst: tmp.clone()
+                    }));
+                    self.emit(new_node!(IntToDouble {
+                        ty: node.ty.clone(),
+                        src: tmp,
+                        dst: dst.clone()
+                    }));
+                }
+            }
+        } else if ty.size == src_ty.borrow().size {
             self.emit(new_node!(Copy {
                 ty: node.ty.clone(),
                 src: src,
@@ -867,15 +1154,28 @@ impl TacGenerator {
     }
 
     fn negate(&mut self, node: &Ast, subexpr: &AstRef) -> TacRef {
-        let (src, dst) = self.unop(&node.scope, &node.ty, &subexpr);
+        if is_double_type(&node.ty) {
+            let (src, dst) = self.unop(&node.scope, &node.ty, &subexpr);
+            let minus_zero = self.const_double(-0.0f64);
+            self.emit(new_node!(Xor {
+                ty: node.ty.clone(),
+                lhs: src.clone(),
+                rhs: minus_zero,
+                dst: dst.clone()
+            }));
 
-        self.emit(new_node!(Neg {
-            ty: node.ty.clone(),
-            src: src,
-            dst: dst.clone()
-        }));
+            dst
+        } else {
+            let (src, dst) = self.unop(&node.scope, &node.ty, &subexpr);
 
-        dst
+            self.emit(new_node!(Neg {
+                ty: node.ty.clone(),
+                src: src,
+                dst: dst.clone()
+            }));
+
+            dst
+        }
     }
 
     fn not(&mut self, node: &Ast, subexpr: &AstRef) -> TacRef {
@@ -911,6 +1211,7 @@ impl TacGenerator {
                     value: *val as u64
                 })
             }
+            AstKind::ConstDouble(val) => self.const_double(*val),
             AstKind::Complement { expr: subexpr } => {
                 self.complement(&node, subexpr)
             }
@@ -937,10 +1238,10 @@ impl TacGenerator {
             AstKind::Subtract { left, right } => {
                 self.subtract(&node, left, right)
             }
-            AstKind::LShift { left, right } => {
+            AstKind::LeftShift { left, right } => {
                 self.shift_left(&node, left, right)
             }
-            AstKind::RShift { left, right } => {
+            AstKind::RightShift { left, right } => {
                 self.shift_right(&node, left, right)
             }
             AstKind::And { left, right } => self.and(&node, left, right),
@@ -948,11 +1249,11 @@ impl TacGenerator {
             AstKind::Xor { left, right } => self.xor(&node, left, right),
             AstKind::Equal { left, right } => self.equal(&node, left, right),
             AstKind::NotEq { left, right } => self.not_eq(&node, left, right),
-            AstKind::LessThan { left, right } => self.less(&node, left, right),
+            AstKind::Less { left, right } => self.less(&node, left, right),
             AstKind::LessOrEq { left, right } => {
                 self.less_or_eq(&node, left, right)
             }
-            AstKind::GreaterThan { left, right } => {
+            AstKind::Greater { left, right } => {
                 self.greater(&node, left, right)
             }
             AstKind::GreaterOrEq { left, right } => {
@@ -1027,10 +1328,13 @@ impl TacGenerator {
                 }
             }
 
-            irgen.emit(new_node!(Return(new_node!(Integer {
-                ty: int_type(true),
-                value: 0
-            }))));
+            irgen.emit(new_node!(Return(
+                int_type(true),
+                new_node!(Integer {
+                    ty: int_type(true),
+                    value: 0
+                })
+            )));
 
             self.join(&irgen);
 
@@ -1067,11 +1371,11 @@ impl TacGenerator {
         otherwise: &Option<AstRef>,
     ) {
         let else_label = if otherwise.is_some() {
-            Some(new_node!(Label(self.incr_label_idx())))
+            Some(self.label())
         } else {
             None
         };
-        let end_label = new_node!(Label(self.incr_label_idx()));
+        let end_label = self.label();
         let c = self.expr(cond.clone());
         self.emit(new_node!(JumpOnZero {
             ty: node.ty.clone(),
@@ -1120,9 +1424,8 @@ impl TacGenerator {
                     rhs: e,
                     dst: tmp.clone()
                 }));
-                let label_idx =
-                    self.add_case_label(&c.borrow().scope, c.borrow().id);
-                let case_label = new_node!(Label(label_idx.unwrap()));
+                let case_label =
+                    self.case_label(&c.borrow().scope, c.borrow().id);
                 self.emit(new_node!(JumpOnNotZero {
                     ty: node.ty.clone(),
                     expr: tmp,
@@ -1133,16 +1436,13 @@ impl TacGenerator {
         let mut has_default = false;
         for c in cases.iter() {
             if let AstKind::Default { .. } = &c.borrow().kind {
-                let label_idx =
-                    self.add_case_label(&c.borrow().scope, c.borrow().id);
-                let case_label = new_node!(Label(label_idx.unwrap()));
+                let case_label =
+                    self.case_label(&c.borrow().scope, c.borrow().id);
                 self.emit(new_node!(Jump(case_label)));
                 has_default = true;
             }
         }
-        let break_label = new_node!(Label(
-            self.add_break_label(&body.borrow().scope).unwrap()
-        ));
+        let break_label = self.break_label(&body.borrow().scope);
         if !has_default {
             self.emit(new_node!(Jump(break_label.clone())));
         }
@@ -1153,12 +1453,10 @@ impl TacGenerator {
     }
 
     fn do_while_stmt(&mut self, node: &Ast, cond: &AstRef, body: &AstRef) {
-        let start_label = new_node!(Label(self.incr_label_idx()));
+        let start_label = self.label();
         self.emit(start_label.clone());
         self.stmt_or_decl(body.clone());
-        let continue_label = new_node!(Label(
-            self.add_continue_label(&body.borrow().scope).unwrap()
-        ));
+        let continue_label = self.continue_label(&body.borrow().scope);
         self.emit(continue_label);
         let c = self.expr(cond.clone());
         self.emit(new_node!(JumpOnNotZero {
@@ -1166,21 +1464,15 @@ impl TacGenerator {
             expr: c,
             label: start_label
         }));
-        let break_label = new_node!(Label(
-            self.add_break_label(&body.borrow().scope).unwrap()
-        ));
+        let break_label = self.break_label(&body.borrow().scope);
         self.emit(break_label);
     }
 
     fn while_stmt(&mut self, node: &Ast, cond: &AstRef, body: &AstRef) {
-        let continue_label = new_node!(Label(
-            self.add_continue_label(&body.borrow().scope).unwrap()
-        ));
+        let continue_label = self.continue_label(&body.borrow().scope);
         self.emit(continue_label.clone());
         let c = self.expr(cond.clone());
-        let break_label = new_node!(Label(
-            self.add_break_label(&body.borrow().scope).unwrap()
-        ));
+        let break_label = self.break_label(&body.borrow().scope);
         self.emit(new_node!(JumpOnZero {
             ty: node.ty.clone(),
             expr: c,
@@ -1202,11 +1494,9 @@ impl TacGenerator {
         if init.is_some() {
             self.stmt_or_decl(init.as_ref().unwrap().clone());
         }
-        let start_label = new_node!(Label(self.incr_label_idx()));
+        let start_label = self.label();
         self.emit(start_label.clone());
-        let break_label = new_node!(Label(
-            self.add_break_label(&body.borrow().scope).unwrap()
-        ));
+        let break_label = self.break_label(&body.borrow().scope);
         if cond.is_some() {
             let c = self.expr(cond.as_ref().unwrap().clone());
             self.emit(new_node!(JumpOnZero {
@@ -1216,9 +1506,7 @@ impl TacGenerator {
             }));
         }
         self.stmt_or_decl(body.clone());
-        let continue_label = new_node!(Label(
-            self.add_continue_label(&body.borrow().scope).unwrap()
-        ));
+        let continue_label = self.continue_label(&body.borrow().scope);
         self.emit(continue_label.clone());
         if post.is_some() {
             self.stmt_or_decl(post.as_ref().unwrap().clone());
@@ -1227,46 +1515,42 @@ impl TacGenerator {
         self.emit(break_label);
     }
 
-    fn return_stmt(&mut self, expr: &AstRef) {
+    fn return_stmt(&mut self, ty: &TypeRef, expr: &AstRef) {
         let e = self.expr(expr.clone());
-        self.emit(new_node!(Return(e)));
+        self.emit(new_node!(Return(ty.clone(), e)));
     }
 
     fn goto_stmt(&mut self, label: &str) {
-        let idx = self.add_named_label(label);
-        let l = new_node!(Label(idx.unwrap()));
-        self.emit(new_node!(Jump(l.clone())));
+        let label = self.named_label(label);
+        self.emit(new_node!(Jump(label.clone())));
     }
 
     fn labelled_stmt(&mut self, name: &str, stmt: &AstRef) {
-        let idx = self.add_named_label(name);
-        let l = new_node!(Label(idx.unwrap()));
-        self.emit(l);
+        let label = self.named_label(name);
+        self.emit(label);
         self.stmt_or_decl(stmt.clone());
     }
 
     fn case_stmt(&mut self, node: &Ast, stmt: &AstRef) {
-        let label_idx = self.add_case_label(&node.scope, node.id);
-        self.emit(new_node!(Label(label_idx.unwrap())));
+        let label = self.case_label(&node.scope, node.id);
+        self.emit(label);
         self.stmt_or_decl(stmt.clone());
     }
 
     fn default_stmt(&mut self, node: &Ast, stmt: &AstRef) {
-        let label_idx = self.add_case_label(&node.scope, node.id);
-        self.emit(new_node!(Label(label_idx.unwrap())));
+        let label = self.case_label(&node.scope, node.id);
+        self.emit(label);
         self.stmt_or_decl(stmt.clone());
     }
 
     fn break_stmt(&mut self, node: &Ast) {
-        let idx = self.add_break_label(&node.scope);
-        let l = new_node!(Label(idx.unwrap()));
-        self.emit(new_node!(Jump(l.clone())));
+        let label = self.break_label(&node.scope);
+        self.emit(new_node!(Jump(label.clone())));
     }
 
     fn continue_stmt(&mut self, node: &Ast) {
-        let idx = self.add_continue_label(&node.scope);
-        let l = new_node!(Label(idx.unwrap()));
-        self.emit(new_node!(Jump(l.clone())));
+        let label = self.continue_label(&node.scope);
+        self.emit(new_node!(Jump(label.clone())));
     }
 
     fn variable(
@@ -1324,7 +1608,7 @@ impl TacGenerator {
                 post,
                 body,
             } => self.for_stmt(&node, init, cond, post, body),
-            AstKind::Return { expr, .. } => self.return_stmt(expr),
+            AstKind::Return { expr, .. } => self.return_stmt(&node.ty, expr),
             AstKind::GoTo { label } => self.goto_stmt(label),
             AstKind::Label { name, stmt } => self.labelled_stmt(name, stmt),
             AstKind::Case { stmt, .. } => self.case_stmt(&node, stmt),
@@ -1356,49 +1640,75 @@ impl TacGenerator {
     }
 
     fn static_initializer(&mut self, ty: &TypeRef, init: &AstRef) -> TacRef {
-        if let AstKind::StaticInitializer(expr) = &init.borrow().kind {
-            match &expr.borrow().kind {
-                AstKind::ConstInt(value) => {
-                    new_node!(StaticInitializer(
-                        ty.clone(),
-                        new_node!(Integer {
-                            ty: ty.clone(),
-                            value: *value as u64
-                        })
-                    ))
-                }
-                AstKind::ConstLong(value) => {
-                    new_node!(StaticInitializer(
-                        ty.clone(),
-                        new_node!(Integer {
-                            ty: ty.clone(),
-                            value: *value as u64
-                        })
-                    ))
-                }
-                AstKind::ConstUnsignedInt(value) => {
-                    new_node!(StaticInitializer(
-                        ty.clone(),
-                        new_node!(Integer {
-                            ty: ty.clone(),
-                            value: *value as u64
-                        })
-                    ))
-                }
-                AstKind::ConstUnsignedLong(value) => {
-                    new_node!(StaticInitializer(
-                        ty.clone(),
-                        new_node!(Integer {
-                            ty: ty.clone(),
-                            value: *value as u64
-                        })
-                    ))
-                }
-                _ => unreachable!(),
+        let value: u64;
+
+        match &init.borrow().kind {
+            AstKind::StaticInitializer(expr) => {
+                return self.static_initializer(ty, expr);
             }
-        } else {
-            unreachable!()
+            AstKind::Cast { expr, .. } => {
+                return self.static_initializer(ty, expr);
+            }
+            AstKind::ConstInt(v) => {
+                if is_double_type(ty) {
+                    value = ((*v as u64) as f64).to_bits() as u64;
+                } else {
+                    value = *v as u64;
+                }
+            }
+            AstKind::ConstLong(v) => {
+                if is_double_type(ty) {
+                    value = ((*v as u64) as f64).to_bits() as u64;
+                } else {
+                    value = *v as u64;
+                }
+            }
+            AstKind::ConstUnsignedInt(v) => {
+                if is_double_type(ty) {
+                    value = ((*v as u64) as f64).to_bits() as u64;
+                } else {
+                    value = *v as u64;
+                }
+            }
+            AstKind::ConstUnsignedLong(v) => {
+                if is_double_type(ty) {
+                    value = ((*v as u64) as f64).to_bits() as u64;
+                } else {
+                    value = *v as u64;
+                }
+            }
+            AstKind::ConstDouble(v) => {
+                if is_double_type(ty) {
+                    value = v.to_bits() as u64;
+                } else if is_signed(ty) {
+                    if size_of(ty) == 8 {
+                        value = *v as i64 as u64;
+                    } else {
+                        value = *v as i32 as u64;
+                    }
+                } else if size_of(ty) == 8 {
+                    value = *v as u64;
+                } else {
+                    value = *v as u32 as u64;
+                }
+            }
+            _ => {
+                println!("Cannot handle: {:#?}", init);
+                unreachable!()
+            }
         }
+
+        new_node!(StaticInitializer(
+            ty.clone(),
+            if is_double_type(ty) {
+                new_node!(Double(f64::from_bits(value)))
+            } else {
+                new_node!(Integer {
+                    ty: ty.clone(),
+                    value: value
+                })
+            }
+        ))
     }
 
     fn symbol(&mut self, sym: SymRef, name: &str) -> Option<TacRef> {
@@ -1451,6 +1761,10 @@ impl TacGenerator {
         None
     }
 
+    fn rodata(&self, ty: TypeRef, name: &str, bits: u64) -> TacRef {
+        new_node!(RoData(ty, name.to_string(), bits))
+    }
+
     fn symbols(&mut self, scope: ScopeRef) -> Vec<TacRef> {
         assert!(!has_parent(&scope));
         let externs = get_externs(&scope);
@@ -1470,6 +1784,11 @@ impl TacGenerator {
                     tac_vec.push(tac);
                 }
             }
+        }
+
+        for (bits, idx) in &self.fp_consts {
+            let name = format!(".L{}", idx);
+            tac_vec.push(self.rodata(double_type(), &name, bits.0));
         }
 
         tac_vec

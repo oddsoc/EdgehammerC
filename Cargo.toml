@@ -7,4 +7,34 @@ edition = "2024"
 name = "ehc"
 path = "src/main.rs"
 
+[lib]
+name = "ehc" 
+path = "src/lib.rs"
+
+[features]
+simd = []
+
+[profile.dev]
+opt-level = 0       
+debug = true        
+overflow-checks = true
+
+[profile.release]
+opt-level = 3       
+debug = false       
+lto = true          
+
+[profile.bench]
+opt-level = 3
+debug = false
+lto = true
+
 [dependencies]
+unicode-ident = "1.0.19"
+
+[dev-dependencies]
+criterion = { version = "0.7.0", features = ["html_reports"] }
+
+[[bench]]
+name = "tokeniser"
+harness = false

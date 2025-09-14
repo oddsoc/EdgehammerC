@@ -24,27 +24,33 @@
 use std::rc::Rc;
 
 use crate::ast::*;
-use crate::lexer::Lexer;
-use crate::lexer::Token;
-use crate::lexer::TokenKind;
+use crate::lexing::{Token, TokenTag as Tag, Tokeniser};
 use crate::scope;
 use crate::types::*;
 use scope::*;
 
 macro_rules! accept {
-    ($parser:expr, $kind:path) => {
-        if matches!($parser.next.as_ref().unwrap().kind, $kind) {
-            $parser.advance();
-            true
+    ($parser:expr, $tag:path) => {
+        if let Some(token) = &$parser.tokens[1] {
+            if matches!(token.tag, $tag) {
+                $parser.advance()?;
+                true
+            } else {
+                false
+            }
         } else {
             false
         }
     };
 
-    ($parser:expr, $kind:path, $_:tt) => {
-        if matches!($parser.next.as_ref().unwrap().kind, $kind(_)) {
-            $parser.advance();
-            true
+    ($parser:expr, $tag:path, $_:tt) => {
+        if let Some(token) = &$parser.tokens[1] {
+            if matches!(token.tag, $tag(_)) {
+                $parser.advance()?;
+                true
+            } else {
+                false
+            }
         } else {
             false
         }
@@ -52,66 +58,124 @@ macro_rules! accept {
 }
 
 macro_rules! expect {
-    ($parser:expr, $kind:path) => {
-        if !matches!($parser.next.as_ref().unwrap().kind, $kind) {
+    ($parser:expr, $tag:path) => {
+        if let Some(token) = &$parser.tokens[1] {
+            if !matches!(token.tag, $tag) {
+                let msg = format!(
+                    "expected {:?} but got {:?}",
+                    stringify!($tag),
+                    token.tag
+                );
+                return Err(msg);
+            } else {
+                $parser.advance()?;
+            }
+        } else {
             let msg = format!(
-                "expected {:?}, but got {:?}",
-                stringify!($kind),
-                $parser.next.as_ref().unwrap().kind
+                "expected {:?} but reached end of file",
+                stringify!($tag)
             );
             return Err(msg);
-        } else {
-            $parser.advance();
         }
     };
 
-    ($parser:expr, $kind:path, $_:tt) => {
-        if !matches!($parser.next.as_ref().unwrap().kind, $kind(_)) {
+    ($parser:expr, $tag:path, $_:tt) => {
+        if let Some(token) = &$parser.tokens[1] {
+            if !matches!(token.tag, $tag(_)) {
+                let msg = format!(
+                    "expected {:?} but got {:?}",
+                    stringify!($tag),
+                    token.tag
+                );
+                return Err(msg);
+            } else {
+                $parser.advance()?;
+            }
+        } else {
             let msg = format!(
-                "expected {:?}, but got {:?}",
-                stringify!($kind),
-                $parser.next.as_ref().unwrap().kind
+                "expected {:?} but reached end of file",
+                stringify!($tag)
             );
             return Err(msg);
-        } else {
-            $parser.advance();
         }
     };
 }
 
 macro_rules! peek {
-    ($parser:expr, $kind:path) => {
-        if matches!($parser.next.as_ref().unwrap().kind, $kind) {
-            true
+    ($parser:expr, $tag:path) => {
+        if let Some(token) = &$parser.tokens[1] {
+            if matches!(token.tag, $tag) {
+                true
+            } else {
+                false
+            }
         } else {
             false
         }
     };
 
-    ($parser:expr, $kind:path, $_:tt) => {
-        if matches!($parser.next.as_ref().unwrap().kind, $kind(_)) {
-            true
+    ($parser:expr, $tag:path, $_:tt) => {
+        if let Some(token) = &$parser.tokens[1] {
+            if matches!(token.tag, $tag(_)) {
+                true
+            } else {
+                false
+            }
         } else {
             false
         }
     };
 }
 
-macro_rules! peek_any {
+macro_rules! peek2 {
+    ($parser:expr, $tag:path) => {
+        if let Some(token) = &$parser.tokens[2] {
+            if matches!(token.tag, $tag) {
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    };
+
+    ($parser:expr, $tag:path, $_:tt) => {
+        if let Some(token) = $parser.tokens[2] {
+            if matches!(token.tag, $tag(_)) {
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    };
+}
+
+macro_rules! peek_tag {
     ($parser:expr) => {
-        $parser.next.as_ref().unwrap().kind.clone()
+        if let Some(token) = &$parser.tokens[1] {
+            token.tag.clone()
+        } else {
+            Tag::End
+        }
     };
 }
 
 macro_rules! yank {
-    ($parser:expr, $kind:path) => {
-        match &$parser.last.as_ref().unwrap().kind {
-            $kind(data) => data.clone(),
-            _ => panic!(
-                "Expected {:?}, but found {:?}",
-                stringify!($kind),
-                $parser.last.as_ref().unwrap().kind
-            ),
+    ($parser:expr, $tag:path) => {
+        if let Some(token) = &$parser.tokens[0] {
+            match &token.tag {
+                $tag(data) => data.clone(),
+                _ => panic!(
+                    "expected {:?} but got {:?}",
+                    stringify!($tag),
+                    token.tag
+                ),
+            }
+        } else {
+            panic!("parser bug");
         }
     };
 }
@@ -131,59 +195,57 @@ macro_rules! new_node {
 }
 
 #[derive(Debug)]
-pub struct Parser {
-    lexer: Lexer,
-    last: Option<Token>,
-    next: Option<Token>,
+pub struct Parser<'buf> {
+    buf: &'buf str,
+    tokeniser: Tokeniser<'buf>,
+    tokens: [Option<Token>; 3],
     nr_nodes: usize,
     scope: ScopeRef,
     cases: Vec<Vec<AstRef>>,
     function: Option<SymRef>,
 }
 
-fn precedence_of(kind: &TokenKind) -> i32 {
-    match kind {
-        TokenKind::Mult | TokenKind::Div | TokenKind::Mod => 50,
-        TokenKind::Plus | TokenKind::Minus => 45,
-        TokenKind::LShift | TokenKind::RShift => 40,
-        TokenKind::LThan
-        | TokenKind::LThanEq
-        | TokenKind::GThan
-        | TokenKind::GThanEq => 35,
-        TokenKind::Eq | TokenKind::NotEq => 30,
-        TokenKind::And => 25,
-        TokenKind::Xor => 20,
-        TokenKind::Or => 15,
-        TokenKind::LAnd => 10,
-        TokenKind::LOr => 5,
-        TokenKind::QMark => 3,
-        TokenKind::Assign
-        | TokenKind::PlusEq
-        | TokenKind::MinusEq
-        | TokenKind::MultEq
-        | TokenKind::DivEq
-        | TokenKind::ModEq
-        | TokenKind::OrEq
-        | TokenKind::AndEq
-        | TokenKind::InvEq => 1,
+fn precedence_of(tag: &Tag) -> i32 {
+    match tag {
+        Tag::Asterisk | Tag::ForwardSlash | Tag::Percent => 50,
+        Tag::Plus | Tag::Minus => 45,
+        Tag::LeftShift | Tag::RightShift => 40,
+        Tag::Less | Tag::LessOrEq | Tag::Greater | Tag::GreaterOrEq => 35,
+        Tag::Eq | Tag::NotEq => 30,
+        Tag::Ampersand => 25,
+        Tag::Caret => 20,
+        Tag::Bar => 15,
+        Tag::LAnd => 10,
+        Tag::LOr => 5,
+        Tag::Question => 3,
+        Tag::Assign
+        | Tag::PlusEq
+        | Tag::MinusEq
+        | Tag::MultEq
+        | Tag::DivideEq
+        | Tag::ModEq
+        | Tag::OrEq
+        | Tag::AndEq
+        | Tag::InvEq => 1,
         _ => 0,
     }
 }
 
-impl Parser {
-    pub fn new(filename: &str) -> Self {
+impl<'buf> Parser<'buf> {
+    pub fn new(buf: &'buf str) -> Result<Self, String> {
         let mut parser = Self {
-            lexer: Lexer::new(filename),
-            last: None,
-            next: None,
+            buf: buf,
+            tokeniser: Tokeniser::new(buf),
+            tokens: [None, None, None],
             nr_nodes: 0,
             scope: crate::scope::new(),
             cases: vec![],
             function: None,
         };
 
-        parser.advance();
-        parser
+        parser.preload()?;
+
+        Ok(parser)
     }
 
     fn next_node_id(&mut self) -> usize {
@@ -192,8 +254,8 @@ impl Parser {
         id
     }
 
-    fn open_scope(&mut self, kind: ScopeKind) {
-        self.scope = scope::open(self.scope.clone(), kind);
+    fn open_scope(&mut self, tag: ScopeKind) {
+        self.scope = scope::open(self.scope.clone(), tag);
     }
 
     fn close_scope(&mut self) {
@@ -214,12 +276,16 @@ impl Parser {
         Ok(prog)
     }
 
+    fn yank(&mut self) -> String {
+        self.tokens[0].as_ref().unwrap().to_string(self.buf)
+    }
+
     fn declaration(&mut self) -> Result<AstRef, String> {
         let (ty_spec, storage_class) = self.decl_spec()?;
-        expect!(self, TokenKind::Identifier, _);
-        let name = yank!(self, TokenKind::Identifier);
+        expect!(self, Tag::Identifier);
+        let name = self.yank();
 
-        if peek!(self, TokenKind::LParen) {
+        if peek!(self, Tag::LeftParen) {
             self.function(ty_spec, storage_class, name)
         } else {
             self.variable_decl(ty_spec, storage_class, name)
@@ -227,10 +293,10 @@ impl Parser {
     }
 
     fn is_storage_class(&mut self) -> bool {
-        peek!(self, TokenKind::Static)
-            || peek!(self, TokenKind::Extern)
-            || peek!(self, TokenKind::Auto)
-            || peek!(self, TokenKind::Register)
+        peek!(self, Tag::Static)
+            || peek!(self, Tag::Extern)
+            || peek!(self, Tag::Auto)
+            || peek!(self, Tag::Register)
     }
 
     fn is_decl_spec(&mut self) -> bool {
@@ -239,49 +305,74 @@ impl Parser {
             || self.is_storage_class()
     }
 
-    fn canonicalise_type_spec(
+    fn normalise_type_spec(
         &mut self,
-        type_specs: &[Token],
+        type_specs: &[String],
     ) -> Result<AstRef, String> {
         let mut is_signed = false;
         let mut is_unsigned = false;
         let mut has_int = false;
         let mut long_count = 0;
+        let mut has_double = false;
 
         for spec in type_specs {
-            match spec.kind {
-                TokenKind::Signed => {
-                    if is_unsigned || is_signed {
+            match spec.as_str() {
+                "signed" => {
+                    if is_unsigned || is_signed || has_double {
                         return Err("invalid type specifier".into());
                     }
                     is_signed = true;
                 }
-                TokenKind::Unsigned => {
-                    if is_signed || is_unsigned {
+                "unsigned" => {
+                    if is_signed || is_unsigned || has_double {
                         return Err("invalid type specifier".into());
                     }
                     is_unsigned = true;
                 }
-                TokenKind::Int => {
-                    if has_int {
+                "int" => {
+                    if has_int || has_double {
                         return Err("invalid type specifier".into());
                     }
                     has_int = true;
                 }
-                TokenKind::Long => {
-                    if long_count >= 2 {
+                "long" => {
+                    if long_count >= 2 || has_double {
                         return Err("invalid type specifier".into());
                     }
                     long_count += 1;
                 }
-                TokenKind::Void => {
+                "double" => {
+                    if has_double {
+                        return Err("invalid type specifier".into());
+                    }
+                    has_double = true;
+                }
+                "void" => {
                     if type_specs.len() > 1 {
                         return Err("invalid type specifier".into());
                     }
                     return Ok(new_node!(self, Void));
                 }
-                _ => unreachable!("unexpected token kind"),
+                _ => unreachable!("unexpected token tag"),
             }
+        }
+
+        if has_double {
+            if is_signed || is_unsigned || has_int {
+                return Err("invalid type specifier".into());
+            }
+
+            let ty = if long_count == 1 {
+                long_double_type()
+            } else if long_count == 0 {
+                double_type()
+            } else {
+                return Err("invalid type specifier".into());
+            };
+
+            let node = new_node!(self, Double);
+            node.borrow_mut().ty = ty;
+            return Ok(node);
         }
 
         if !is_unsigned {
@@ -297,12 +388,11 @@ impl Parser {
 
         let node = new_node!(self, Int);
         node.borrow_mut().ty = ty;
-
         Ok(node)
     }
 
     fn decl_spec(&mut self) -> Result<(AstRef, Option<StorageClass>), String> {
-        let mut type_specs: Vec<Token> = vec![];
+        let mut type_specs: Vec<String> = vec![];
         let mut storage_classes: Vec<StorageClass> = vec![];
 
         loop {
@@ -321,7 +411,7 @@ impl Parser {
             return Err("invalid type specifier".to_string());
         }
 
-        let ty_spec = self.canonicalise_type_spec(&type_specs)?;
+        let ty_spec = self.normalise_type_spec(&type_specs)?;
 
         if storage_classes.len() > 1 {
             return Err("invalid storage class".to_string());
@@ -337,16 +427,16 @@ impl Parser {
     fn parameter_list(&mut self) -> Result<Vec<AstRef>, String> {
         let mut params: Vec<AstRef> = vec![];
         let mut idx = 0;
-        expect!(self, TokenKind::LParen);
+        expect!(self, Tag::LeftParen);
 
-        if !accept!(self, TokenKind::RParen) {
+        if !accept!(self, Tag::RightParen) {
             loop {
                 params.push(self.parameter(idx)?);
 
-                if accept!(self, TokenKind::RParen) {
+                if accept!(self, Tag::RightParen) {
                     break;
                 } else {
-                    expect!(self, TokenKind::Comma);
+                    expect!(self, Tag::Comma);
                 }
                 idx += 1;
             }
@@ -366,7 +456,7 @@ impl Parser {
             }
         }
 
-        if peek!(self, TokenKind::RParen) {
+        if peek!(self, Tag::RightParen) {
             Ok(new_node!(
                 self,
                 Parameter {
@@ -377,8 +467,8 @@ impl Parser {
                 }
             ))
         } else {
-            expect!(self, TokenKind::Identifier, _);
-            let name = yank!(self, TokenKind::Identifier);
+            expect!(self, Tag::Identifier);
+            let name = self.yank();
 
             let sym = add_sym(
                 self.scope.clone(),
@@ -416,7 +506,7 @@ impl Parser {
         self.open_scope(ScopeKind::Function);
         let params = self.parameter_list()?;
 
-        if accept!(self, TokenKind::Semicolon) {
+        if accept!(self, Tag::Semicolon) {
             self.close_scope();
 
             let sym = add_sym(
@@ -492,7 +582,7 @@ impl Parser {
         &self,
         storage_class: Option<StorageClass>,
     ) -> Option<Definition> {
-        if peek!(self, TokenKind::Assign) {
+        if peek!(self, Tag::Assign) {
             Some(Definition::Concrete)
         } else if let Some(StorageClass::Static) = storage_class {
             Some(Definition::Tentative)
@@ -551,13 +641,13 @@ impl Parser {
             None,
         )?;
 
-        let init = if accept!(self, TokenKind::Assign) {
+        let init = if accept!(self, Tag::Assign) {
             Some(self.initializer(&storage_class)?)
         } else {
             None
         };
 
-        expect!(self, TokenKind::Semicolon);
+        expect!(self, Tag::Semicolon);
 
         let var = new_node!(
             self,
@@ -575,12 +665,13 @@ impl Parser {
     }
 
     fn is_type_spec(&self) -> bool {
-        match peek_any!(self) {
-            TokenKind::Unsigned
-            | TokenKind::Signed
-            | TokenKind::Int
-            | TokenKind::Long
-            | TokenKind::Void => true,
+        match peek_tag!(self) {
+            Tag::Unsigned
+            | Tag::Signed
+            | Tag::Int
+            | Tag::Long
+            | Tag::Double
+            | Tag::Void => true,
             _ => false,
         }
     }
@@ -589,30 +680,32 @@ impl Parser {
         false
     }
 
-    fn type_spec(&mut self) -> Result<Token, String> {
-        if accept!(self, TokenKind::Int) {
-            Ok(self.last.clone().unwrap())
-        } else if accept!(self, TokenKind::Long) {
-            Ok(self.last.clone().unwrap())
-        } else if accept!(self, TokenKind::Signed) {
-            Ok(self.last.clone().unwrap())
-        } else if accept!(self, TokenKind::Unsigned) {
-            Ok(self.last.clone().unwrap())
-        } else if accept!(self, TokenKind::Void) {
-            Ok(self.last.clone().unwrap())
+    fn type_spec(&mut self) -> Result<String, String> {
+        if accept!(self, Tag::Int) {
+            Ok("int".to_string())
+        } else if accept!(self, Tag::Long) {
+            Ok("long".to_string())
+        } else if accept!(self, Tag::Signed) {
+            Ok("signed".to_string())
+        } else if accept!(self, Tag::Unsigned) {
+            Ok("unsigned".to_string())
+        } else if accept!(self, Tag::Double) {
+            Ok("double".to_string())
+        } else if accept!(self, Tag::Void) {
+            Ok("void".to_string())
         } else {
             Err("invalid type specifier".to_string())
         }
     }
 
     fn storage_class(&mut self) -> Result<StorageClass, String> {
-        if accept!(self, TokenKind::Static) {
+        if accept!(self, Tag::Static) {
             Ok(StorageClass::Static)
-        } else if accept!(self, TokenKind::Extern) {
+        } else if accept!(self, Tag::Extern) {
             Ok(StorageClass::Extern)
-        } else if accept!(self, TokenKind::Auto) {
+        } else if accept!(self, Tag::Auto) {
             Ok(StorageClass::Auto)
-        } else if accept!(self, TokenKind::Register) {
+        } else if accept!(self, Tag::Register) {
             Ok(StorageClass::Register)
         } else {
             Err("unknown storage class specifier".to_string())
@@ -620,32 +713,32 @@ impl Parser {
     }
 
     fn statement(&mut self) -> Result<AstRef, String> {
-        if peek!(self, TokenKind::LCurly) {
+        if peek!(self, Tag::LeftBrace) {
             self.block()
-        } else if peek!(self, TokenKind::Label, _)
-            || peek!(self, TokenKind::Case)
-            || peek!(self, TokenKind::Default)
+        } else if (peek!(self, Tag::Identifier) && peek2!(self, Tag::Colon))
+            || peek!(self, Tag::Case)
+            || peek!(self, Tag::Default)
         {
             self.labelled_stmt()
-        } else if peek!(self, TokenKind::Return) {
+        } else if peek!(self, Tag::Return) {
             self.return_stmt()
-        } else if peek!(self, TokenKind::If) {
+        } else if peek!(self, Tag::If) {
             self.if_stmt()
-        } else if peek!(self, TokenKind::While) {
+        } else if peek!(self, Tag::While) {
             self.while_stmt()
-        } else if peek!(self, TokenKind::Do) {
+        } else if peek!(self, Tag::Do) {
             self.do_while_stmt()
-        } else if peek!(self, TokenKind::For) {
+        } else if peek!(self, Tag::For) {
             self.for_stmt()
-        } else if peek!(self, TokenKind::Switch) {
+        } else if peek!(self, Tag::Switch) {
             self.switch_stmt()
-        } else if peek!(self, TokenKind::GoTo) {
+        } else if peek!(self, Tag::GoTo) {
             self.goto_stmt()
-        } else if peek!(self, TokenKind::Break) {
+        } else if peek!(self, Tag::Break) {
             self.break_stmt()
-        } else if peek!(self, TokenKind::Continue) {
+        } else if peek!(self, Tag::Continue) {
             self.continue_stmt()
-        } else if accept!(self, TokenKind::Semicolon) {
+        } else if accept!(self, Tag::Semicolon) {
             Ok(new_node!(self, EmptyStmt))
         } else {
             self.expr_stmt()
@@ -653,10 +746,10 @@ impl Parser {
     }
 
     fn while_stmt(&mut self) -> Result<AstRef, String> {
-        expect!(self, TokenKind::While);
-        expect!(self, TokenKind::LParen);
+        expect!(self, Tag::While);
+        expect!(self, Tag::LeftParen);
         let cond = self.expr(0)?;
-        expect!(self, TokenKind::RParen);
+        expect!(self, Tag::RightParen);
         self.open_scope(ScopeKind::Loop);
         let body = self.statement()?;
         self.close_scope();
@@ -671,15 +764,15 @@ impl Parser {
     }
 
     fn do_while_stmt(&mut self) -> Result<AstRef, String> {
-        expect!(self, TokenKind::Do);
+        expect!(self, Tag::Do);
         self.open_scope(ScopeKind::Loop);
         let body = self.statement()?;
         self.close_scope();
-        expect!(self, TokenKind::While);
-        expect!(self, TokenKind::LParen);
+        expect!(self, Tag::While);
+        expect!(self, Tag::LeftParen);
         let cond = self.expr(0)?;
-        expect!(self, TokenKind::RParen);
-        expect!(self, TokenKind::Semicolon);
+        expect!(self, Tag::RightParen);
+        expect!(self, Tag::Semicolon);
 
         Ok(new_node!(
             self,
@@ -693,8 +786,8 @@ impl Parser {
     fn for_init(&mut self) -> Result<AstRef, String> {
         if self.is_decl_spec() {
             let (ty_spec, storage_class) = self.decl_spec()?;
-            expect!(self, TokenKind::Identifier, _);
-            let name = yank!(self, TokenKind::Identifier);
+            expect!(self, Tag::Identifier);
+            let name = self.yank();
 
             if storage_class.is_some() {
                 return Err(format!(
@@ -711,32 +804,32 @@ impl Parser {
                     expr: self.expr(0)?
                 }
             );
-            expect!(self, TokenKind::Semicolon);
+            expect!(self, Tag::Semicolon);
             Ok(init)
         }
     }
 
     fn for_stmt(&mut self) -> Result<AstRef, String> {
-        expect!(self, TokenKind::For);
-        expect!(self, TokenKind::LParen);
+        expect!(self, Tag::For);
+        expect!(self, Tag::LeftParen);
 
         self.open_scope(ScopeKind::Loop);
 
-        let init: Option<AstRef> = if accept!(self, TokenKind::Semicolon) {
+        let init: Option<AstRef> = if accept!(self, Tag::Semicolon) {
             None
         } else {
             Some(self.for_init()?)
         };
 
-        let cond: Option<AstRef> = if accept!(self, TokenKind::Semicolon) {
+        let cond: Option<AstRef> = if accept!(self, Tag::Semicolon) {
             None
         } else {
             let c = Some(self.expr(0)?);
-            expect!(self, TokenKind::Semicolon);
+            expect!(self, Tag::Semicolon);
             c
         };
 
-        let post: Option<AstRef> = if peek!(self, TokenKind::RParen) {
+        let post: Option<AstRef> = if peek!(self, Tag::RightParen) {
             None
         } else {
             Some(new_node!(
@@ -747,7 +840,7 @@ impl Parser {
             ))
         };
 
-        expect!(self, TokenKind::RParen);
+        expect!(self, Tag::RightParen);
 
         let body = self.statement()?;
 
@@ -765,10 +858,10 @@ impl Parser {
     }
 
     fn switch_stmt(&mut self) -> Result<AstRef, String> {
-        expect!(self, TokenKind::Switch);
-        expect!(self, TokenKind::LParen);
+        expect!(self, Tag::Switch);
+        expect!(self, Tag::LeftParen);
         let expr = self.expr(0)?;
-        expect!(self, TokenKind::RParen);
+        expect!(self, Tag::RightParen);
 
         self.cases.push(vec![]);
         self.open_scope(ScopeKind::Switch);
@@ -788,22 +881,23 @@ impl Parser {
     }
 
     fn break_stmt(&mut self) -> Result<AstRef, String> {
-        expect!(self, TokenKind::Break);
-        expect!(self, TokenKind::Semicolon);
+        expect!(self, Tag::Break);
+        expect!(self, Tag::Semicolon);
 
         Ok(new_node!(self, Break { to: None }))
     }
 
     fn continue_stmt(&mut self) -> Result<AstRef, String> {
-        expect!(self, TokenKind::Continue);
-        expect!(self, TokenKind::Semicolon);
+        expect!(self, Tag::Continue);
+        expect!(self, Tag::Semicolon);
 
         Ok(new_node!(self, Continue { to: None }))
     }
 
     fn labelled_stmt(&mut self) -> Result<AstRef, String> {
-        if accept!(self, TokenKind::Label, _) {
-            let label = yank!(self, TokenKind::Label);
+        if accept!(self, Tag::Identifier) {
+            let label = self.yank();
+            expect!(self, Tag::Colon);
             let stmt = self.statement()?;
             let l = add_label(self.scope.clone(), &label, stmt.clone());
 
@@ -818,12 +912,9 @@ impl Parser {
                     stmt: stmt.clone()
                 }
             ))
-        } else if peek!(self, TokenKind::Case) {
-            self.lexer.push_expr();
-            self.advance();
+        } else if accept!(self, Tag::Case) {
             let expr = self.expr(0)?;
-            self.lexer.pop_expr();
-            expect!(self, TokenKind::Colon);
+            expect!(self, Tag::Colon);
             let stmt = self.statement()?;
             let case_stmt = new_node!(
                 self,
@@ -839,8 +930,8 @@ impl Parser {
             }
             Ok(case_stmt)
         } else {
-            expect!(self, TokenKind::Default);
-            expect!(self, TokenKind::Colon);
+            expect!(self, Tag::Default);
+            expect!(self, Tag::Colon);
             let stmt = self.statement()?;
             let dflt_stmt = new_node!(self, Default { stmt: stmt });
             if let Some(cases) = self.cases.last_mut() {
@@ -862,9 +953,9 @@ impl Parser {
         let mut body: Vec<AstRef> = vec![];
         self.open_scope(ScopeKind::Block);
 
-        expect!(self, TokenKind::LCurly);
+        expect!(self, Tag::LeftBrace);
 
-        while !accept!(self, TokenKind::RCurly) {
+        while !accept!(self, Tag::RightBrace) {
             body.push(self.stmt_or_decl()?);
         }
 
@@ -876,9 +967,9 @@ impl Parser {
     fn function_body(&mut self) -> Result<AstRef, String> {
         let mut body: Vec<AstRef> = vec![];
 
-        expect!(self, TokenKind::LCurly);
+        expect!(self, Tag::LeftBrace);
 
-        while !accept!(self, TokenKind::RCurly) {
+        while !accept!(self, Tag::RightBrace) {
             body.push(self.stmt_or_decl()?);
         }
 
@@ -886,12 +977,12 @@ impl Parser {
     }
 
     fn if_stmt(&mut self) -> Result<AstRef, String> {
-        expect!(self, TokenKind::If);
-        expect!(self, TokenKind::LParen);
+        expect!(self, Tag::If);
+        expect!(self, Tag::LeftParen);
         let cond = self.expr(0)?;
-        expect!(self, TokenKind::RParen);
+        expect!(self, Tag::RightParen);
         let then = self.statement()?;
-        let otherwise = if accept!(self, TokenKind::Else) {
+        let otherwise = if accept!(self, Tag::Else) {
             Some(self.statement()?)
         } else {
             None
@@ -908,18 +999,18 @@ impl Parser {
     }
 
     fn goto_stmt(&mut self) -> Result<AstRef, String> {
-        expect!(self, TokenKind::GoTo);
-        expect!(self, TokenKind::Identifier, _);
-        let label = yank!(self, TokenKind::Identifier);
-        expect!(self, TokenKind::Semicolon);
+        expect!(self, Tag::GoTo);
+        expect!(self, Tag::Identifier);
+        let label = self.yank();
+        expect!(self, Tag::Semicolon);
 
         Ok(new_node!(self, GoTo { label: label }))
     }
 
     fn return_stmt(&mut self) -> Result<AstRef, String> {
-        expect!(self, TokenKind::Return);
+        expect!(self, Tag::Return);
         let expr = self.expr(0)?;
-        expect!(self, TokenKind::Semicolon);
+        expect!(self, Tag::Semicolon);
         Ok(new_node!(
             self,
             Return {
@@ -936,7 +1027,7 @@ impl Parser {
                 expr: self.expr(0)?
             }
         );
-        expect!(self, TokenKind::Semicolon);
+        expect!(self, Tag::Semicolon);
         Ok(stmt)
     }
 
@@ -946,7 +1037,7 @@ impl Parser {
         min_prec: i32,
     ) -> Result<AstRef, String> {
         let middle = self.expr(0)?;
-        expect!(self, TokenKind::Colon);
+        expect!(self, Tag::Colon);
         let right = self.expr(min_prec)?;
 
         Ok(new_node!(
@@ -962,14 +1053,14 @@ impl Parser {
     fn argument_list(&mut self) -> Result<Vec<AstRef>, String> {
         let mut args: Vec<AstRef> = vec![];
 
-        if !accept!(self, TokenKind::RParen) {
+        if !accept!(self, Tag::RightParen) {
             loop {
                 args.push(self.expr(0)?);
 
-                if accept!(self, TokenKind::RParen) {
+                if accept!(self, Tag::RightParen) {
                     break;
                 } else {
-                    expect!(self, TokenKind::Comma);
+                    expect!(self, Tag::Comma);
                 }
             }
         }
@@ -990,95 +1081,92 @@ impl Parser {
     }
 
     fn expr(&mut self, min_prec: i32) -> Result<AstRef, String> {
-        self.lexer.push_expr();
         let mut left = self.factor()?;
-        let mut prec = precedence_of(&peek_any!(self));
+        let mut prec = precedence_of(&peek_tag!(self));
 
         while self.peek_binop() && prec >= min_prec {
-            if accept!(self, TokenKind::Assign) {
-                let right = self.expr(precedence_of(&peek_any!(self)))?;
+            if accept!(self, Tag::Assign) {
+                let right = self.expr(precedence_of(&peek_tag!(self)))?;
                 left = self.assignment(left, right)?;
-            } else if accept!(self, TokenKind::PlusEq) {
-                let right = self.expr(precedence_of(&peek_any!(self)))?;
+            } else if accept!(self, Tag::PlusEq) {
+                let right = self.expr(precedence_of(&peek_tag!(self)))?;
                 left = self.plus_eq(left, right)?;
-            } else if accept!(self, TokenKind::MinusEq) {
-                let right = self.expr(precedence_of(&peek_any!(self)))?;
+            } else if accept!(self, Tag::MinusEq) {
+                let right = self.expr(precedence_of(&peek_tag!(self)))?;
                 left = self.minus_eq(left, right)?;
-            } else if accept!(self, TokenKind::MultEq) {
-                let right = self.expr(precedence_of(&peek_any!(self)))?;
+            } else if accept!(self, Tag::MultEq) {
+                let right = self.expr(precedence_of(&peek_tag!(self)))?;
                 left = self.mult_eq(left, right)?;
-            } else if accept!(self, TokenKind::DivEq) {
-                let right = self.expr(precedence_of(&peek_any!(self)))?;
+            } else if accept!(self, Tag::DivideEq) {
+                let right = self.expr(precedence_of(&peek_tag!(self)))?;
                 left = self.div_eq(left, right)?;
-            } else if accept!(self, TokenKind::ModEq) {
-                let right = self.expr(precedence_of(&peek_any!(self)))?;
+            } else if accept!(self, Tag::ModEq) {
+                let right = self.expr(precedence_of(&peek_tag!(self)))?;
                 left = self.mod_eq(left, right)?;
-            } else if accept!(self, TokenKind::AndEq) {
-                let right = self.expr(precedence_of(&peek_any!(self)))?;
+            } else if accept!(self, Tag::AndEq) {
+                let right = self.expr(precedence_of(&peek_tag!(self)))?;
                 left = self.and_eq(left, right)?;
-            } else if accept!(self, TokenKind::OrEq) {
-                let right = self.expr(precedence_of(&peek_any!(self)))?;
+            } else if accept!(self, Tag::OrEq) {
+                let right = self.expr(precedence_of(&peek_tag!(self)))?;
                 left = self.or_eq(left, right)?;
-            } else if accept!(self, TokenKind::XorEq) {
-                let right = self.expr(precedence_of(&peek_any!(self)))?;
+            } else if accept!(self, Tag::XorEq) {
+                let right = self.expr(precedence_of(&peek_tag!(self)))?;
                 left = self.xor_eq(left, right)?;
-            } else if accept!(self, TokenKind::LShiftEq) {
-                let right = self.expr(precedence_of(&peek_any!(self)))?;
+            } else if accept!(self, Tag::LeftShiftEq) {
+                let right = self.expr(precedence_of(&peek_tag!(self)))?;
                 left = self.lshift_eq(left, right)?;
-            } else if accept!(self, TokenKind::RShiftEq) {
-                let right = self.expr(precedence_of(&peek_any!(self)))?;
+            } else if accept!(self, Tag::RightShiftEq) {
+                let right = self.expr(precedence_of(&peek_tag!(self)))?;
                 left = self.rshift_eq(left, right)?;
-            } else if accept!(self, TokenKind::QMark) {
+            } else if accept!(self, Tag::Question) {
                 left = self.conditional(left, prec)?;
             } else {
                 left = self.binop(left, prec + 1)?;
-                prec = precedence_of(&peek_any!(self));
+                prec = precedence_of(&peek_tag!(self));
             }
         }
-
-        self.lexer.pop_expr();
 
         Ok(left)
     }
 
     fn peek_binop(&self) -> bool {
-        match peek_any!(self) {
-            TokenKind::Mult
-            | TokenKind::Div
-            | TokenKind::Mod
-            | TokenKind::Plus
-            | TokenKind::Minus
-            | TokenKind::LShift
-            | TokenKind::RShift
-            | TokenKind::And
-            | TokenKind::Or
-            | TokenKind::Xor
-            | TokenKind::LAnd
-            | TokenKind::LOr
-            | TokenKind::Eq
-            | TokenKind::NotEq
-            | TokenKind::LThan
-            | TokenKind::LThanEq
-            | TokenKind::GThan
-            | TokenKind::GThanEq
-            | TokenKind::PlusEq
-            | TokenKind::MinusEq
-            | TokenKind::MultEq
-            | TokenKind::DivEq
-            | TokenKind::ModEq
-            | TokenKind::AndEq
-            | TokenKind::OrEq
-            | TokenKind::XorEq
-            | TokenKind::LShiftEq
-            | TokenKind::RShiftEq
-            | TokenKind::Assign
-            | TokenKind::QMark => true,
+        match peek_tag!(self) {
+            Tag::Asterisk
+            | Tag::ForwardSlash
+            | Tag::Percent
+            | Tag::Plus
+            | Tag::Minus
+            | Tag::LeftShift
+            | Tag::RightShift
+            | Tag::Ampersand
+            | Tag::Bar
+            | Tag::Caret
+            | Tag::LAnd
+            | Tag::LOr
+            | Tag::Eq
+            | Tag::NotEq
+            | Tag::Less
+            | Tag::LessOrEq
+            | Tag::Greater
+            | Tag::GreaterOrEq
+            | Tag::PlusEq
+            | Tag::MinusEq
+            | Tag::MultEq
+            | Tag::DivideEq
+            | Tag::ModEq
+            | Tag::AndEq
+            | Tag::OrEq
+            | Tag::XorEq
+            | Tag::LeftShiftEq
+            | Tag::RightShiftEq
+            | Tag::Assign
+            | Tag::Question => true,
             _ => false,
         }
     }
 
     fn binop(&mut self, left: AstRef, prec: i32) -> Result<AstRef, String> {
-        if accept!(self, TokenKind::Mult) {
+        if accept!(self, Tag::Asterisk) {
             let right = self.expr(prec + 1)?;
             Ok(new_node!(
                 self,
@@ -1087,7 +1175,7 @@ impl Parser {
                     right: right
                 }
             ))
-        } else if accept!(self, TokenKind::Div) {
+        } else if accept!(self, Tag::ForwardSlash) {
             let right = self.expr(prec + 1)?;
             return Ok(new_node!(
                 self,
@@ -1096,7 +1184,7 @@ impl Parser {
                     right: right
                 }
             ));
-        } else if accept!(self, TokenKind::Mod) {
+        } else if accept!(self, Tag::Percent) {
             let right = self.expr(prec + 1)?;
             return Ok(new_node!(
                 self,
@@ -1105,7 +1193,7 @@ impl Parser {
                     right: right
                 }
             ));
-        } else if accept!(self, TokenKind::Plus) {
+        } else if accept!(self, Tag::Plus) {
             let right = self.expr(prec + 1)?;
             return Ok(new_node!(
                 self,
@@ -1114,7 +1202,7 @@ impl Parser {
                     right: right
                 }
             ));
-        } else if accept!(self, TokenKind::Minus) {
+        } else if accept!(self, Tag::Minus) {
             let right = self.expr(prec + 1)?;
             return Ok(new_node!(
                 self,
@@ -1123,25 +1211,25 @@ impl Parser {
                     right: right
                 }
             ));
-        } else if accept!(self, TokenKind::LShift) {
+        } else if accept!(self, Tag::LeftShift) {
             let right = self.expr(prec + 1)?;
             return Ok(new_node!(
                 self,
-                LShift {
+                LeftShift {
                     left: left,
                     right: right
                 }
             ));
-        } else if accept!(self, TokenKind::RShift) {
+        } else if accept!(self, Tag::RightShift) {
             let right = self.expr(prec + 1)?;
             return Ok(new_node!(
                 self,
-                RShift {
+                RightShift {
                     left: left,
                     right: right
                 }
             ));
-        } else if accept!(self, TokenKind::And) {
+        } else if accept!(self, Tag::Ampersand) {
             let right = self.expr(prec + 1)?;
             return Ok(new_node!(
                 self,
@@ -1150,7 +1238,7 @@ impl Parser {
                     right: right
                 }
             ));
-        } else if accept!(self, TokenKind::Or) {
+        } else if accept!(self, Tag::Bar) {
             let right = self.expr(prec + 1)?;
             return Ok(new_node!(
                 self,
@@ -1159,7 +1247,7 @@ impl Parser {
                     right: right
                 }
             ));
-        } else if accept!(self, TokenKind::Xor) {
+        } else if accept!(self, Tag::Caret) {
             let right = self.expr(prec + 1)?;
             return Ok(new_node!(
                 self,
@@ -1168,7 +1256,7 @@ impl Parser {
                     right: right
                 }
             ));
-        } else if accept!(self, TokenKind::LAnd) {
+        } else if accept!(self, Tag::LAnd) {
             let right = self.expr(prec + 1)?;
             return Ok(new_node!(
                 self,
@@ -1177,7 +1265,7 @@ impl Parser {
                     right: right
                 }
             ));
-        } else if accept!(self, TokenKind::LOr) {
+        } else if accept!(self, Tag::LOr) {
             let right = self.expr(prec + 1)?;
             return Ok(new_node!(
                 self,
@@ -1186,7 +1274,7 @@ impl Parser {
                     right: right
                 }
             ));
-        } else if accept!(self, TokenKind::Eq) {
+        } else if accept!(self, Tag::Eq) {
             let right = self.expr(prec + 1)?;
             return Ok(new_node!(
                 self,
@@ -1195,7 +1283,7 @@ impl Parser {
                     right: right
                 }
             ));
-        } else if accept!(self, TokenKind::NotEq) {
+        } else if accept!(self, Tag::NotEq) {
             let right = self.expr(prec + 1)?;
             return Ok(new_node!(
                 self,
@@ -1204,16 +1292,16 @@ impl Parser {
                     right: right
                 }
             ));
-        } else if accept!(self, TokenKind::LThan) {
+        } else if accept!(self, Tag::Less) {
             let right = self.expr(prec + 1)?;
             return Ok(new_node!(
                 self,
-                LessThan {
+                Less {
                     left: left,
                     right: right
                 }
             ));
-        } else if accept!(self, TokenKind::LThanEq) {
+        } else if accept!(self, Tag::LessOrEq) {
             let right = self.expr(prec + 1)?;
             return Ok(new_node!(
                 self,
@@ -1222,16 +1310,16 @@ impl Parser {
                     right: right
                 }
             ));
-        } else if accept!(self, TokenKind::GThan) {
+        } else if accept!(self, Tag::Greater) {
             let right = self.expr(prec + 1)?;
             return Ok(new_node!(
                 self,
-                GreaterThan {
+                Greater {
                     left: left,
                     right: right
                 }
             ));
-        } else if accept!(self, TokenKind::GThanEq) {
+        } else if accept!(self, Tag::GreaterOrEq) {
             let right = self.expr(prec + 1)?;
             return Ok(new_node!(
                 self,
@@ -1458,7 +1546,7 @@ impl Parser {
                 left: left.clone(),
                 right: new_node!(
                     self,
-                    LShift {
+                    LeftShift {
                         left: deep_clone(&left),
                         right: right.clone()
                     }
@@ -1478,7 +1566,7 @@ impl Parser {
                 left: left.clone(),
                 right: new_node!(
                     self,
-                    RShift {
+                    RightShift {
                         left: deep_clone(&left),
                         right: right.clone()
                     }
@@ -1488,19 +1576,19 @@ impl Parser {
     }
 
     fn peek_postfix_op(&self) -> bool {
-        match peek_any!(self) {
-            TokenKind::Incr | TokenKind::Decr | TokenKind::LParen => true,
+        match peek_tag!(self) {
+            Tag::Incr | Tag::Decr | Tag::LeftParen => true,
             _ => false,
         }
     }
 
     fn postfix(&mut self, mut expr: AstRef) -> Result<AstRef, String> {
         while self.peek_postfix_op() {
-            if accept!(self, TokenKind::LParen) {
+            if accept!(self, Tag::LeftParen) {
                 expr = self.call(expr.clone())?;
-            } else if accept!(self, TokenKind::Incr) {
+            } else if accept!(self, Tag::Incr) {
                 expr = new_node!(self, PostIncr { expr: expr.clone() });
-            } else if accept!(self, TokenKind::Decr) {
+            } else if accept!(self, Tag::Decr) {
                 expr = new_node!(self, PostDecr { expr: expr.clone() });
             } else {
                 return Err("invalid postfix expression".to_string());
@@ -1511,60 +1599,62 @@ impl Parser {
     }
 
     fn factor(&mut self) -> Result<AstRef, String> {
-        if peek!(self, TokenKind::ConstInt, _) {
+        if peek!(self, Tag::ConstInt, _) {
             self.const_int()
-        } else if peek!(self, TokenKind::ConstUnsignedInt, _) {
+        } else if peek!(self, Tag::ConstUnsignedInt, _) {
             self.const_unsigned_int()
-        } else if peek!(self, TokenKind::ConstLong, _) {
+        } else if peek!(self, Tag::ConstLong, _) {
             self.const_long()
-        } else if peek!(self, TokenKind::ConstLongLong, _) {
+        } else if peek!(self, Tag::ConstLongLong, _) {
             self.const_long_long()
-        } else if peek!(self, TokenKind::ConstUnsignedLong, _) {
+        } else if peek!(self, Tag::ConstUnsignedLong, _) {
             self.const_unsigned_long()
-        } else if peek!(self, TokenKind::ConstUnsignedLongLong, _) {
+        } else if peek!(self, Tag::ConstUnsignedLongLong, _) {
             self.const_unsigned_long_long()
-        } else if accept!(self, TokenKind::Tilde) {
+        } else if peek!(self, Tag::ConstDouble, _) {
+            self.const_double()
+        } else if accept!(self, Tag::Tilde) {
             return Ok(new_node!(
                 self,
                 Complement {
                     expr: self.factor()?
                 }
             ));
-        } else if accept!(self, TokenKind::Minus) {
+        } else if accept!(self, Tag::Minus) {
             return Ok(new_node!(
                 self,
                 Negate {
                     expr: self.factor()?
                 }
             ));
-        } else if accept!(self, TokenKind::Not) {
+        } else if accept!(self, Tag::Bang) {
             return Ok(new_node!(
                 self,
                 Not {
                     expr: self.factor()?
                 }
             ));
-        } else if accept!(self, TokenKind::Incr) {
+        } else if accept!(self, Tag::Incr) {
             let subexpr = self.factor()?;
             return self.pre_incr(subexpr);
-        } else if accept!(self, TokenKind::Decr) {
+        } else if accept!(self, Tag::Decr) {
             let subexpr = self.factor()?;
             return self.pre_decr(subexpr);
-        } else if accept!(self, TokenKind::LParen) {
+        } else if accept!(self, Tag::LeftParen) {
             if self.is_type_spec() || self.is_type_qualifier() {
                 return self.cast_expr();
             }
 
             let mut inner_expr = self.expr(0)?;
-            expect!(self, TokenKind::RParen);
+            expect!(self, Tag::RightParen);
 
             if self.peek_postfix_op() {
                 inner_expr = self.postfix(inner_expr.clone())?;
             }
 
             Ok(inner_expr)
-        } else if accept!(self, TokenKind::Identifier, _) {
-            let name = yank!(self, TokenKind::Identifier);
+        } else if accept!(self, Tag::Identifier) {
+            let name = self.yank();
             let sym = get_sym(self.scope.clone(), &name);
 
             let mut expr = new_node!(
@@ -1596,7 +1686,7 @@ impl Parser {
             return Err("a cast cannot have a storage class".into());
         }
 
-        expect!(self, TokenKind::RParen);
+        expect!(self, Tag::RightParen);
 
         Ok(new_node!(
             self,
@@ -1608,8 +1698,8 @@ impl Parser {
     }
 
     fn const_int(&mut self) -> Result<AstRef, String> {
-        expect!(self, TokenKind::ConstInt, _);
-        let value = yank!(self, TokenKind::ConstInt);
+        expect!(self, Tag::ConstInt, _);
+        let value = yank!(self, Tag::ConstInt);
         let node = new_node!(self, ConstInt(value as i32));
         node.borrow_mut().ty = int_type(true);
 
@@ -1617,8 +1707,8 @@ impl Parser {
     }
 
     fn const_unsigned_int(&mut self) -> Result<AstRef, String> {
-        expect!(self, TokenKind::ConstUnsignedInt, _);
-        let value = yank!(self, TokenKind::ConstUnsignedInt);
+        expect!(self, Tag::ConstUnsignedInt, _);
+        let value = yank!(self, Tag::ConstUnsignedInt);
         let node = new_node!(self, ConstUnsignedInt(value as u32));
         node.borrow_mut().ty = int_type(false);
 
@@ -1626,8 +1716,8 @@ impl Parser {
     }
 
     fn const_long(&mut self) -> Result<AstRef, String> {
-        expect!(self, TokenKind::ConstLong, _);
-        let value = yank!(self, TokenKind::ConstLong);
+        expect!(self, Tag::ConstLong, _);
+        let value = yank!(self, Tag::ConstLong);
         let node = new_node!(self, ConstLong(value));
         node.borrow_mut().ty = long_type(true);
 
@@ -1635,8 +1725,8 @@ impl Parser {
     }
 
     fn const_long_long(&mut self) -> Result<AstRef, String> {
-        expect!(self, TokenKind::ConstLongLong, _);
-        let value = yank!(self, TokenKind::ConstLongLong);
+        expect!(self, Tag::ConstLongLong, _);
+        let value = yank!(self, Tag::ConstLongLong);
         let node = new_node!(self, ConstLong(value));
         node.borrow_mut().ty = long_type(true);
 
@@ -1644,8 +1734,8 @@ impl Parser {
     }
 
     fn const_unsigned_long_long(&mut self) -> Result<AstRef, String> {
-        expect!(self, TokenKind::ConstUnsignedLongLong, _);
-        let value = yank!(self, TokenKind::ConstUnsignedLongLong);
+        expect!(self, Tag::ConstUnsignedLongLong, _);
+        let value = yank!(self, Tag::ConstUnsignedLongLong);
         let node = new_node!(self, ConstUnsignedLong(value));
         node.borrow_mut().ty = long_type(false);
 
@@ -1653,10 +1743,19 @@ impl Parser {
     }
 
     fn const_unsigned_long(&mut self) -> Result<AstRef, String> {
-        expect!(self, TokenKind::ConstUnsignedLong, _);
-        let value = yank!(self, TokenKind::ConstUnsignedLong);
+        expect!(self, Tag::ConstUnsignedLong, _);
+        let value = yank!(self, Tag::ConstUnsignedLong);
         let node = new_node!(self, ConstUnsignedLong(value));
         node.borrow_mut().ty = long_type(false);
+
+        Ok(node)
+    }
+
+    fn const_double(&mut self) -> Result<AstRef, String> {
+        expect!(self, Tag::ConstDouble, _);
+        let value = yank!(self, Tag::ConstDouble);
+        let node = new_node!(self, ConstDouble(value));
+        node.borrow_mut().ty = double_type();
 
         Ok(node)
     }
@@ -1666,17 +1765,56 @@ impl Parser {
     }
 
     fn eof(&self) -> bool {
-        matches!(self.next.as_ref().unwrap().kind, TokenKind::EOF)
+        self.tokens[1].is_none()
     }
 
-    fn advance(&mut self) {
-        self.last = self.next.clone();
-        self.next = self.lexer.lex();
-
-        //println!("{:?}", self.next);
-
-        if self.next.as_ref().unwrap().kind == TokenKind::Bad {
-            panic!("invalid token found");
+    fn preload(&mut self) -> Result<(), String> {
+        for _ in 0..2 {
+            for i in 0..2 {
+                self.tokens[i] = self.tokens[i + 1].clone();
+            }
+            self.pull_token()?;
         }
+
+        Ok(())
+    }
+
+    fn pull_token(&mut self) -> Result<(), String> {
+        match self.tokeniser.next() {
+            Some(res) => match res {
+                Ok(token) => {
+                    self.tokens[2] = Some(token);
+                    Ok(())
+                }
+                Err(e) => Err(e),
+            },
+            None => {
+                self.tokens[2] = None;
+                Ok(())
+            }
+        }
+    }
+
+    fn advance(&mut self) -> Result<(), String> {
+        if self.tokens[1].is_none() {
+            panic!("attempt to read past end of file");
+        }
+
+        for i in 0..2 {
+            self.tokens[i] = self.tokens[i + 1].clone();
+        }
+
+        /*
+        println!(
+            "{:?} \"{}\"",
+            self.tokens[1],
+            if let Some(token) = &self.tokens[1] {
+                token.as_str(self.buf)
+            } else {
+                ""
+            }
+        );*/
+
+        self.pull_token()
     }
 }

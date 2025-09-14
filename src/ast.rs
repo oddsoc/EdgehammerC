@@ -48,8 +48,10 @@ pub enum AstKind {
     ConstUnsignedInt(u32),
     ConstLong(i64),
     ConstUnsignedLong(u64),
+    ConstDouble(f64),
     Void,
     Int,
+    Double,
     Function {
         name: String,
         sym: Option<SymWeakRef>,
@@ -170,11 +172,11 @@ pub enum AstKind {
         left: AstRef,
         right: AstRef,
     },
-    LShift {
+    LeftShift {
         left: AstRef,
         right: AstRef,
     },
-    RShift {
+    RightShift {
         left: AstRef,
         right: AstRef,
     },
@@ -206,7 +208,7 @@ pub enum AstKind {
         left: AstRef,
         right: AstRef,
     },
-    LessThan {
+    Less {
         left: AstRef,
         right: AstRef,
     },
@@ -214,7 +216,7 @@ pub enum AstKind {
         left: AstRef,
         right: AstRef,
     },
-    GreaterThan {
+    Greater {
         left: AstRef,
         right: AstRef,
     },

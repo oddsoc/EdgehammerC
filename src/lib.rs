@@ -23,34 +23,15 @@
 
 #![cfg_attr(feature = "simd", feature(portable_simd))]
 
-use std::env;
-
-mod ast;
-mod codegen;
-mod driver;
-mod expr;
-mod ir;
-mod lexing;
-mod parsing;
-mod preprocessing;
-mod scope;
-mod semantics;
-mod types;
-mod x64;
-
-fn main() -> Result<(), ()> {
-    let args: Vec<String> = env::args().collect();
-
-    if args.len() < 2 {
-        eprintln!(
-            "Usage: {} [--lex|--parse|--validate|--codegen] [-S] [-o <output>] <c-file> [<c-file> ...]",
-            args[0]
-        );
-        std::process::exit(1);
-    }
-
-    let (translations, arguments) = driver::parse_args(&args);
-    driver::run(&translations, &arguments);
-
-    Ok(())
-}
+//mod ast;
+//mod codegen;
+//mod driver;
+//mod expr;
+//mod ir;
+pub mod lexing;
+pub mod preprocessing;
+//pub mod parsing;
+//mod scope;
+//mod semantics;
+//mod types;
+//mod x64;

@@ -69,9 +69,7 @@ impl Analyser {
                     //replace(init, &fold(init));
                     if let Some(sym) = resolve(ast) {
                         if has_static_storage_duration(sym) {
-                            if !is_const_int_expr(init)
-                                && !is_const_unsigned_int_expr(init)
-                            {
+                            if !is_const_expr(init) {
                                 return Err(
                                     "not a const expression".to_string()
                                 );
