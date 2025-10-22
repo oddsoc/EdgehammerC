@@ -12,7 +12,9 @@ name = "ehc"
 path = "src/lib.rs"
 
 [features]
+default = []
 simd = []
+tracing = [ "dep:tracing", "dep:tracing-subscriber", "dep:tracing-tree" ]
 
 [profile.dev]
 opt-level = 0       
@@ -31,6 +33,9 @@ lto = true
 
 [dependencies]
 unicode-ident = "1.0.19"
+tracing = { version = "0.1", optional = true }
+tracing-subscriber = { version = "0.3", optional = true }
+tracing-tree = { version = "0.4", optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.7.0", features = ["html_reports"] }

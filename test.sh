@@ -1,5 +1,6 @@
 #!/bin/bash
 
+COMPLETE=13
 CHAPTER=$1
 STAGE=$2
 
@@ -19,5 +20,8 @@ if [ "$STAGE" == "" ]; then
    test_compiler $CC --chapter $CHAPTER --extra-credit
 else
    echo "Testing $CC against all tests <= chapter $CHAPTER up to $STAGE stage"
-   test_compiler $CC --chapter $CHAPTER --stage $STAGE --extra-credit
+   test_compiler $CC --chapter $CHAPTER --stage $STAGE --extra-credit --latest-only
+   echo
+   echo "Testing $CC against all tests <= chapter $COMPLETE previously completed" 
+   test_compiler $CC --chapter $COMPLETE --extra-credit
 fi

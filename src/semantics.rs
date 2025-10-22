@@ -45,12 +45,23 @@ impl Analyser {
                 ..
             } => {
                 for param in params {
-                    self.walk(param)?;
+                    if let AstKind::Variable { .. } = &param.borrow().kind {
+                        self.walk(param)?;
+                    } else if block.is_some() {
+                        return Err(
+                            "unnamed parameter in function definition".into()
+                        );
+                    } else {
+                        self.walk(param)?;
+                    }
                 }
+
                 self.walk(type_spec)?;
+
                 if let Some(block) = block {
                     self.walk(block)?;
                 }
+
                 Ok(())
             }
             AstKind::Block { body } => {
@@ -66,7 +77,7 @@ impl Analyser {
                 self.walk(type_spec)?;
                 if let Some(init) = init {
                     check(init)?;
-                    //replace(init, &fold(init));
+                    replace(init, &fold(init));
                     if let Some(sym) = resolve(ast) {
                         if has_static_storage_duration(sym) {
                             if !is_const_expr(init) {

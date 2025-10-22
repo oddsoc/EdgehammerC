@@ -1,13 +1,12 @@
-use criterion::{
-    Criterion, Throughput, criterion_group, criterion_main,
-};
+use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use ehc::lexing::*;
 use ehc::preprocessing::*;
 use std::fs;
 use std::hint::black_box;
 
 fn lex_benchmark(c: &mut Criterion) {
-    let bytes = fs::read("benches/data/bench.c").expect("data/bench.c not found");
+    let bytes =
+        fs::read("benches/data/bench.c").expect("data/bench.c not found");
     let text = preprocess(bytes.clone()).unwrap();
     let size_bytes = bytes.len() as u64;
 

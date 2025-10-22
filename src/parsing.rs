@@ -33,6 +33,8 @@ macro_rules! accept {
     ($parser:expr, $tag:path) => {
         if let Some(token) = &$parser.tokens[1] {
             if matches!(token.tag, $tag) {
+                #[cfg(feature = "tracing")]
+                println!("  {}", token.as_str($parser.buf));
                 $parser.advance()?;
                 true
             } else {
@@ -46,6 +48,8 @@ macro_rules! accept {
     ($parser:expr, $tag:path, $_:tt) => {
         if let Some(token) = &$parser.tokens[1] {
             if matches!(token.tag, $tag(_)) {
+                #[cfg(feature = "tracing")]
+                println!("  {}", token.as_str($parser.buf));
                 $parser.advance()?;
                 true
             } else {
@@ -62,12 +66,15 @@ macro_rules! expect {
         if let Some(token) = &$parser.tokens[1] {
             if !matches!(token.tag, $tag) {
                 let msg = format!(
-                    "expected {:?} but got {:?}",
+                    "expected {:?} but got {:?}, parser.rs:{}",
                     stringify!($tag),
-                    token.tag
+                    token.tag,
+                    line!()
                 );
                 return Err(msg);
             } else {
+                #[cfg(feature = "tracing")]
+                println!("  {}", token.as_str($parser.buf));
                 $parser.advance()?;
             }
         } else {
@@ -89,6 +96,8 @@ macro_rules! expect {
                 );
                 return Err(msg);
             } else {
+                #[cfg(feature = "tracing")]
+                println!("  {}", token.as_str($parser.buf));
                 $parser.advance()?;
             }
         } else {
@@ -163,6 +172,32 @@ macro_rules! peek_tag {
     };
 }
 
+macro_rules! got {
+    ($parser:expr, $tag:path) => {
+        if let Some(token) = &$parser.tokens[0] {
+            if matches!(token.tag, $tag) {
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    };
+
+    ($parser:expr, $tag:path, $_:tt) => {
+        if let Some(token) = &$parser.tokens[0] {
+            if matches!(token.tag, $tag(_)) {
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    };
+}
+
 macro_rules! yank {
     ($parser:expr, $tag:path) => {
         if let Some(token) = &$parser.tokens[0] {
@@ -194,7 +229,7 @@ macro_rules! new_node {
     };
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Parser<'buf> {
     buf: &'buf str,
     tokeniser: Tokeniser<'buf>,
@@ -202,7 +237,6 @@ pub struct Parser<'buf> {
     nr_nodes: usize,
     scope: ScopeRef,
     cases: Vec<Vec<AstRef>>,
-    function: Option<SymRef>,
 }
 
 fn precedence_of(tag: &Tag) -> i32 {
@@ -225,8 +259,10 @@ fn precedence_of(tag: &Tag) -> i32 {
         | Tag::DivideEq
         | Tag::ModEq
         | Tag::OrEq
+        | Tag::XorEq
         | Tag::AndEq
-        | Tag::InvEq => 1,
+        | Tag::LeftShiftEq
+        | Tag::RightShiftEq => 1,
         _ => 0,
     }
 }
@@ -240,7 +276,6 @@ impl<'buf> Parser<'buf> {
             nr_nodes: 0,
             scope: crate::scope::new(),
             cases: vec![],
-            function: None,
         };
 
         parser.preload()?;
@@ -263,14 +298,15 @@ impl<'buf> Parser<'buf> {
     }
 
     pub fn parse(&mut self) -> Result<Vec<AstRef>, String> {
-        self.program()
+        self.translation_unit()
     }
 
-    fn program(&mut self) -> Result<Vec<AstRef>, String> {
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
+    fn translation_unit(&mut self) -> Result<Vec<AstRef>, String> {
         let mut prog: Vec<AstRef> = vec![];
 
         while !self.eof() {
-            prog.push(self.declaration()?);
+            prog.extend(self.declaration()?);
         }
 
         Ok(prog)
@@ -280,16 +316,238 @@ impl<'buf> Parser<'buf> {
         self.tokens[0].as_ref().unwrap().to_string(self.buf)
     }
 
-    fn declaration(&mut self) -> Result<AstRef, String> {
-        let (ty_spec, storage_class) = self.decl_spec()?;
-        expect!(self, Tag::Identifier);
-        let name = self.yank();
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
+    fn pointer(&mut self, type_spec: &AstRef) -> Result<AstRef, String> {
+        let mut qualifiers: Vec<String> = Vec::new();
 
-        if peek!(self, Tag::LeftParen) {
-            self.function(ty_spec, storage_class, name)
-        } else {
-            self.variable_decl(ty_spec, storage_class, name)
+        expect!(self, Tag::Asterisk);
+
+        while self.is_type_qualifier() {
+            qualifiers.push(self.type_qualifier()?);
         }
+
+        let mut pointer = self.pointer_to(type_spec, qualifiers)?;
+
+        if peek!(self, Tag::Asterisk) {
+            pointer = self.pointer(&pointer)?;
+        }
+
+        Ok(pointer)
+    }
+
+    fn pointer_to(
+        &mut self,
+        type_spec: &AstRef,
+        qualifiers: Vec<String>,
+    ) -> Result<AstRef, String> {
+        Ok(new_node!(
+            self,
+            Pointer {
+                base_type_spec: type_spec.clone(),
+                qualifiers: qualifiers
+            }
+        ))
+    }
+
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
+    fn type_suffix(
+        &mut self,
+        type_spec: &AstRef,
+        storage_class: Option<StorageClass>,
+        name: Option<String>,
+    ) -> Result<AstRef, String> {
+        if peek!(self, Tag::LeftParen) {
+            self.function(type_spec.clone(), storage_class, name)
+        } else if let Some(ident) = &name {
+            if let AstKind::Function { name, sym, .. } =
+                &mut type_spec.borrow_mut().kind
+            {
+                let s = add_sym(
+                    self.scope.clone(),
+                    &ident,
+                    SymKind::Function,
+                    1,
+                    16,
+                    storage_class,
+                    None,
+                    Some(type_spec.clone()),
+                )?;
+
+                *sym = Some(Rc::downgrade(&s));
+                *name = Some(ident.clone());
+
+                Ok(type_spec.clone())
+            } else {
+                self.variable(
+                    type_spec.clone(),
+                    storage_class,
+                    ident.to_string(),
+                )
+            }
+        } else {
+            Ok(type_spec.clone())
+        }
+    }
+
+    fn skip_declarator(&mut self) -> Result<(), String> {
+        // Open a block scope to capture any declarations and ensure they are
+        // unresolvable.
+        self.open_scope(ScopeKind::Block);
+        let tmp_type_spec = new_node!(self, Void);
+        self.declarator(tmp_type_spec, None)?;
+        self.close_scope();
+
+        Ok(())
+    }
+
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
+    fn direct_declarator(
+        &mut self,
+        type_spec: AstRef,
+        storage_class: Option<StorageClass>,
+    ) -> Result<AstRef, String> {
+        let mut inner_type_spec = type_spec;
+        let mut name: Option<String> = None;
+
+        if accept!(self, Tag::LeftParen) {
+            let start = self.clone();
+
+            self.skip_declarator()?;
+
+            expect!(self, Tag::RightParen);
+
+            inner_type_spec =
+                self.type_suffix(&inner_type_spec, storage_class, None)?;
+
+            let end = self.clone();
+
+            // Now we wrap the type_suffix with the declarator we skipped
+            // by backtracking and reparsing it.
+
+            *self = start;
+
+            let decl = self.declarator(inner_type_spec, storage_class)?;
+
+            // And then return after jumping over the type_suffix since
+            // we've already parsed that.
+
+            *self = end;
+
+            return Ok(decl);
+        }
+
+        if accept!(self, Tag::Identifier) {
+            name = Some(self.yank());
+        }
+
+        inner_type_spec =
+            self.type_suffix(&inner_type_spec, storage_class, name.clone())?;
+
+        Ok(inner_type_spec)
+    }
+
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
+    fn declarator(
+        &mut self,
+        mut type_spec: AstRef,
+        storage_class: Option<StorageClass>,
+    ) -> Result<AstRef, String> {
+        if peek!(self, Tag::Asterisk) {
+            type_spec = self.pointer(&type_spec)?;
+        }
+
+        self.direct_declarator(type_spec, storage_class)
+    }
+
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
+    fn abstract_declarator(
+        &mut self,
+        type_spec: AstRef,
+    ) -> Result<AstRef, String> {
+        self.declarator(type_spec, None)
+    }
+
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
+    fn type_name(&mut self) -> Result<AstRef, String> {
+        let (type_spec, storage_class) = self.declaration_specifiers()?;
+
+        if storage_class.is_some() {
+            return Err("type names cannot have a storage class".into());
+        }
+
+        self.abstract_declarator(type_spec)
+    }
+
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
+    fn init_declarator(
+        &mut self,
+        type_spec: AstRef,
+        storage_class: Option<StorageClass>,
+    ) -> Result<AstRef, String> {
+        let decl = self.declarator(type_spec, storage_class)?;
+
+        match &mut decl.borrow_mut().kind {
+            AstKind::Function { block, .. } => {
+                if peek!(self, Tag::LeftBrace) {
+                    *block = Some(self.function_body()?);
+                    self.close_scope();
+                }
+            }
+            AstKind::Variable { init, .. } => {
+                let initialiser = if accept!(self, Tag::Assign) {
+                    Some(self.initialiser(&storage_class)?)
+                } else {
+                    None
+                };
+
+                if initialiser.is_some() {
+                    *init = initialiser;
+                }
+            }
+            _ => {}
+        }
+
+        Ok(decl)
+    }
+
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
+    fn init_declarator_list(
+        &mut self,
+        type_spec: &AstRef,
+        storage_class: Option<StorageClass>,
+    ) -> Result<Vec<AstRef>, String> {
+        let mut decls: Vec<AstRef> = Vec::new();
+
+        loop {
+            let decl =
+                self.init_declarator(type_spec.clone(), storage_class)?;
+
+            decls.push(decl);
+
+            if got!(self, Tag::RightBrace) {
+                if decls.len() > 1 {
+                    return Err(
+                        "a declarator list cannot contain a function definition".into());
+                }
+                return Ok(decls);
+            }
+
+            if !accept!(self, Tag::Comma) {
+                break;
+            }
+        }
+
+        expect!(self, Tag::Semicolon);
+
+        Ok(decls)
+    }
+
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
+    fn declaration(&mut self) -> Result<Vec<AstRef>, String> {
+        let (type_spec, storage_class) = self.declaration_specifiers()?;
+        let decls = self.init_declarator_list(&type_spec, storage_class)?;
+
+        Ok(decls)
     }
 
     fn is_storage_class(&mut self) -> bool {
@@ -299,7 +557,7 @@ impl<'buf> Parser<'buf> {
             || peek!(self, Tag::Register)
     }
 
-    fn is_decl_spec(&mut self) -> bool {
+    fn is_declspec(&mut self) -> bool {
         self.is_type_spec()
             || self.is_type_qualifier()
             || self.is_storage_class()
@@ -391,13 +649,16 @@ impl<'buf> Parser<'buf> {
         Ok(node)
     }
 
-    fn decl_spec(&mut self) -> Result<(AstRef, Option<StorageClass>), String> {
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
+    fn declaration_specifiers(
+        &mut self,
+    ) -> Result<(AstRef, Option<StorageClass>), String> {
         let mut type_specs: Vec<String> = vec![];
         let mut storage_classes: Vec<StorageClass> = vec![];
 
         loop {
             if self.is_type_spec() {
-                type_specs.push(self.type_spec()?);
+                type_specs.push(self.type_specifier()?);
             } else if self.is_type_qualifier() {
                 todo!();
             } else if self.is_storage_class() {
@@ -411,43 +672,46 @@ impl<'buf> Parser<'buf> {
             return Err("invalid type specifier".to_string());
         }
 
-        let ty_spec = self.normalise_type_spec(&type_specs)?;
+        let type_spec = self.normalise_type_spec(&type_specs)?;
 
         if storage_classes.len() > 1 {
             return Err("invalid storage class".to_string());
         }
 
         if storage_classes.len() == 1 {
-            Ok((ty_spec, Some(storage_classes[0])))
+            Ok((type_spec, Some(storage_classes[0])))
         } else {
-            Ok((ty_spec, None))
+            Ok((type_spec, None))
         }
     }
 
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     fn parameter_list(&mut self) -> Result<Vec<AstRef>, String> {
         let mut params: Vec<AstRef> = vec![];
-        let mut idx = 0;
         expect!(self, Tag::LeftParen);
 
         if !accept!(self, Tag::RightParen) {
-            loop {
-                params.push(self.parameter(idx)?);
+            if accept!(self, Tag::Void) {
+                expect!(self, Tag::RightParen);
+            } else {
+                loop {
+                    params.push(self.parameter()?);
 
-                if accept!(self, Tag::RightParen) {
-                    break;
-                } else {
-                    expect!(self, Tag::Comma);
+                    if accept!(self, Tag::RightParen) {
+                        break;
+                    } else {
+                        expect!(self, Tag::Comma);
+                    }
                 }
-                idx += 1;
             }
         }
 
         Ok(params)
     }
 
-    fn parameter(&mut self, idx: usize) -> Result<AstRef, String> {
-        let (ty_spec, storage_class) = self.decl_spec()?;
-        let ty = type_of(&ty_spec);
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
+    fn parameter(&mut self) -> Result<AstRef, String> {
+        let (type_spec, storage_class) = self.declaration_specifiers()?;
 
         if storage_class.is_some() {
             if let Some(StorageClass::Register) = storage_class {
@@ -456,126 +720,61 @@ impl<'buf> Parser<'buf> {
             }
         }
 
-        if peek!(self, Tag::RightParen) {
-            Ok(new_node!(
-                self,
-                Parameter {
-                    name: None,
-                    sym: None,
-                    idx: idx,
-                    type_spec: ty_spec
-                }
-            ))
-        } else {
-            expect!(self, Tag::Identifier);
-            let name = self.yank();
-
-            let sym = add_sym(
-                self.scope.clone(),
-                &name,
-                SymKind::Parameter,
-                ty.borrow().size,
-                ty.borrow().alignment,
-                None,
-                Some(Definition::Concrete),
-                None,
-            )?;
-
-            let param = new_node!(
-                self,
-                Parameter {
-                    name: Some(name.clone()),
-                    sym: Some(Rc::downgrade(&sym)),
-                    idx: idx,
-                    type_spec: ty_spec,
-                }
-            );
-
-            sym.borrow_mut().node = Some(Rc::downgrade(&param));
-
-            Ok(param)
-        }
+        self.declarator(type_spec, storage_class)
     }
 
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     fn function(
         &mut self,
-        ty_spec: AstRef,
+        type_spec: AstRef,
         storage_class: Option<StorageClass>,
-        name: String,
+        name: Option<String>,
     ) -> Result<AstRef, String> {
         self.open_scope(ScopeKind::Function);
         let params = self.parameter_list()?;
+        let mut sym: Option<SymRef> = None;
 
-        if accept!(self, Tag::Semicolon) {
-            self.close_scope();
-
-            let sym = add_sym(
-                self.scope.clone(),
-                &name,
-                SymKind::Function,
-                1,
-                16,
-                storage_class,
-                None,
-                None,
-            )?;
-
-            let signature = new_node!(
-                self,
-                Function {
-                    name: name.clone(),
-                    sym: Some(Rc::downgrade(&sym)),
-                    params: params.clone(),
-                    block: None,
-                    type_spec: ty_spec.clone(),
-                    scope: self.scope.clone(),
-                }
-            );
-
-            sym.borrow_mut().node = Some(Rc::downgrade(&signature));
-
-            Ok(signature)
-        } else {
-            let sym = add_sym(
+        if let Some(ident) = &name {
+            sym = Some(add_sym(
                 parent_of(&self.scope),
-                &name,
+                &ident,
                 SymKind::Function,
                 1,
                 16,
                 storage_class,
-                Some(Definition::Concrete),
+                if peek!(self, Tag::LeftBrace) {
+                    Some(Definition::Concrete)
+                } else {
+                    None
+                },
                 None,
-            )?;
-
-            self.function = Some(sym.clone());
-
-            let body = self.function_body()?;
-            self.close_scope();
-
-            if kind_of(&self.scope) != ScopeKind::File {
-                return Err(
-                    "function definition is not allowed here".to_string()
-                );
-            }
-
-            let function = new_node!(
-                self,
-                Function {
-                    name: name.clone(),
-                    sym: Some(Rc::downgrade(&sym)),
-                    params: params.clone(),
-                    block: Some(body),
-                    type_spec: ty_spec.clone(),
-                    scope: self.scope.clone(),
-                }
-            );
-
-            sym.borrow_mut().node = Some(Rc::downgrade(&function));
-
-            self.function = None;
-
-            Ok(function)
+            )?);
         }
+
+        if !peek!(self, Tag::LeftBrace) {
+            self.close_scope();
+        }
+
+        let decl = new_node!(
+            self,
+            Function {
+                name: name.clone(),
+                sym: if let Some(sym) = &sym {
+                    Some(Rc::downgrade(sym))
+                } else {
+                    None
+                },
+                params: params.clone(),
+                block: None,
+                type_spec: type_spec.clone(),
+            }
+        );
+
+        if let Some(sym) = &sym {
+            sym.borrow_mut().node = Some(Rc::downgrade(&decl.clone()));
+        }
+
+        Ok(decl)
     }
 
     fn determine_definition_type(
@@ -595,7 +794,8 @@ impl<'buf> Parser<'buf> {
         }
     }
 
-    fn initializer(
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
+    fn initialiser(
         &mut self,
         storage_class: &Option<StorageClass>,
     ) -> Result<AstRef, String> {
@@ -620,15 +820,17 @@ impl<'buf> Parser<'buf> {
         }
     }
 
-    fn variable_decl(
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
+    fn variable(
         &mut self,
-        ty_spec: AstRef,
+        type_spec: AstRef,
         storage_class: Option<StorageClass>,
         name: String,
     ) -> Result<AstRef, String> {
         let definition = self.determine_definition_type(storage_class);
 
-        let ty = type_of(&ty_spec);
+        Self::type_annotate(&type_spec)?;
+        let ty = type_of(&type_spec);
 
         let sym = add_sym(
             self.scope.clone(),
@@ -641,27 +843,24 @@ impl<'buf> Parser<'buf> {
             None,
         )?;
 
-        let init = if accept!(self, Tag::Assign) {
-            Some(self.initializer(&storage_class)?)
-        } else {
-            None
-        };
-
-        expect!(self, Tag::Semicolon);
-
         let var = new_node!(
             self,
             Variable {
                 name: name.clone(),
                 sym: Some(Rc::downgrade(&sym)),
-                type_spec: ty_spec.clone(),
-                init: init,
+                type_spec: type_spec.clone(),
+                init: None,
             }
         );
 
         sym.borrow_mut().node = Some(Rc::downgrade(&var));
 
         Ok(var)
+    }
+
+    fn type_annotate(type_spec: &AstRef) -> Result<(), String> {
+        let mut annotator = TypeAnnotator::new();
+        annotator.run(&[type_spec.clone()])
     }
 
     fn is_type_spec(&self) -> bool {
@@ -680,7 +879,21 @@ impl<'buf> Parser<'buf> {
         false
     }
 
-    fn type_spec(&mut self) -> Result<String, String> {
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
+    fn type_qualifier(&mut self) -> Result<String, String> {
+        if accept!(self, Tag::Const) {
+            Ok("const".to_string())
+        } else if accept!(self, Tag::Volatile) {
+            Ok("volatile".to_string())
+        } else if accept!(self, Tag::Restrict) {
+            Ok("restrict".to_string())
+        } else {
+            Err("invalid type qualifier".to_string())
+        }
+    }
+
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
+    fn type_specifier(&mut self) -> Result<String, String> {
         if accept!(self, Tag::Int) {
             Ok("int".to_string())
         } else if accept!(self, Tag::Long) {
@@ -698,6 +911,7 @@ impl<'buf> Parser<'buf> {
         }
     }
 
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     fn storage_class(&mut self) -> Result<StorageClass, String> {
         if accept!(self, Tag::Static) {
             Ok(StorageClass::Static)
@@ -712,6 +926,7 @@ impl<'buf> Parser<'buf> {
         }
     }
 
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     fn statement(&mut self) -> Result<AstRef, String> {
         if peek!(self, Tag::LeftBrace) {
             self.block()
@@ -745,6 +960,7 @@ impl<'buf> Parser<'buf> {
         }
     }
 
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     fn while_stmt(&mut self) -> Result<AstRef, String> {
         expect!(self, Tag::While);
         expect!(self, Tag::LeftParen);
@@ -763,6 +979,7 @@ impl<'buf> Parser<'buf> {
         ))
     }
 
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     fn do_while_stmt(&mut self) -> Result<AstRef, String> {
         expect!(self, Tag::Do);
         self.open_scope(ScopeKind::Loop);
@@ -783,20 +1000,28 @@ impl<'buf> Parser<'buf> {
         ))
     }
 
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     fn for_init(&mut self) -> Result<AstRef, String> {
-        if self.is_decl_spec() {
-            let (ty_spec, storage_class) = self.decl_spec()?;
-            expect!(self, Tag::Identifier);
-            let name = self.yank();
+        if self.is_declspec() {
+            let (type_spec, storage_class) = self.declaration_specifiers()?;
 
             if storage_class.is_some() {
-                return Err(format!(
-                    "loop initial declaration of '{}' cannot have a storage class",
-                    name
-                ));
+                return Err(
+                    "loop initial declaration of '{}' cannot have a storage class".into()
+                );
             }
 
-            Ok(self.variable_decl(ty_spec, storage_class, name)?)
+            let decl = self.init_declarator(type_spec, storage_class)?;
+
+            match &decl.borrow().kind {
+                AstKind::Variable { .. } => {}
+                _ => {
+                    return Err("loop initial declaration is invalid".into());
+                }
+            }
+
+            expect!(self, Tag::Semicolon);
+            Ok(decl)
         } else {
             let init = new_node!(
                 self,
@@ -809,6 +1034,7 @@ impl<'buf> Parser<'buf> {
         }
     }
 
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     fn for_stmt(&mut self) -> Result<AstRef, String> {
         expect!(self, Tag::For);
         expect!(self, Tag::LeftParen);
@@ -857,6 +1083,7 @@ impl<'buf> Parser<'buf> {
         ))
     }
 
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     fn switch_stmt(&mut self) -> Result<AstRef, String> {
         expect!(self, Tag::Switch);
         expect!(self, Tag::LeftParen);
@@ -880,6 +1107,7 @@ impl<'buf> Parser<'buf> {
         ))
     }
 
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     fn break_stmt(&mut self) -> Result<AstRef, String> {
         expect!(self, Tag::Break);
         expect!(self, Tag::Semicolon);
@@ -887,6 +1115,7 @@ impl<'buf> Parser<'buf> {
         Ok(new_node!(self, Break { to: None }))
     }
 
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     fn continue_stmt(&mut self) -> Result<AstRef, String> {
         expect!(self, Tag::Continue);
         expect!(self, Tag::Semicolon);
@@ -894,6 +1123,7 @@ impl<'buf> Parser<'buf> {
         Ok(new_node!(self, Continue { to: None }))
     }
 
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     fn labelled_stmt(&mut self) -> Result<AstRef, String> {
         if accept!(self, Tag::Identifier) {
             let label = self.yank();
@@ -941,14 +1171,7 @@ impl<'buf> Parser<'buf> {
         }
     }
 
-    fn stmt_or_decl(&mut self) -> Result<AstRef, String> {
-        if self.is_decl_spec() {
-            self.declaration()
-        } else {
-            self.statement()
-        }
-    }
-
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     fn block(&mut self) -> Result<AstRef, String> {
         let mut body: Vec<AstRef> = vec![];
         self.open_scope(ScopeKind::Block);
@@ -956,7 +1179,11 @@ impl<'buf> Parser<'buf> {
         expect!(self, Tag::LeftBrace);
 
         while !accept!(self, Tag::RightBrace) {
-            body.push(self.stmt_or_decl()?);
+            if self.is_declspec() {
+                body.extend(self.declaration()?);
+            } else {
+                body.push(self.statement()?);
+            }
         }
 
         self.close_scope();
@@ -964,18 +1191,24 @@ impl<'buf> Parser<'buf> {
         Ok(new_node!(self, Block { body: body }))
     }
 
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     fn function_body(&mut self) -> Result<AstRef, String> {
         let mut body: Vec<AstRef> = vec![];
 
         expect!(self, Tag::LeftBrace);
 
         while !accept!(self, Tag::RightBrace) {
-            body.push(self.stmt_or_decl()?);
+            if self.is_declspec() {
+                body.extend(self.declaration()?);
+            } else {
+                body.push(self.statement()?);
+            }
         }
 
         Ok(new_node!(self, Block { body: body }))
     }
 
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     fn if_stmt(&mut self) -> Result<AstRef, String> {
         expect!(self, Tag::If);
         expect!(self, Tag::LeftParen);
@@ -998,6 +1231,7 @@ impl<'buf> Parser<'buf> {
         ))
     }
 
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     fn goto_stmt(&mut self) -> Result<AstRef, String> {
         expect!(self, Tag::GoTo);
         expect!(self, Tag::Identifier);
@@ -1007,19 +1241,15 @@ impl<'buf> Parser<'buf> {
         Ok(new_node!(self, GoTo { label: label }))
     }
 
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     fn return_stmt(&mut self) -> Result<AstRef, String> {
         expect!(self, Tag::Return);
         let expr = self.expr(0)?;
         expect!(self, Tag::Semicolon);
-        Ok(new_node!(
-            self,
-            Return {
-                expr: expr,
-                func: Rc::downgrade(&self.function.as_ref().unwrap()),
-            }
-        ))
+        Ok(new_node!(self, Return { expr: expr }))
     }
 
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     fn expr_stmt(&mut self) -> Result<AstRef, String> {
         let stmt = new_node!(
             self,
@@ -1031,6 +1261,7 @@ impl<'buf> Parser<'buf> {
         Ok(stmt)
     }
 
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     fn conditional(
         &mut self,
         expr: AstRef,
@@ -1050,6 +1281,7 @@ impl<'buf> Parser<'buf> {
         ))
     }
 
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     fn argument_list(&mut self) -> Result<Vec<AstRef>, String> {
         let mut args: Vec<AstRef> = vec![];
 
@@ -1068,6 +1300,7 @@ impl<'buf> Parser<'buf> {
         Ok(args)
     }
 
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     fn call(&mut self, expr: AstRef) -> Result<AstRef, String> {
         let args = self.argument_list()?;
 
@@ -1080,49 +1313,52 @@ impl<'buf> Parser<'buf> {
         ))
     }
 
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     fn expr(&mut self, min_prec: i32) -> Result<AstRef, String> {
         let mut left = self.factor()?;
-        let mut prec = precedence_of(&peek_tag!(self));
+        let mut prec: i32;
 
-        while self.peek_binop() && prec >= min_prec {
+        while {
+            prec = precedence_of(&peek_tag!(self));
+            self.peek_binop() && prec >= min_prec
+        } {
             if accept!(self, Tag::Assign) {
-                let right = self.expr(precedence_of(&peek_tag!(self)))?;
+                let right = self.expr(prec)?;
                 left = self.assignment(left, right)?;
             } else if accept!(self, Tag::PlusEq) {
-                let right = self.expr(precedence_of(&peek_tag!(self)))?;
+                let right = self.expr(prec)?;
                 left = self.plus_eq(left, right)?;
             } else if accept!(self, Tag::MinusEq) {
-                let right = self.expr(precedence_of(&peek_tag!(self)))?;
+                let right = self.expr(prec)?;
                 left = self.minus_eq(left, right)?;
             } else if accept!(self, Tag::MultEq) {
-                let right = self.expr(precedence_of(&peek_tag!(self)))?;
+                let right = self.expr(prec)?;
                 left = self.mult_eq(left, right)?;
             } else if accept!(self, Tag::DivideEq) {
-                let right = self.expr(precedence_of(&peek_tag!(self)))?;
+                let right = self.expr(prec)?;
                 left = self.div_eq(left, right)?;
             } else if accept!(self, Tag::ModEq) {
-                let right = self.expr(precedence_of(&peek_tag!(self)))?;
+                let right = self.expr(prec)?;
                 left = self.mod_eq(left, right)?;
             } else if accept!(self, Tag::AndEq) {
-                let right = self.expr(precedence_of(&peek_tag!(self)))?;
+                let right = self.expr(prec)?;
                 left = self.and_eq(left, right)?;
             } else if accept!(self, Tag::OrEq) {
-                let right = self.expr(precedence_of(&peek_tag!(self)))?;
+                let right = self.expr(prec)?;
                 left = self.or_eq(left, right)?;
             } else if accept!(self, Tag::XorEq) {
-                let right = self.expr(precedence_of(&peek_tag!(self)))?;
+                let right = self.expr(prec)?;
                 left = self.xor_eq(left, right)?;
             } else if accept!(self, Tag::LeftShiftEq) {
-                let right = self.expr(precedence_of(&peek_tag!(self)))?;
+                let right = self.expr(prec)?;
                 left = self.lshift_eq(left, right)?;
             } else if accept!(self, Tag::RightShiftEq) {
-                let right = self.expr(precedence_of(&peek_tag!(self)))?;
+                let right = self.expr(prec)?;
                 left = self.rshift_eq(left, right)?;
             } else if accept!(self, Tag::Question) {
                 left = self.conditional(left, prec)?;
             } else {
-                left = self.binop(left, prec + 1)?;
-                prec = precedence_of(&peek_tag!(self));
+                left = self.binop(left, precedence_of(&peek_tag!(self)) + 1)?;
             }
         }
 
@@ -1165,6 +1401,7 @@ impl<'buf> Parser<'buf> {
         }
     }
 
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     fn binop(&mut self, left: AstRef, prec: i32) -> Result<AstRef, String> {
         if accept!(self, Tag::Asterisk) {
             let right = self.expr(prec + 1)?;
@@ -1333,6 +1570,7 @@ impl<'buf> Parser<'buf> {
         }
     }
 
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     fn assignment(
         &mut self,
         left: AstRef,
@@ -1347,6 +1585,17 @@ impl<'buf> Parser<'buf> {
         ))
     }
 
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
+    fn addr_of(&mut self, expr: AstRef) -> Result<AstRef, String> {
+        Ok(new_node!(self, AddrOf { expr: expr.clone() }))
+    }
+
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
+    fn deref(&mut self, expr: AstRef) -> Result<AstRef, String> {
+        Ok(new_node!(self, Deref { expr: expr.clone() }))
+    }
+
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     fn pre_incr(&mut self, expr: AstRef) -> Result<AstRef, String> {
         Ok(new_node!(
             self,
@@ -1363,6 +1612,7 @@ impl<'buf> Parser<'buf> {
         ))
     }
 
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     fn pre_decr(&mut self, expr: AstRef) -> Result<AstRef, String> {
         Ok(new_node!(
             self,
@@ -1379,6 +1629,7 @@ impl<'buf> Parser<'buf> {
         ))
     }
 
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     fn plus_eq(
         &mut self,
         left: AstRef,
@@ -1386,7 +1637,7 @@ impl<'buf> Parser<'buf> {
     ) -> Result<AstRef, String> {
         Ok(new_node!(
             self,
-            Assign {
+            CompoundAssign {
                 left: left.clone(),
                 right: new_node!(
                     self,
@@ -1399,6 +1650,7 @@ impl<'buf> Parser<'buf> {
         ))
     }
 
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     fn minus_eq(
         &mut self,
         left: AstRef,
@@ -1406,7 +1658,7 @@ impl<'buf> Parser<'buf> {
     ) -> Result<AstRef, String> {
         Ok(new_node!(
             self,
-            Assign {
+            CompoundAssign {
                 left: left.clone(),
                 right: new_node!(
                     self,
@@ -1419,6 +1671,7 @@ impl<'buf> Parser<'buf> {
         ))
     }
 
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     fn mult_eq(
         &mut self,
         left: AstRef,
@@ -1426,7 +1679,7 @@ impl<'buf> Parser<'buf> {
     ) -> Result<AstRef, String> {
         Ok(new_node!(
             self,
-            Assign {
+            CompoundAssign {
                 left: left.clone(),
                 right: new_node!(
                     self,
@@ -1439,6 +1692,7 @@ impl<'buf> Parser<'buf> {
         ))
     }
 
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     fn div_eq(
         &mut self,
         left: AstRef,
@@ -1446,7 +1700,7 @@ impl<'buf> Parser<'buf> {
     ) -> Result<AstRef, String> {
         Ok(new_node!(
             self,
-            Assign {
+            CompoundAssign {
                 left: left.clone(),
                 right: new_node!(
                     self,
@@ -1459,6 +1713,7 @@ impl<'buf> Parser<'buf> {
         ))
     }
 
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     fn mod_eq(
         &mut self,
         left: AstRef,
@@ -1466,7 +1721,7 @@ impl<'buf> Parser<'buf> {
     ) -> Result<AstRef, String> {
         Ok(new_node!(
             self,
-            Assign {
+            CompoundAssign {
                 left: left.clone(),
                 right: new_node!(
                     self,
@@ -1479,6 +1734,7 @@ impl<'buf> Parser<'buf> {
         ))
     }
 
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     fn and_eq(
         &mut self,
         left: AstRef,
@@ -1486,7 +1742,7 @@ impl<'buf> Parser<'buf> {
     ) -> Result<AstRef, String> {
         Ok(new_node!(
             self,
-            Assign {
+            CompoundAssign {
                 left: left.clone(),
                 right: new_node!(
                     self,
@@ -1499,10 +1755,11 @@ impl<'buf> Parser<'buf> {
         ))
     }
 
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     fn or_eq(&mut self, left: AstRef, right: AstRef) -> Result<AstRef, String> {
         Ok(new_node!(
             self,
-            Assign {
+            CompoundAssign {
                 left: left.clone(),
                 right: new_node!(
                     self,
@@ -1515,6 +1772,7 @@ impl<'buf> Parser<'buf> {
         ))
     }
 
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     fn xor_eq(
         &mut self,
         left: AstRef,
@@ -1522,7 +1780,7 @@ impl<'buf> Parser<'buf> {
     ) -> Result<AstRef, String> {
         Ok(new_node!(
             self,
-            Assign {
+            CompoundAssign {
                 left: left.clone(),
                 right: new_node!(
                     self,
@@ -1535,6 +1793,7 @@ impl<'buf> Parser<'buf> {
         ))
     }
 
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     fn lshift_eq(
         &mut self,
         left: AstRef,
@@ -1542,7 +1801,7 @@ impl<'buf> Parser<'buf> {
     ) -> Result<AstRef, String> {
         Ok(new_node!(
             self,
-            Assign {
+            CompoundAssign {
                 left: left.clone(),
                 right: new_node!(
                     self,
@@ -1555,6 +1814,7 @@ impl<'buf> Parser<'buf> {
         ))
     }
 
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     fn rshift_eq(
         &mut self,
         left: AstRef,
@@ -1562,7 +1822,7 @@ impl<'buf> Parser<'buf> {
     ) -> Result<AstRef, String> {
         Ok(new_node!(
             self,
-            Assign {
+            CompoundAssign {
                 left: left.clone(),
                 right: new_node!(
                     self,
@@ -1582,6 +1842,7 @@ impl<'buf> Parser<'buf> {
         }
     }
 
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     fn postfix(&mut self, mut expr: AstRef) -> Result<AstRef, String> {
         while self.peek_postfix_op() {
             if accept!(self, Tag::LeftParen) {
@@ -1598,6 +1859,7 @@ impl<'buf> Parser<'buf> {
         Ok(expr)
     }
 
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     fn factor(&mut self) -> Result<AstRef, String> {
         if peek!(self, Tag::ConstInt, _) {
             self.const_int()
@@ -1634,6 +1896,12 @@ impl<'buf> Parser<'buf> {
                     expr: self.factor()?
                 }
             ));
+        } else if accept!(self, Tag::Ampersand) {
+            let subexpr = self.factor()?;
+            return self.addr_of(subexpr);
+        } else if accept!(self, Tag::Asterisk) {
+            let subexpr = self.factor()?;
+            return self.deref(subexpr);
         } else if accept!(self, Tag::Incr) {
             let subexpr = self.factor()?;
             return self.pre_incr(subexpr);
@@ -1641,7 +1909,7 @@ impl<'buf> Parser<'buf> {
             let subexpr = self.factor()?;
             return self.pre_decr(subexpr);
         } else if accept!(self, Tag::LeftParen) {
-            if self.is_type_spec() || self.is_type_qualifier() {
+            if self.is_declspec() {
                 return self.cast_expr();
             }
 
@@ -1679,24 +1947,21 @@ impl<'buf> Parser<'buf> {
         }
     }
 
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     fn cast_expr(&mut self) -> Result<AstRef, String> {
-        let (ty_spec, storage_class) = self.decl_spec()?;
-
-        if storage_class.is_some() {
-            return Err("a cast cannot have a storage class".into());
-        }
-
+        let type_spec = self.type_name()?;
         expect!(self, Tag::RightParen);
 
         Ok(new_node!(
             self,
             Cast {
-                type_spec: Some(ty_spec),
+                type_spec: Some(type_spec),
                 expr: self.factor()?,
             }
         ))
     }
 
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     fn const_int(&mut self) -> Result<AstRef, String> {
         expect!(self, Tag::ConstInt, _);
         let value = yank!(self, Tag::ConstInt);
@@ -1706,6 +1971,7 @@ impl<'buf> Parser<'buf> {
         Ok(node)
     }
 
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     fn const_unsigned_int(&mut self) -> Result<AstRef, String> {
         expect!(self, Tag::ConstUnsignedInt, _);
         let value = yank!(self, Tag::ConstUnsignedInt);
@@ -1715,6 +1981,7 @@ impl<'buf> Parser<'buf> {
         Ok(node)
     }
 
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     fn const_long(&mut self) -> Result<AstRef, String> {
         expect!(self, Tag::ConstLong, _);
         let value = yank!(self, Tag::ConstLong);
@@ -1724,6 +1991,7 @@ impl<'buf> Parser<'buf> {
         Ok(node)
     }
 
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     fn const_long_long(&mut self) -> Result<AstRef, String> {
         expect!(self, Tag::ConstLongLong, _);
         let value = yank!(self, Tag::ConstLongLong);
@@ -1733,6 +2001,7 @@ impl<'buf> Parser<'buf> {
         Ok(node)
     }
 
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     fn const_unsigned_long_long(&mut self) -> Result<AstRef, String> {
         expect!(self, Tag::ConstUnsignedLongLong, _);
         let value = yank!(self, Tag::ConstUnsignedLongLong);
@@ -1742,6 +2011,7 @@ impl<'buf> Parser<'buf> {
         Ok(node)
     }
 
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     fn const_unsigned_long(&mut self) -> Result<AstRef, String> {
         expect!(self, Tag::ConstUnsignedLong, _);
         let value = yank!(self, Tag::ConstUnsignedLong);
@@ -1751,6 +2021,7 @@ impl<'buf> Parser<'buf> {
         Ok(node)
     }
 
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
     fn const_double(&mut self) -> Result<AstRef, String> {
         expect!(self, Tag::ConstDouble, _);
         let value = yank!(self, Tag::ConstDouble);
@@ -1804,8 +2075,7 @@ impl<'buf> Parser<'buf> {
             self.tokens[i] = self.tokens[i + 1].clone();
         }
 
-        /*
-        println!(
+        /*println!(
             "{:?} \"{}\"",
             self.tokens[1],
             if let Some(token) = &self.tokens[1] {

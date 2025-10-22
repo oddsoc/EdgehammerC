@@ -51,8 +51,8 @@ fn cc_to_str(cc: &CondCode) -> String {
 fn code_to_str(code: Rc<RefCell<Code>>) -> String {
     match &*code.borrow() {
         Code::Imm { val, .. } => format!("${}", val),
-        Code::Var { off, .. } => {
-            format!("{}(%rbp)", -off)
+        Code::Mem { reg, off, .. } => {
+            format!("{}({})", -off, code_to_str(reg.clone()))
         }
 
         Code::Data { name, .. } => {
@@ -219,6 +219,14 @@ fn op_suffix(size: usize) -> String {
 
 fn emit_op(file: &mut std::fs::File, instr: Rc<RefCell<Code>>) {
     match &*instr.borrow() {
+        Code::Lea(src, dst, size) => {
+            write!(file, "\tlea{}\t", op_suffix(*size)).unwrap();
+            emit_operand(file, src.clone());
+            write!(file, ", ").unwrap();
+            emit_operand(file, dst.clone());
+            writeln!(file).unwrap();
+        }
+
         Code::Mov(src, dst, size) => {
             write!(file, "\tmov{}\t", op_suffix(*size)).unwrap();
             emit_operand(file, src.clone());

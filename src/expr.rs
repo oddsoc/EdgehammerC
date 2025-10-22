@@ -70,6 +70,7 @@ pub fn fold(ast: &AstRef) -> AstRef {
     match &ast.borrow().kind {
         AstKind::Identifier { .. } => ast.clone(),
         AstKind::Assign { .. } => ast.clone(),
+        AstKind::CompoundAssign { .. } => ast.clone(),
         AstKind::LogicAnd { left, right } => {
             replace(left, &fold(left));
             replace(right, &fold(right));
@@ -723,6 +724,14 @@ pub fn fold(ast: &AstRef) -> AstRef {
                 _ => ast.clone(),
             }
         }
+        AstKind::AddrOf { expr: inner } => {
+            replace(inner, &fold(inner));
+            ast.clone()
+        }
+        AstKind::Deref { expr: inner } => {
+            replace(inner, &fold(inner));
+            ast.clone()
+        }
         AstKind::Cast { expr: inner, .. } => {
             replace(inner, &fold(inner));
             let ty = type_of(ast);
@@ -824,7 +833,11 @@ pub fn is_callable(expr: &AstRef) -> bool {
 }
 
 pub fn is_lvalue(expr: &AstRef) -> bool {
-    matches!(&expr.borrow().kind, AstKind::Identifier { .. })
+    match &expr.borrow().kind {
+        AstKind::Identifier { .. } => true,
+        AstKind::Deref { .. } => true,
+        _ => false,
+    }
 }
 
 pub fn is_const_unsigned_int_expr(expr: &AstRef) -> bool {
@@ -867,18 +880,42 @@ pub fn is_const_expr(expr: &AstRef) -> bool {
         || is_const_double_expr(expr);
 }
 
+pub fn is_null_pointer_const_expr(expr: &AstRef) -> bool {
+    if is_const_int_expr(expr) && const_int_value(expr) == 0 {
+        true
+    } else if is_const_unsigned_int_expr(expr)
+        && const_unsigned_int_value(expr) == 0
+    {
+        true
+    } else {
+        false
+    }
+}
+
 pub fn const_int_value(expr: &AstRef) -> i64 {
     assert!(is_const_int_expr(expr));
     match &expr.borrow().kind {
+        AstKind::StaticInitializer(subexpr) => const_int_value(subexpr),
+        AstKind::Initializer(subexpr) => const_int_value(subexpr),
+        AstKind::Cast { expr: subexpr, .. } => const_int_value(subexpr),
         AstKind::ConstInt(value) => *value as i32 as i64,
         AstKind::ConstLong(value) => *value,
-        _ => unreachable!(),
+        _ => {
+            unreachable!()
+        }
     }
 }
 
 pub fn const_unsigned_int_value(expr: &AstRef) -> u64 {
     assert!(is_const_unsigned_int_expr(expr));
     match &expr.borrow().kind {
+        AstKind::StaticInitializer(subexpr) => {
+            const_unsigned_int_value(subexpr)
+        }
+        AstKind::Initializer(subexpr) => const_unsigned_int_value(subexpr),
+        AstKind::Cast { expr: subexpr, .. } => {
+            const_unsigned_int_value(subexpr)
+        }
         AstKind::ConstUnsignedInt(value) => *value as u32 as u64,
         AstKind::ConstUnsignedLong(value) => *value,
         _ => unreachable!(),
@@ -889,6 +926,9 @@ pub fn const_unsigned_int_value(expr: &AstRef) -> u64 {
 pub fn const_double_value(expr: &AstRef) -> f64 {
     assert!(is_const_double_expr(expr));
     match &expr.borrow().kind {
+        AstKind::StaticInitializer(subexpr) => const_double_value(subexpr),
+        AstKind::Initializer(subexpr) => const_double_value(subexpr),
+        AstKind::Cast { expr: subexpr, .. } => const_double_value(subexpr),
         AstKind::ConstDouble(value) => *value,
         _ => unreachable!(),
     }
@@ -905,7 +945,8 @@ pub fn check(expr: &AstRef) -> Result<(), String> {
             }
         }
 
-        AstKind::Assign { left, right } => {
+        AstKind::CompoundAssign { left, right }
+        | AstKind::Assign { left, right } => {
             if !is_lvalue(left) {
                 return Err("not an lvalue".to_string());
             } else {
@@ -967,6 +1008,22 @@ pub fn check(expr: &AstRef) -> Result<(), String> {
         AstKind::Negate { expr: inner }
         | AstKind::Complement { expr: inner }
         | AstKind::Not { expr: inner } => {
+            check(inner)?;
+
+            Ok(())
+        }
+
+        AstKind::AddrOf { expr: inner } => {
+            if !is_lvalue(inner) {
+                return Err("not an lvalue".to_string());
+            } else {
+                check(inner)?;
+            }
+
+            Ok(())
+        }
+
+        AstKind::Deref { expr: inner } => {
             check(inner)?;
 
             Ok(())

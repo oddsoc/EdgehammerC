@@ -232,6 +232,23 @@ pub enum Tac {
     StaticVarRef(TypeRef, String),
     Return(TypeRef, TacRef),
     RoData(TypeRef, String, u64),
+    GetAddr {
+        ty: TypeRef,
+        src: TacRef,
+        dst: TacRef,
+    },
+    Load {
+        ty: TypeRef,
+        src: TacRef,
+        dst: TacRef,
+    },
+    Store {
+        ty: TypeRef,
+        src: TacRef,
+        dst: TacRef,
+    },
+    PlainOperand(TacRef),
+    DereferencedPtr(TacRef),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -254,6 +271,7 @@ pub struct TacGenerator {
     label_map: HashMap<String, usize>,
     fp_consts: HashMap<Fp64Bits, usize>,
     tac_code: Vec<TacRef>,
+    lhs_as_lval: Option<TacRef>,
 }
 
 impl IrGenerator for TacGenerator {
@@ -265,6 +283,7 @@ impl IrGenerator for TacGenerator {
             label_map: HashMap::new(),
             fp_consts: HashMap::new(),
             tac_code: Vec::new(),
+            lhs_as_lval: None,
         }
     }
 
@@ -290,6 +309,7 @@ impl TacGenerator {
             label_map: HashMap::new(),
             fp_consts: parent.fp_consts.clone(),
             tac_code: Vec::new(),
+            lhs_as_lval: parent.lhs_as_lval.clone(),
         }
     }
 
@@ -367,9 +387,30 @@ impl TacGenerator {
         left: &AstRef,
         right: &AstRef,
     ) -> (TacRef, TacRef, TacRef) {
-        let lhs = self.expr(left.clone());
-        let rhs = self.expr(right.clone());
+        let lhs_ty = type_of(left);
+        let lhs_scope = scope_of(left);
+        let mut lhs: TacRef;
+
+        // Only applicable for compound assignments +=, &=, etc
+        let lhs_as_lval =
+            if let AstKind::Cast { expr, .. } = &left.borrow().kind {
+                let lval = self.expr(expr.clone());
+                let lval_ty = type_of(&expr);
+                let lval_scope = scope_of(&expr);
+                lhs = self.convert(lval.clone(), &lval_ty, &lval_scope);
+                lhs = self.cast(&lval_ty, &lhs_ty, &lval_scope, &lhs);
+                lhs = new_node!(PlainOperand(lhs));
+                Some(lval.clone())
+            } else {
+                lhs = self.expr(left.clone());
+                Some(lhs.clone())
+            };
+
+        lhs = self.convert(lhs, &lhs_ty, &lhs_scope);
+        let rhs = self.expr_and_convert(right.clone());
         let dst = self.tmp_var(node.ty.clone(), &node.scope);
+
+        self.lhs_as_lval = lhs_as_lval;
 
         (lhs, rhs, dst)
     }
@@ -380,7 +421,7 @@ impl TacGenerator {
         ty: &TypeRef,
         subexpr: &AstRef,
     ) -> (TacRef, TacRef) {
-        let src = self.expr(subexpr.clone());
+        let src = self.expr_and_convert(subexpr.clone());
         let dst = self.tmp_var(ty.clone(), scope);
 
         (src, dst)
@@ -393,18 +434,24 @@ impl TacGenerator {
         subexpr: &AstRef,
         incr: bool,
     ) -> TacRef {
-        let src = self.expr(subexpr.clone());
-        let dst = self.tmp_var(ty.clone(), scope);
-        let tmp = self.tmp_var(ty.clone(), scope);
+        let lval = self.expr(subexpr.clone());
+        let old_val = self.expr_and_convert(subexpr.clone());
 
+        let tmp_old = self.tmp_var(ty.clone(), scope);
         self.emit(new_node!(Copy {
             ty: ty.clone(),
-            src: src.clone(),
-            dst: tmp.clone()
+            src: old_val.clone(),
+            dst: tmp_old.clone(),
         }));
 
-        let one = if is_double_type(ty) {
+        let delta = if is_double_type(ty) {
             self.const_double(1.0)
+        } else if is_pointer_type(ty) {
+            let base_ty = base_type(ty).unwrap();
+            new_node!(Integer {
+                ty: long_type(false),
+                value: size_of(&base_ty) as u64
+            })
         } else {
             new_node!(Integer {
                 ty: ty.clone(),
@@ -412,29 +459,43 @@ impl TacGenerator {
             })
         };
 
+        let new_val = self.tmp_var(ty.clone(), scope);
+
         if incr {
             self.emit(new_node!(Add {
                 ty: ty.clone(),
-                lhs: one.clone(),
-                rhs: tmp.clone(),
-                dst: dst.clone()
+                lhs: delta.clone(),
+                rhs: old_val.clone(),
+                dst: new_val.clone(),
             }));
         } else {
             self.emit(new_node!(Sub {
                 ty: ty.clone(),
-                lhs: tmp.clone(),
-                rhs: one.clone(),
-                dst: dst.clone()
+                lhs: old_val.clone(),
+                rhs: delta.clone(),
+                dst: new_val.clone(),
             }));
         }
 
-        self.emit(new_node!(Copy {
-            ty: ty.clone(),
-            src: dst.clone(),
-            dst: src.clone()
-        }));
+        match &*lval {
+            Tac::PlainOperand(obj) => {
+                self.emit(new_node!(Copy {
+                    ty: ty.clone(),
+                    src: new_val.clone(),
+                    dst: obj.clone(),
+                }));
+            }
+            Tac::DereferencedPtr(ptr) => {
+                self.emit(new_node!(Store {
+                    ty: ty.clone(),
+                    src: new_val.clone(),
+                    dst: ptr.clone(),
+                }));
+            }
+            _ => unreachable!(),
+        }
 
-        tmp
+        tmp_old
     }
 
     fn logical_and(
@@ -446,13 +507,13 @@ impl TacGenerator {
     ) -> TacRef {
         let false_label = self.label();
         let end_label = self.label();
-        let x = self.expr(left.clone());
+        let x = self.expr_and_convert(left.clone());
         self.emit(new_node!(JumpOnZero {
             ty: ty.clone(),
             expr: x,
             label: false_label.clone()
         }));
-        let y = self.expr(right.clone());
+        let y = self.expr_and_convert(right.clone());
         self.emit(new_node!(JumpOnZero {
             ty: ty.clone(),
             expr: y,
@@ -490,13 +551,13 @@ impl TacGenerator {
     ) -> TacRef {
         let true_label = self.label();
         let end_label = self.label();
-        let x = self.expr(left.clone());
+        let x = self.expr_and_convert(left.clone());
         self.emit(new_node!(JumpOnNotZero {
             ty: ty.clone(),
             expr: x,
             label: true_label.clone()
         }));
-        let y = self.expr(right.clone());
+        let y = self.expr_and_convert(right.clone());
         self.emit(new_node!(JumpOnNotZero {
             ty: ty.clone(),
             expr: y,
@@ -531,16 +592,57 @@ impl TacGenerator {
         left: &AstRef,
         right: &AstRef,
     ) -> TacRef {
-        let src = self.expr(right.clone());
-        let dst = self.expr(left.clone());
+        let lval = self.expr(left.clone());
+        let rval = self.expr_and_convert(right.clone());
 
-        self.emit(new_node!(Copy {
-            ty: ty.clone(),
-            src: src,
-            dst: dst.clone()
-        }));
+        match &*lval {
+            Tac::PlainOperand(obj) => {
+                self.emit(new_node!(Copy {
+                    ty: ty.clone(),
+                    src: rval.clone(),
+                    dst: obj.clone()
+                }));
 
-        dst
+                lval
+            }
+            Tac::DereferencedPtr(ptr) => {
+                self.emit(new_node!(Store {
+                    ty: ty.clone(),
+                    src: rval.clone(),
+                    dst: ptr.clone()
+                }));
+
+                new_node!(PlainOperand(rval))
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    fn compound_assign(&mut self, ty: &TypeRef, right: &AstRef) -> TacRef {
+        let rval = self.expr_and_convert(right.clone());
+        let lval = self.lhs_as_lval.as_ref().unwrap().clone();
+
+        match &*lval {
+            Tac::PlainOperand(obj) => {
+                self.emit(new_node!(Copy {
+                    ty: ty.clone(),
+                    src: rval.clone(),
+                    dst: obj.clone()
+                }));
+
+                lval
+            }
+            Tac::DereferencedPtr(ptr) => {
+                self.emit(new_node!(Store {
+                    ty: ty.clone(),
+                    src: rval.clone(),
+                    dst: ptr.clone()
+                }));
+
+                new_node!(PlainOperand(rval))
+            }
+            _ => unreachable!(),
+        }
     }
 
     fn ternary(
@@ -552,13 +654,13 @@ impl TacGenerator {
         right: &AstRef,
     ) -> TacRef {
         let e2_label = self.label();
-        let c = self.expr(left.clone());
+        let c = self.expr_and_convert(left.clone());
         self.emit(new_node!(JumpOnZero {
             ty: left.borrow().ty.clone(),
             expr: c,
             label: e2_label.clone()
         }));
-        let e1 = self.expr(middle.clone());
+        let e1 = self.expr_and_convert(middle.clone());
         let res = self.tmp_var(ty.clone(), scope);
         self.emit(new_node!(Copy {
             ty: ty.clone(),
@@ -568,7 +670,7 @@ impl TacGenerator {
         let end_label = self.label();
         self.emit(new_node!(Jump(end_label.clone())));
         self.emit(e2_label.clone());
-        let e2 = self.expr(right.clone());
+        let e2 = self.expr_and_convert(right.clone());
         self.emit(new_node!(Copy {
             ty: ty.clone(),
             src: e2.clone(),
@@ -829,7 +931,10 @@ impl TacGenerator {
 
         match &sym_node.unwrap().borrow().kind {
             AstKind::Function { name, .. } => {
-                new_node!(FunctionRef(name.clone(), is_defined))
+                new_node!(FunctionRef(
+                    name.as_ref().unwrap().clone(),
+                    is_defined
+                ))
             }
             _ => {
                 if has_static_storage_duration(sym.clone()) {
@@ -851,11 +956,11 @@ impl TacGenerator {
         let mut arg_exprs: Vec<TacRef> = vec![];
 
         for arg in args {
-            arg_exprs.push(self.expr(arg.clone()));
+            arg_exprs.push(self.expr_and_convert(arg.clone()));
         }
 
         let dst = self.tmp_var(node.ty.clone(), &node.scope);
-        let fun = self.expr(expr.clone());
+        let fun = self.expr_and_convert(expr.clone());
 
         self.emit(new_node!(Call {
             ty: node.ty.clone(),
@@ -869,7 +974,7 @@ impl TacGenerator {
 
     fn cast_double_to_ulong(
         &mut self,
-        node: &Ast,
+        ty: &TypeRef,
         src: TacRef,
         dst: TacRef,
         scope: &ScopeRef,
@@ -878,53 +983,53 @@ impl TacGenerator {
         let end = self.label();
         let upper_bound = self.const_double((i64::MAX as u64 + 1) as f64);
 
-        let tmp0 = self.tmp_var(node.ty.clone(), scope);
+        let tmp0 = self.tmp_var(ty.clone(), scope);
         self.emit(new_node!(GreaterOrEq {
-            ty: node.ty.clone(),
+            ty: ty.clone(),
             lhs: src.clone(),
             rhs: upper_bound.clone(),
             dst: tmp0.clone()
         }));
 
         self.emit(new_node!(JumpOnNotZero {
-            ty: node.ty.clone(),
+            ty: ty.clone(),
             expr: tmp0.clone(),
             label: out_of_range.clone()
         }));
 
         self.emit(new_node!(DoubleToUlong {
-            ty: node.ty.clone(),
+            ty: ty.clone(),
             src: src.clone(),
             dst: dst.clone()
         }));
         self.emit(new_node!(Jump(end.clone())));
 
         self.emit(out_of_range.clone());
-        let tmp1 = self.tmp_var(node.ty.clone(), scope);
+        let tmp1 = self.tmp_var(ty.clone(), scope);
         self.emit(new_node!(Sub {
-            ty: node.ty.clone(),
+            ty: ty.clone(),
             lhs: src.clone(),
             rhs: upper_bound.clone(),
             dst: tmp1.clone()
         }));
-        let tmp2 = self.tmp_var(node.ty.clone(), scope);
+        let tmp2 = self.tmp_var(ty.clone(), scope);
         self.emit(new_node!(DoubleToUlong {
-            ty: node.ty.clone(),
+            ty: ty.clone(),
             src: tmp1.clone(),
             dst: tmp2.clone()
         }));
-        let tmp3 = self.tmp_var(node.ty.clone(), scope);
+        let tmp3 = self.tmp_var(ty.clone(), scope);
         self.emit(new_node!(Add {
-            ty: node.ty.clone(),
+            ty: ty.clone(),
             lhs: tmp2.clone(),
             rhs: new_node!(Integer {
-                ty: node.ty.clone(),
+                ty: ty.clone(),
                 value: 9223372036854775808
             }),
             dst: tmp3.clone()
         }));
         self.emit(new_node!(Copy {
-            ty: node.ty.clone(),
+            ty: ty.clone(),
             src: tmp3.clone(),
             dst: dst.clone()
         }));
@@ -933,7 +1038,7 @@ impl TacGenerator {
 
     fn cast_ulong_to_double(
         &mut self,
-        node: &Ast,
+        ty: &TypeRef,
         src: TacRef,
         dst: TacRef,
         scope: &ScopeRef,
@@ -960,7 +1065,7 @@ impl TacGenerator {
         }));
 
         self.emit(new_node!(IntToDouble {
-            ty: node.ty.clone(),
+            ty: ty.clone(),
             src: src.clone(),
             dst: dst.clone()
         }));
@@ -982,7 +1087,7 @@ impl TacGenerator {
             src: tmp1.clone(),
             dst: tmp2.clone()
         }));
-        let tmp2_shr = self.tmp_var(node.ty.clone(), scope);
+        let tmp2_shr = self.tmp_var(ty.clone(), scope);
         self.emit(new_node!(RightShift {
             ty: long_type(false),
             lhs: tmp2.clone(),
@@ -1012,23 +1117,23 @@ impl TacGenerator {
             dst: tmp4.clone()
         }));
 
-        let tmp5 = self.tmp_var(node.ty.clone(), scope);
+        let tmp5 = self.tmp_var(ty.clone(), scope);
         self.emit(new_node!(IntToDouble {
-            ty: node.ty.clone(),
+            ty: ty.clone(),
             src: tmp4.clone(),
             dst: tmp5.clone()
         }));
 
-        let tmp6 = self.tmp_var(node.ty.clone(), scope);
+        let tmp6 = self.tmp_var(ty.clone(), scope);
         self.emit(new_node!(Add {
-            ty: node.ty.clone(),
+            ty: ty.clone(),
             lhs: tmp5.clone(),
             rhs: tmp5.clone(),
             dst: tmp6.clone()
         }));
 
         self.emit(new_node!(Copy {
-            ty: node.ty.clone(),
+            ty: ty.clone(),
             src: tmp6.clone(),
             dst: dst.clone()
         }));
@@ -1038,7 +1143,7 @@ impl TacGenerator {
 
     fn cast_double_to_uint(
         &mut self,
-        node: &Ast,
+        ty: &TypeRef,
         src: TacRef,
         dst: TacRef,
         scope: &ScopeRef,
@@ -1050,90 +1155,109 @@ impl TacGenerator {
             dst: tmp.clone()
         }));
         self.emit(new_node!(Truncate {
-            ty: node.ty.clone(),
+            ty: ty.clone(),
             src: tmp,
             dst: dst
         }));
     }
 
-    fn cast(&mut self, node: &Ast, expr: &AstRef) -> TacRef {
-        let scope = scope_of(expr);
-        let src = self.expr(expr.clone());
-        let src_ty = expr.borrow().ty.clone();
+    fn cast(
+        &mut self,
+        from_ty: &TypeRef,
+        to_ty: &TypeRef,
+        scope: &ScopeRef,
+        expr: &TacRef,
+    ) -> TacRef {
+        let src = expr;
 
-        if is_match(&node.ty, &src_ty) {
-            return src;
+        if is_match(from_ty, to_ty) {
+            return src.clone();
         }
 
-        let ty = node.ty.borrow();
-        let pos = make_space(scope.clone(), ty.size, ty.alignment);
-        let dst = new_node!(Var(node.ty.clone(), pos));
+        let pos =
+            make_space(scope.clone(), size_of(to_ty), alignment_of(to_ty));
+        let dst = new_node!(Var(to_ty.clone(), pos));
 
-        let src_is_double = is_double_type(&src_ty);
-        let dst_is_double = is_double_type(&node.ty);
-        let src_is_int = is_int_type(&src_ty);
-        let dst_is_int = is_int_type(&node.ty);
+        let src_is_double = is_double_type(from_ty);
+        let dst_is_double = is_double_type(to_ty);
+        let src_is_int = is_int_type(from_ty);
+        let dst_is_int = is_int_type(to_ty);
 
         if src_is_double && dst_is_int {
-            if is_signed(&node.ty) {
+            if is_signed(to_ty) {
                 self.emit(new_node!(DoubleToInt {
-                    ty: node.ty.clone(),
-                    src: src,
+                    ty: to_ty.clone(),
+                    src: src.clone(),
                     dst: dst.clone()
                 }));
             } else {
-                if ty.size == 8 {
-                    self.cast_double_to_ulong(node, src, dst.clone(), &scope);
+                if size_of(to_ty) == 8 {
+                    self.cast_double_to_ulong(
+                        to_ty,
+                        src.clone(),
+                        dst.clone(),
+                        &scope,
+                    );
                 } else {
-                    self.cast_double_to_uint(node, src, dst.clone(), &scope);
+                    self.cast_double_to_uint(
+                        to_ty,
+                        src.clone(),
+                        dst.clone(),
+                        &scope,
+                    );
                 }
             }
         } else if src_is_int && dst_is_double {
-            if is_signed(&src_ty) {
+            if is_signed(from_ty) {
                 self.emit(new_node!(IntToDouble {
-                    ty: node.ty.clone(),
-                    src: src,
+                    ty: to_ty.clone(),
+                    src: src.clone(),
                     dst: dst.clone()
                 }));
             } else {
-                if src_ty.borrow().size == 8 {
-                    self.cast_ulong_to_double(node, src, dst.clone(), &scope);
+                if size_of(from_ty) == 8 {
+                    self.cast_ulong_to_double(
+                        to_ty,
+                        src.clone(),
+                        dst.clone(),
+                        &scope,
+                    );
                 } else {
-                    let tmp = self.tmp_var(src_ty.clone(), &scope);
+                    let tmp = self.tmp_var(from_ty.clone(), &scope);
                     self.emit(new_node!(ZeroExt {
-                        ty: src_ty.clone(),
-                        src: src,
+                        ty: from_ty.clone(),
+                        src: src.clone(),
                         dst: tmp.clone()
                     }));
                     self.emit(new_node!(IntToDouble {
-                        ty: node.ty.clone(),
+                        ty: to_ty.clone(),
                         src: tmp,
                         dst: dst.clone()
                     }));
                 }
             }
-        } else if ty.size == src_ty.borrow().size {
+        } else if size_of(to_ty) == size_of(from_ty) {
             self.emit(new_node!(Copy {
-                ty: node.ty.clone(),
-                src: src,
+                ty: to_ty.clone(),
+                src: src.clone(),
                 dst: dst.clone()
             }));
-        } else if ty.size < src_ty.borrow().size {
+        } else if size_of(to_ty) < size_of(from_ty) {
             self.emit(new_node!(Truncate {
-                ty: node.ty.clone(),
-                src: src,
+                ty: to_ty.clone(),
+                src: src.clone(),
                 dst: dst.clone()
             }));
-        } else if is_signed(&src_ty) {
+        } else if is_signed(from_ty) {
             self.emit(new_node!(SignExt {
-                ty: node.ty.clone(),
-                src: src,
+                ty: to_ty.clone(),
+                src: src.clone(),
                 dst: dst.clone()
             }));
         } else {
             self.emit(new_node!(ZeroExt {
-                ty: node.ty.clone(),
-                src: src,
+                ty: to_ty.clone(),
+                src: src.clone(),
                 dst: dst.clone()
             }));
         }
@@ -1190,103 +1314,230 @@ impl TacGenerator {
         dst
     }
 
+    fn deref(&mut self, expr: AstRef) -> TacRef {
+        let res = self.expr_and_convert(expr);
+        new_node!(DereferencedPtr(res))
+    }
+
+    fn addr_of(&mut self, ptr_ty: &TypeRef, expr: AstRef) -> TacRef {
+        let scope = scope_of(&expr);
+        let res = self.expr(expr.clone());
+        match &*res {
+            Tac::PlainOperand(obj) => {
+                let dst = self.tmp_var(ptr_ty.clone(), &scope);
+                let get = new_node!(GetAddr {
+                    ty: ptr_ty.clone(),
+                    src: obj.clone(),
+                    dst: dst.clone()
+                });
+                self.emit(get);
+                new_node!(PlainOperand(dst))
+            }
+            Tac::DereferencedPtr(ptr) => {
+                new_node!(PlainOperand(ptr.clone()))
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    fn convert(
+        &mut self,
+        operand: TacRef,
+        ty: &TypeRef,
+        scope: &ScopeRef,
+    ) -> TacRef {
+        match &*operand {
+            Tac::PlainOperand(value) => {
+                return value.clone();
+            }
+            Tac::DereferencedPtr(ptr) => {
+                let dst = self.tmp_var(ty.clone(), &scope);
+                let load = new_node!(Load {
+                    ty: ty.clone(),
+                    src: ptr.clone(),
+                    dst: dst.clone()
+                });
+                self.emit(load);
+
+                dst
+            }
+            _ => {
+                unreachable!()
+            }
+        }
+    }
+
+    fn expr_and_convert(&mut self, expr: AstRef) -> TacRef {
+        let operand = self.expr(expr.clone());
+        let ty = type_of(&expr);
+        let scope = scope_of(&expr);
+
+        self.convert(operand, &ty, &scope)
+    }
+
     fn expr(&mut self, expr: AstRef) -> TacRef {
         let node = expr.borrow();
+        let ty = type_of(&expr);
+        let operand: TacRef;
         match &node.kind {
-            AstKind::ConstInt(val) => new_node!(Integer {
-                ty: type_of(&expr),
-                value: *val as u64
-            }),
-            AstKind::ConstLong(val) => new_node!(Integer {
-                ty: type_of(&expr),
-                value: *val as u64
-            }),
-            AstKind::ConstUnsignedInt(val) => new_node!(Integer {
-                ty: type_of(&expr),
-                value: *val as u64
-            }),
-            AstKind::ConstUnsignedLong(val) => {
-                new_node!(Integer {
+            AstKind::ConstInt(val) => {
+                operand = new_node!(Integer {
                     ty: type_of(&expr),
                     value: *val as u64
-                })
+                });
             }
-            AstKind::ConstDouble(val) => self.const_double(*val),
+            AstKind::ConstLong(val) => {
+                operand = new_node!(Integer {
+                    ty: type_of(&expr),
+                    value: *val as u64
+                });
+            }
+            AstKind::ConstUnsignedInt(val) => {
+                operand = new_node!(Integer {
+                    ty: type_of(&expr),
+                    value: *val as u64
+                });
+            }
+            AstKind::ConstUnsignedLong(val) => {
+                operand = new_node!(Integer {
+                    ty: type_of(&expr),
+                    value: *val as u64
+                });
+            }
+            AstKind::ConstDouble(val) => {
+                operand = self.const_double(*val);
+            }
             AstKind::Complement { expr: subexpr } => {
-                self.complement(&node, subexpr)
+                operand = self.complement(&node, subexpr);
             }
-            AstKind::Negate { expr: subexpr } => self.negate(&node, subexpr),
-            AstKind::Not { expr: subexpr } => self.not(&node, subexpr),
-            AstKind::PostIncr { expr: subexpr } => self.post_incr_or_decr(
-                &node.scope,
-                &node.ty,
-                subexpr,
-                true, /* incr */
-            ),
-            AstKind::PostDecr { expr: subexpr } => self.post_incr_or_decr(
-                &node.scope,
-                &node.ty,
-                subexpr,
-                false, /* decr */
-            ),
+            AstKind::Negate { expr: subexpr } => {
+                operand = self.negate(&node, subexpr);
+            }
+            AstKind::Not { expr: subexpr } => {
+                operand = self.not(&node, subexpr);
+            }
+            AstKind::PostIncr { expr: subexpr } => {
+                operand = self.post_incr_or_decr(
+                    &node.scope,
+                    &node.ty,
+                    subexpr,
+                    true, /* incr */
+                );
+            }
+            AstKind::PostDecr { expr: subexpr } => {
+                operand = self.post_incr_or_decr(
+                    &node.scope,
+                    &node.ty,
+                    subexpr,
+                    false, /* decr */
+                );
+            }
             AstKind::Multiply { left, right } => {
-                self.multiply(&node, left, right)
+                operand = self.multiply(&node, left, right);
             }
-            AstKind::Divide { left, right } => self.divide(&node, left, right),
-            AstKind::Modulo { left, right } => self.modulo(&node, left, right),
-            AstKind::Add { left, right } => self.add(&node, left, right),
+            AstKind::Divide { left, right } => {
+                operand = self.divide(&node, left, right);
+            }
+            AstKind::Modulo { left, right } => {
+                operand = self.modulo(&node, left, right);
+            }
+            AstKind::Add { left, right } => {
+                operand = self.add(&node, left, right);
+            }
             AstKind::Subtract { left, right } => {
-                self.subtract(&node, left, right)
+                operand = self.subtract(&node, left, right);
             }
             AstKind::LeftShift { left, right } => {
-                self.shift_left(&node, left, right)
+                operand = self.shift_left(&node, left, right);
             }
             AstKind::RightShift { left, right } => {
-                self.shift_right(&node, left, right)
+                operand = self.shift_right(&node, left, right);
             }
-            AstKind::And { left, right } => self.and(&node, left, right),
-            AstKind::Or { left, right } => self.or(&node, left, right),
-            AstKind::Xor { left, right } => self.xor(&node, left, right),
-            AstKind::Equal { left, right } => self.equal(&node, left, right),
-            AstKind::NotEq { left, right } => self.not_eq(&node, left, right),
-            AstKind::Less { left, right } => self.less(&node, left, right),
+            AstKind::And { left, right } => {
+                operand = self.and(&node, left, right);
+            }
+            AstKind::Or { left, right } => {
+                operand = self.or(&node, left, right);
+            }
+            AstKind::Xor { left, right } => {
+                operand = self.xor(&node, left, right);
+            }
+            AstKind::Equal { left, right } => {
+                operand = self.equal(&node, left, right);
+            }
+            AstKind::NotEq { left, right } => {
+                operand = self.not_eq(&node, left, right);
+            }
+            AstKind::Less { left, right } => {
+                operand = self.less(&node, left, right);
+            }
             AstKind::LessOrEq { left, right } => {
-                self.less_or_eq(&node, left, right)
+                operand = self.less_or_eq(&node, left, right);
             }
             AstKind::Greater { left, right } => {
-                self.greater(&node, left, right)
+                operand = self.greater(&node, left, right);
             }
             AstKind::GreaterOrEq { left, right } => {
-                self.greater_or_eq(&node, left, right)
+                operand = self.greater_or_eq(&node, left, right);
             }
             AstKind::LogicAnd { left, right } => {
-                self.logical_and(&node.scope, &node.ty, left, right)
+                operand = self.logical_and(&node.scope, &node.ty, left, right);
             }
             AstKind::LogicOr { left, right } => {
-                self.logical_or(&node.scope, &node.ty, left, right)
+                operand = self.logical_or(&node.scope, &node.ty, left, right);
             }
             AstKind::Assign { left, right } => {
-                self.assign(&node.ty, left, right)
+                return self.assign(&node.ty, left, right);
+            }
+            AstKind::CompoundAssign { left: _, right } => {
+                return self.compound_assign(&node.ty, right);
             }
             AstKind::Ternary {
                 left,
                 middle,
                 right,
-            } => self.ternary(&node.scope, &node.ty, left, middle, right),
-            AstKind::Identifier { name, .. } => {
-                self.identifier(&node, &expr, name)
+            } => {
+                operand =
+                    self.ternary(&node.scope, &node.ty, left, middle, right);
             }
-            AstKind::Call { expr, args } => self.call(&node, expr, args),
+            AstKind::Identifier { name, .. } => {
+                operand = self.identifier(&node, &expr, name);
+            }
+            AstKind::Call {
+                expr: subexpr,
+                args,
+            } => {
+                operand = self.call(&node, subexpr, args);
+            }
 
-            AstKind::Cast { type_spec: _, expr } => self.cast(&node, expr),
+            AstKind::Cast {
+                type_spec: _,
+                expr: subexpr,
+            } => {
+                let src = self.expr_and_convert(subexpr.clone());
+                let from_ty = type_of(&subexpr);
+                let to_ty = node.ty.clone();
+                operand = self.cast(&from_ty, &to_ty, &node.scope, &src);
+            }
 
-            AstKind::Initializer(expr) => self.expr(expr.clone()),
+            AstKind::Initializer(subexpr) => {
+                operand = self.expr_and_convert(subexpr.clone());
+            }
+
+            AstKind::Deref { expr: subexpr } => {
+                return self.deref(subexpr.clone());
+            }
+
+            AstKind::AddrOf { expr: subexpr } => {
+                return self.addr_of(&ty, subexpr.clone());
+            }
 
             _ => {
-                println!("Unexpected node: {:#?}", node);
                 unreachable!()
             }
         }
+
+        new_node!(PlainOperand(operand))
     }
 
     fn function(
@@ -1303,20 +1554,17 @@ impl TacGenerator {
             let mut tac_params: Vec<TacRef> = vec![];
 
             for param in params {
-                if let AstKind::Parameter {
-                    name,
+                if let AstKind::Variable {
+                    name: _,
                     sym: _,
-                    idx: _,
                     type_spec: _,
+                    init: _,
                 } = &param.borrow().kind
                 {
-                    if name.is_some() {
-                        // otherwise 'void'
-                        let sym = resolve(param).unwrap();
-                        let ty = param.as_ref().borrow().ty.clone();
-                        let p = new_node!(Var(ty, sym.borrow().pos));
-                        tac_params.push(p);
-                    }
+                    let sym = resolve(param).unwrap();
+                    let ty = param.as_ref().borrow().ty.clone();
+                    let p = new_node!(Var(ty, sym.borrow().pos));
+                    tac_params.push(p);
                 }
             }
 
@@ -1376,7 +1624,7 @@ impl TacGenerator {
             None
         };
         let end_label = self.label();
-        let c = self.expr(cond.clone());
+        let c = self.expr_and_convert(cond.clone());
         self.emit(new_node!(JumpOnZero {
             ty: node.ty.clone(),
             expr: c,
@@ -1402,7 +1650,7 @@ impl TacGenerator {
         body: &AstRef,
         cases: &Vec<AstRef>,
     ) {
-        let src = self.expr(cond.clone());
+        let src = self.expr_and_convert(cond.clone());
         let dst = self.tmp_var(cond.borrow().ty.clone(), &node.scope);
         self.emit(new_node!(Copy {
             ty: node.ty.clone(),
@@ -1416,7 +1664,7 @@ impl TacGenerator {
                 idx: _,
             } = &c.borrow().kind
             {
-                let e = self.expr(expr.clone());
+                let e = self.expr_and_convert(expr.clone());
                 let tmp = self.tmp_var(expr.borrow().ty.clone(), &node.scope);
                 self.emit(new_node!(Equal {
                     ty: node.ty.clone(),
@@ -1458,7 +1706,7 @@ impl TacGenerator {
         self.stmt_or_decl(body.clone());
         let continue_label = self.continue_label(&body.borrow().scope);
         self.emit(continue_label);
-        let c = self.expr(cond.clone());
+        let c = self.expr_and_convert(cond.clone());
         self.emit(new_node!(JumpOnNotZero {
             ty: node.ty.clone(),
             expr: c,
@@ -1471,7 +1719,7 @@ impl TacGenerator {
     fn while_stmt(&mut self, node: &Ast, cond: &AstRef, body: &AstRef) {
         let continue_label = self.continue_label(&body.borrow().scope);
         self.emit(continue_label.clone());
-        let c = self.expr(cond.clone());
+        let c = self.expr_and_convert(cond.clone());
         let break_label = self.break_label(&body.borrow().scope);
         self.emit(new_node!(JumpOnZero {
             ty: node.ty.clone(),
@@ -1498,7 +1746,7 @@ impl TacGenerator {
         self.emit(start_label.clone());
         let break_label = self.break_label(&body.borrow().scope);
         if cond.is_some() {
-            let c = self.expr(cond.as_ref().unwrap().clone());
+            let c = self.expr_and_convert(cond.as_ref().unwrap().clone());
             self.emit(new_node!(JumpOnZero {
                 ty: node.ty.clone(),
                 expr: c,
@@ -1516,7 +1764,7 @@ impl TacGenerator {
     }
 
     fn return_stmt(&mut self, ty: &TypeRef, expr: &AstRef) {
-        let e = self.expr(expr.clone());
+        let e = self.expr_and_convert(expr.clone());
         self.emit(new_node!(Return(ty.clone(), e)));
     }
 
@@ -1566,7 +1814,7 @@ impl TacGenerator {
                 && init.is_some()
             {
                 let sym = resolve(&ast).unwrap();
-                let e = self.expr(init.as_ref().unwrap().clone());
+                let e = self.expr_and_convert(init.as_ref().unwrap().clone());
                 let v = new_node!(Var(node.ty.clone(), sym.borrow().pos));
                 self.emit(new_node!(Copy {
                     ty: node.ty.clone(),
@@ -1587,8 +1835,11 @@ impl TacGenerator {
                 params,
                 block,
                 type_spec: _,
-                scope: _,
-            } => self.function(&node, name, sym, &params, block),
+            } => {
+                if let Some(ident) = &name {
+                    self.function(&node, ident, sym, &params, block)
+                }
+            }
             AstKind::Block { body } => self.block(body),
             AstKind::If {
                 cond,
@@ -1616,7 +1867,7 @@ impl TacGenerator {
             AstKind::Break { .. } => self.break_stmt(&node),
             AstKind::Continue { .. } => self.continue_stmt(&node),
             AstKind::ExprStmt { expr } => {
-                _ = self.expr(expr.clone());
+                _ = self.expr_and_convert(expr.clone());
             }
             AstKind::Variable {
                 name: _,
@@ -1693,7 +1944,6 @@ impl TacGenerator {
                 }
             }
             _ => {
-                println!("Cannot handle: {:#?}", init);
                 unreachable!()
             }
         }

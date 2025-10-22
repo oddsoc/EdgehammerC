@@ -52,18 +52,15 @@ pub enum AstKind {
     Void,
     Int,
     Double,
+    Pointer {
+        base_type_spec: AstRef,
+        qualifiers: Vec<String>,
+    },
     Function {
-        name: String,
+        name: Option<String>,
         sym: Option<SymWeakRef>,
         params: Vec<AstRef>,
         block: Option<AstRef>,
-        type_spec: AstRef,
-        scope: ScopeRef,
-    },
-    Parameter {
-        name: Option<String>,
-        sym: Option<SymWeakRef>,
-        idx: usize,
         type_spec: AstRef,
     },
     Block {
@@ -81,7 +78,6 @@ pub enum AstKind {
     },
     Return {
         expr: AstRef,
-        func: SymWeakRef,
     },
     If {
         cond: AstRef,
@@ -228,12 +224,22 @@ pub enum AstKind {
         left: AstRef,
         right: AstRef,
     },
+    CompoundAssign {
+        left: AstRef,
+        right: AstRef,
+    },
     Call {
         expr: AstRef,
         args: Vec<AstRef>,
     },
     Cast {
         type_spec: Option<AstRef>,
+        expr: AstRef,
+    },
+    AddrOf {
+        expr: AstRef,
+    },
+    Deref {
         expr: AstRef,
     },
 }

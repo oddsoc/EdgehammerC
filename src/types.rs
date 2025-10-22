@@ -26,12 +26,14 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use crate::ast::*;
+use crate::expr::{is_lvalue, is_null_pointer_const_expr};
 use crate::scope::*;
 
 pub type TypeRef = Rc<RefCell<Type>>;
 
 const IS_SIGNED: u8 = 1;
 const IS_SCALAR: u8 = 1 << 1;
+const IS_ARITHMETIC: u8 = 1 << 2;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Type {
@@ -45,6 +47,7 @@ pub struct Type {
 #[derive(Debug, Clone, PartialEq)]
 pub enum TypeKind {
     Undefined,
+    Pointer,
     Void,
     Int,
     Long,
@@ -69,9 +72,9 @@ pub fn undefined_type() -> TypeRef {
 
 pub fn int_type(is_signed: bool) -> TypeRef {
     let flags = if is_signed {
-        IS_SIGNED | IS_SCALAR
+        IS_SIGNED | IS_SCALAR | IS_ARITHMETIC
     } else {
-        IS_SCALAR
+        IS_SCALAR | IS_ARITHMETIC
     };
 
     Rc::new(RefCell::new(Type {
@@ -85,9 +88,9 @@ pub fn int_type(is_signed: bool) -> TypeRef {
 
 pub fn long_type(is_signed: bool) -> TypeRef {
     let flags = if is_signed {
-        IS_SIGNED | IS_SCALAR
+        IS_SIGNED | IS_SCALAR | IS_ARITHMETIC
     } else {
-        IS_SCALAR
+        IS_SCALAR | IS_ARITHMETIC
     };
 
     Rc::new(RefCell::new(Type {
@@ -101,9 +104,9 @@ pub fn long_type(is_signed: bool) -> TypeRef {
 
 pub fn long_long_type(is_signed: bool) -> TypeRef {
     let flags = if is_signed {
-        IS_SIGNED | IS_SCALAR
+        IS_SIGNED | IS_SCALAR | IS_ARITHMETIC
     } else {
-        IS_SCALAR
+        IS_SCALAR | IS_ARITHMETIC
     };
 
     Rc::new(RefCell::new(Type {
@@ -123,8 +126,12 @@ pub fn size_of(ty: &TypeRef) -> usize {
     ty.borrow().size
 }
 
+pub fn alignment_of(ty: &TypeRef) -> usize {
+    ty.borrow().alignment
+}
+
 pub fn double_type() -> TypeRef {
-    let flags = IS_SCALAR;
+    let flags = IS_SCALAR | IS_ARITHMETIC;
 
     Rc::new(RefCell::new(Type {
         kind: TypeKind::Double,
@@ -136,7 +143,7 @@ pub fn double_type() -> TypeRef {
 }
 
 pub fn long_double_type() -> TypeRef {
-    let flags = IS_SCALAR;
+    let flags = IS_SCALAR | IS_ARITHMETIC;
 
     Rc::new(RefCell::new(Type {
         kind: TypeKind::LongDouble,
@@ -155,6 +162,20 @@ pub fn void_type() -> TypeRef {
         size: 1,
         flags: 0,
     }))
+}
+
+pub fn pointer_type(basetype: &TypeRef) -> TypeRef {
+    Rc::new(RefCell::new(Type {
+        kind: TypeKind::Pointer,
+        basetype: Some(basetype.clone()),
+        alignment: 8,
+        size: 8,
+        flags: IS_SCALAR,
+    }))
+}
+
+pub fn base_type(ty: &TypeRef) -> Option<TypeRef> {
+    ty.borrow().basetype.clone()
 }
 
 pub fn is_compatible(ty0: &TypeRef, ty1: &TypeRef) -> bool {
@@ -186,12 +207,55 @@ pub fn is_long_double_type(ty: &TypeRef) -> bool {
     }
 }
 
-fn is_scalar_type(ty: &TypeRef) -> bool {
+#[allow(unused)]
+pub fn is_pointer_type(ty: &TypeRef) -> bool {
+    matches!(ty.borrow().kind, TypeKind::Pointer)
+}
+
+pub fn is_scalar_type(ty: &TypeRef) -> bool {
     ty.borrow().flags & IS_SCALAR != 0
+}
+
+pub fn is_arithmetic_type(ty: &TypeRef) -> bool {
+    ty.borrow().flags & IS_ARITHMETIC != 0
 }
 
 fn int_type_rank(ty: &TypeRef) -> usize {
     ty.borrow().size - if is_signed(ty) { 1 } else { 0 }
+}
+
+fn convert_by_assignment(
+    expr: &AstRef,
+    ty: &TypeRef,
+) -> Result<AstRef, String> {
+    if *type_of(expr).borrow() == *ty.borrow() {
+        Ok(expr.clone())
+    } else if is_arithmetic_type(&type_of(expr)) && is_arithmetic_type(ty) {
+        Ok(cast_to(expr, ty))
+    } else if is_null_pointer_const_expr(expr) && is_pointer_type(ty) {
+        Ok(cast_to(expr, ty))
+    } else {
+        println!("{:#?} to {:#?}", expr.borrow(), ty.borrow());
+        Err("cannot convert type for assignment".into())
+    }
+}
+
+fn get_common_pointer_type(
+    e0: &AstRef,
+    e1: &AstRef,
+) -> Result<TypeRef, String> {
+    let ty0 = type_of(e0);
+    let ty1 = type_of(e1);
+
+    if *ty0.borrow() == *ty1.borrow() {
+        Ok(ty0.clone())
+    } else if is_null_pointer_const_expr(e0) {
+        Ok(ty1.clone())
+    } else if is_null_pointer_const_expr(e1) {
+        Ok(ty0.clone())
+    } else {
+        Err("expressions have incompatible types".into())
+    }
 }
 
 fn get_common_type(ty0: &TypeRef, ty1: &TypeRef) -> TypeRef {
@@ -264,6 +328,7 @@ fn cast_to(expr: &AstRef, ty: &TypeRef) -> AstRef {
 pub struct TypeAnnotator {
     file_decls: HashSet<String>,
     decl_types: HashMap<usize, TypeRef>,
+    current_fn: Option<SymRef>,
 }
 
 impl TypeAnnotator {
@@ -271,6 +336,7 @@ impl TypeAnnotator {
         TypeAnnotator {
             file_decls: HashSet::new(),
             decl_types: HashMap::new(),
+            current_fn: None,
         }
     }
 
@@ -304,7 +370,7 @@ impl TypeAnnotator {
         match &ast.borrow().kind {
             AstKind::Function {
                 name,
-                sym: _,
+                sym,
                 params,
                 block,
                 type_spec: rty_spec,
@@ -329,6 +395,10 @@ impl TypeAnnotator {
 
                 let (_, return_ty) = self.annotate(rty_spec)?;
 
+                if let TypeKind::Function { .. } = &return_ty.borrow().kind {
+                    return Err("a function cannot return a function".into());
+                }
+
                 let ty = Rc::new(RefCell::new(Type {
                     kind: TypeKind::Function {
                         param_tys,
@@ -342,23 +412,20 @@ impl TypeAnnotator {
 
                 node_ty = ty.clone();
 
-                self.file_decls.insert(name.clone());
+                if let Some(name) = name {
+                    self.file_decls.insert(name.clone());
+                }
+
                 self.decl_types.insert(ast.borrow().id, node_ty.clone());
 
                 if let Some(body) = block {
+                    if let Some(sym) = sym {
+                        self.current_fn = sym.upgrade();
+                    }
                     self.annotate(body)?;
-                }
-            }
 
-            AstKind::Parameter {
-                name: _,
-                sym: _,
-                idx: _,
-                type_spec,
-            } => {
-                let (_, ty) = self.annotate(type_spec)?;
-                node_ty = ty.clone();
-                self.decl_types.insert(ast.borrow().id, node_ty.clone());
+                    self.current_fn = None;
+                }
             }
 
             AstKind::Block { body } => {
@@ -375,43 +442,39 @@ impl TypeAnnotator {
             } => {
                 let (_, ty) = self.annotate(type_spec)?;
 
-                node_ty = ty.clone();
-
-                self.decl_types.insert(ast.borrow().id, node_ty.clone());
+                self.decl_types.insert(ast.borrow().id, ty.clone());
                 self.file_decls.insert(name.clone());
 
                 if let Some(init) = init {
                     let (new_init, _init_ty) = self.annotate(init)?;
-                    replace(init, &cast_to(&new_init, &node_ty));
+                    let rhs = convert_by_assignment(&new_init, &ty)?;
+                    replace(init, &rhs);
                 }
+
+                node_ty = ty.clone();
             }
 
-            AstKind::Return { expr, func } => {
-                let (e, expr_ty) = self.annotate(expr)?;
-                node_ty = undefined_type();
+            AstKind::Return { expr } => {
+                let (e, _expr_ty) = self.annotate(expr)?;
+                let mut ty = undefined_type();
 
-                if let Some(sym) = func.upgrade() {
-                    if let Some(f) = sym_as_node(sym) {
+                if let Some(sym) = &self.current_fn {
+                    if let Some(f) = sym_as_node(sym.clone()) {
                         let id = f.borrow().id;
                         if let Some(t) = self.decl_types.get(&id) {
                             if let TypeKind::Function { return_ty, .. } =
                                 &t.borrow().kind
                             {
-                                node_ty = return_ty.clone();
+                                ty = return_ty.clone();
                             }
                         }
                     }
                 }
 
-                if !is_scalar_type(&expr_ty) {
-                    return Err("expected scalar type".to_string());
-                }
+                let new_expr = convert_by_assignment(&e, &ty)?;
+                replace(expr, &cast_to(&new_expr, &ty));
 
-                if !is_scalar_type(&node_ty) {
-                    return Err("expected scalar type".to_string());
-                }
-
-                replace(expr, &cast_to(&e, &node_ty));
+                node_ty = ty;
             }
 
             AstKind::If {
@@ -546,6 +609,16 @@ impl TypeAnnotator {
                 node_ty = ty.clone();
             }
 
+            AstKind::Pointer {
+                base_type_spec,
+                qualifiers: _,
+            } => {
+                let (new_base_type_spec, base_ty) =
+                    self.annotate(base_type_spec)?;
+                replace(base_type_spec, &new_base_type_spec);
+                node_ty = pointer_type(&base_ty);
+            }
+
             AstKind::Identifier { .. } => {
                 if let Some(sym) = resolve(&ast.clone()) {
                     if let Some(sym_node) = sym_as_node(sym.clone()) {
@@ -578,7 +651,8 @@ impl TypeAnnotator {
                 node_ty = ty.clone();
             }
 
-            AstKind::Assign { left, right } => {
+            AstKind::CompoundAssign { left, right }
+            | AstKind::Assign { left, right } => {
                 let (_, lhs_ty) = self.annotate(left)?;
                 let (rhs, rhs_ty) = self.annotate(right)?;
 
@@ -590,15 +664,14 @@ impl TypeAnnotator {
                     return Err("expected scalar type".to_string());
                 }
 
-                replace(right, &cast_to(&rhs, &lhs_ty));
+                let new_rhs = convert_by_assignment(&rhs, &lhs_ty)?;
+                replace(right, &new_rhs);
 
                 node_ty = lhs_ty.clone();
             }
 
             AstKind::Add { left, right }
-            | AstKind::Subtract { left, right }
-            | AstKind::Multiply { left, right }
-            | AstKind::Divide { left, right } => {
+            | AstKind::Subtract { left, right } => {
                 let (lhs, lhs_ty) = self.annotate(left)?;
                 let (rhs, rhs_ty) = self.annotate(right)?;
 
@@ -608,6 +681,32 @@ impl TypeAnnotator {
 
                 if !is_scalar_type(&rhs_ty) {
                     return Err("expected scalar type".to_string());
+                }
+
+                let common_ty =
+                    if is_pointer_type(&lhs_ty) || is_pointer_type(&rhs_ty) {
+                        get_common_pointer_type(&lhs, &rhs)?
+                    } else {
+                        get_common_type(&lhs_ty, &rhs_ty)
+                    };
+
+                replace(left, &cast_to(&lhs, &common_ty));
+                replace(right, &cast_to(&rhs, &common_ty));
+
+                node_ty = common_ty.clone();
+            }
+
+            AstKind::Multiply { left, right }
+            | AstKind::Divide { left, right } => {
+                let (lhs, lhs_ty) = self.annotate(left)?;
+                let (rhs, rhs_ty) = self.annotate(right)?;
+
+                if !is_arithmetic_type(&lhs_ty) {
+                    return Err("expected arithmetic type".to_string());
+                }
+
+                if !is_arithmetic_type(&rhs_ty) {
+                    return Err("expected arithmetic type".to_string());
                 }
 
                 let common_ty = get_common_type(&lhs_ty, &rhs_ty);
@@ -647,11 +746,11 @@ impl TypeAnnotator {
                 let (rhs, rhs_ty) = self.annotate(right)?;
 
                 if !is_int_type(&lhs_ty) {
-                    return Err("expected scalar type".to_string());
+                    return Err("expected integer type".to_string());
                 }
 
                 if !is_int_type(&rhs_ty) {
-                    return Err("expected scalar type".to_string());
+                    return Err("expected integer type".to_string());
                 }
 
                 replace(left, &lhs);
@@ -677,12 +776,19 @@ impl TypeAnnotator {
                     return Err("expected scalar type".to_string());
                 }
 
-                let common_ty = get_common_type(&lhs_ty, &rhs_ty);
+                let common_ty =
+                    if is_pointer_type(&lhs_ty) || is_pointer_type(&rhs_ty) {
+                        get_common_pointer_type(&lhs, &rhs)?
+                    } else {
+                        get_common_type(&lhs_ty, &rhs_ty)
+                    };
 
                 replace(left, &cast_to(&lhs, &common_ty));
                 replace(right, &cast_to(&rhs, &common_ty));
 
-                node_ty = if is_double_type(&common_ty) {
+                node_ty = if is_pointer_type(&common_ty)
+                    || is_double_type(&common_ty)
+                {
                     int_type(false)
                 } else {
                     common_ty.clone()
@@ -718,7 +824,12 @@ impl TypeAnnotator {
                     return Err("incompatible types".to_string());
                 }
 
-                let common_ty = get_common_type(&mhs_ty, &rhs_ty);
+                let common_ty =
+                    if is_pointer_type(&mhs_ty) || is_pointer_type(&rhs_ty) {
+                        get_common_pointer_type(&mhs, &rhs)?
+                    } else {
+                        get_common_type(&mhs_ty, &rhs_ty)
+                    };
 
                 replace(middle, &cast_to(&mhs, &common_ty));
                 replace(right, &cast_to(&rhs, &common_ty));
@@ -750,13 +861,59 @@ impl TypeAnnotator {
                 node_ty = inner_ty.clone();
             }
 
-            AstKind::Negate { expr: inner }
-            | AstKind::PostIncr { expr: inner }
+            AstKind::AddrOf { expr: inner } => {
+                let (new_inner, inner_ty) = self.annotate(inner)?;
+
+                replace(inner, &new_inner);
+
+                if !is_lvalue(&inner) {
+                    return Err("cannot dereference an rvalue".into());
+                }
+
+                node_ty = pointer_type(&inner_ty.clone());
+            }
+
+            AstKind::Deref { expr: inner } => {
+                let (new_inner, inner_ty) = self.annotate(inner)?;
+
+                replace(inner, &new_inner);
+
+                let mut ty = inner_ty.clone();
+
+                match inner_ty.borrow().kind {
+                    TypeKind::Pointer => {
+                        let base_ty = ty.borrow().basetype.clone().unwrap();
+                        ty = base_ty;
+                    }
+                    _ => {
+                        unreachable!()
+                    }
+                }
+
+                node_ty = ty.clone();
+            }
+
+            AstKind::Negate { expr: inner } => {
+                let (new_inner, inner_ty) = self.annotate(inner)?;
+
+                if !is_arithmetic_type(&inner_ty) {
+                    return Err("expected scalar type".to_string());
+                }
+
+                replace(inner, &new_inner);
+
+                node_ty = inner_ty.clone();
+            }
+
+            AstKind::PostIncr { expr: inner }
             | AstKind::PostDecr { expr: inner } => {
                 let (new_inner, inner_ty) = self.annotate(inner)?;
 
-                if !is_scalar_type(&inner_ty) {
-                    return Err("expected scalar type".to_string());
+                if !is_arithmetic_type(&inner_ty) && !is_pointer_type(&inner_ty)
+                {
+                    return Err(
+                        "expected arithmetic or pointer type".to_string()
+                    );
                 }
 
                 replace(inner, &new_inner);
@@ -768,12 +925,20 @@ impl TypeAnnotator {
                 type_spec,
                 expr: inner,
             } => {
-                self.annotate(inner)?;
+                let (new_inner, inner_ty) = self.annotate(inner)?;
 
                 if let Some(ty_spec) = type_spec {
-                    let (new_type_spec, ty) = self.annotate(ty_spec)?;
+                    let (_, ty) = self.annotate(ty_spec)?;
 
-                    replace(ty_spec, &new_type_spec);
+                    if is_pointer_type(&inner_ty) && is_double_type(&ty) {
+                        return Err("cannot cast pointer to double".to_string());
+                    }
+
+                    if is_pointer_type(&ty) && is_double_type(&inner_ty) {
+                        return Err("cannot cast double to pointer".to_string());
+                    }
+
+                    replace(inner, &cast_to(&new_inner, &ty));
                     node_ty = ty.clone();
                 }
             }
@@ -795,7 +960,9 @@ impl TypeAnnotator {
                         for (arg, param_ty) in args.iter().zip(param_tys.iter())
                         {
                             self.annotate(arg)?;
-                            let new_arg = cast_to(arg, param_ty);
+
+                            let new_arg =
+                                convert_by_assignment(&arg, &param_ty)?;
                             replace(&arg, &new_arg);
                         }
                         node_ty = return_ty.clone();
@@ -846,12 +1013,12 @@ impl TypeAnnotator {
         Ok((ast.clone(), node_ty.clone()))
     }
 
-    pub fn run(&mut self, ast: &Vec<AstRef>) -> Result<(), String> {
+    pub fn run(&mut self, ast: &[AstRef]) -> Result<(), String> {
         if ast.len() == 0 {
             return Ok(());
         }
 
-        let scope = scope_of(&ast[0]);
+        let scope = upto(scope_of(&ast[0]), ScopeKind::File).unwrap();
 
         for node in ast {
             self.annotate(node)?;

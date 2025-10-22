@@ -2,7 +2,7 @@
 
 **EdgehammerC** is an in-development C compiler inspired by *Writing a C Compiler* by Nora Sandler.
 
-The compiler currently supports all C language features required to pass the book’s official test suite up through **chapter 13**, including every extra-credit feature.
+The compiler currently supports all C language features required to pass the book’s official test suite up through **chapter 14**, including every extra-credit feature.
 
 The long-term vision for EdgehammerC is to serve as a playground for exploring language design. For now, I am focussed on working through the book.
 

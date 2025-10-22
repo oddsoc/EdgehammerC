@@ -59,7 +59,6 @@ pub enum ScopeKind {
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum SymKind {
     Function,
-    Parameter,
     Variable,
 }
 
@@ -512,13 +511,6 @@ pub fn resolve(identifier: &AstRef) -> Option<SymRef> {
     match &binding.kind {
         AstKind::Identifier { sym, .. } => {
             sym.as_ref().and_then(|weak| weak.upgrade())
-        }
-        AstKind::Parameter { name, .. } => {
-            if let Some(n) = name {
-                get_sym(binding.scope.clone(), n)
-            } else {
-                None
-            }
         }
         AstKind::Variable { name, .. } => get_sym(binding.scope.clone(), name),
         _ => None,
