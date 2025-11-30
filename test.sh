@@ -1,6 +1,6 @@
 #!/bin/bash
 
-COMPLETE=13
+COMPLETE=15
 CHAPTER=$1
 STAGE=$2
 
@@ -25,3 +25,8 @@ else
    echo "Testing $CC against all tests <= chapter $COMPLETE previously completed" 
    test_compiler $CC --chapter $COMPLETE --extra-credit
 fi
+
+# Writing a C Compiler does not cover all the ways arrays can be declared but we
+# do so make sure that the compiler can validate these sloppy array declarations.
+$CC --validate tests/array_decls.c
+

@@ -24,8 +24,9 @@
 use std::collections::HashSet;
 
 use crate::ast::*;
+use crate::errors::{Error, ErrorClass::Semantic, SemanticError, error};
 use crate::expr::*;
-use crate::scope::*;
+use crate::symtab::*;
 
 pub struct Analyser;
 
@@ -34,39 +35,44 @@ impl Analyser {
         Analyser {}
     }
 
-    fn walk(&self, ast: &AstRef) -> Result<(), String> {
-        let scope = ast.borrow().scope.clone();
+    fn walk(
+        &self,
+        arena: &mut AstArena,
+        symtab: &SymTab,
+        id: AstId,
+    ) -> Result<(), Error> {
+        let kind = arena[id].kind.clone();
 
-        match &ast.borrow().kind {
+        match &kind {
             AstKind::Function {
                 params,
                 block,
                 type_spec,
                 ..
             } => {
-                for param in params {
-                    if let AstKind::Variable { .. } = &param.borrow().kind {
-                        self.walk(param)?;
+                for &param in params {
+                    if let AstKind::Parameter { .. } = &arena[param].kind {
+                        self.walk(arena, symtab, param)?;
                     } else if block.is_some() {
-                        return Err(
-                            "unnamed parameter in function definition".into()
-                        );
+                        return Err(error(Semantic(
+                            SemanticError::UnnamedParameterInFunctionDefinition,
+                        )));
                     } else {
-                        self.walk(param)?;
+                        self.walk(arena, symtab, param)?;
                     }
                 }
 
-                self.walk(type_spec)?;
+                self.walk(arena, symtab, *type_spec)?;
 
                 if let Some(block) = block {
-                    self.walk(block)?;
+                    self.walk(arena, symtab, *block)?;
                 }
 
                 Ok(())
             }
             AstKind::Block { body } => {
-                for stmt in body {
-                    self.walk(stmt)?;
+                for &stmt in body {
+                    self.walk(arena, symtab, stmt)?;
                 }
                 Ok(())
             }
@@ -74,16 +80,18 @@ impl Analyser {
             AstKind::Variable {
                 type_spec, init, ..
             } => {
-                self.walk(type_spec)?;
+                self.walk(arena, symtab, *type_spec)?;
                 if let Some(init) = init {
-                    check(init)?;
-                    replace(init, &fold(init));
-                    if let Some(sym) = resolve(ast) {
-                        if has_static_storage_duration(sym) {
-                            if !is_const_expr(init) {
-                                return Err(
-                                    "not a const expression".to_string()
-                                );
+                    let init_val = *init;
+                    check(arena, symtab, init_val)?;
+                    let folded = fold(arena, init_val);
+                    arena[init_val] = arena[folded].clone();
+                    if let Some(sym) = resolve(symtab, arena, &id) {
+                        if has_static_storage_duration(symtab, sym) {
+                            if !is_const_expr(arena, init_val) {
+                                return Err(error(Semantic(
+                                    SemanticError::NotAConstExpression,
+                                )));
                             }
                         }
                     }
@@ -91,9 +99,15 @@ impl Analyser {
 
                 Ok(())
             }
+            AstKind::Parameter { type_spec, .. } => {
+                self.walk(arena, symtab, *type_spec)?;
+                Ok(())
+            }
             AstKind::Return { expr, .. } => {
-                check(expr)?;
-                replace(expr, &fold(expr));
+                let expr_val = *expr;
+                check(arena, symtab, expr_val)?;
+                let folded = fold(arena, expr_val);
+                arena[expr_val] = arena[folded].clone();
                 Ok(())
             }
             AstKind::If {
@@ -101,24 +115,30 @@ impl Analyser {
                 then,
                 otherwise,
             } => {
-                check(cond)?;
-                replace(cond, &fold(cond));
-                self.walk(then)?;
+                let cond_val = *cond;
+                check(arena, symtab, cond_val)?;
+                let folded = fold(arena, cond_val);
+                arena[cond_val] = arena[folded].clone();
+                self.walk(arena, symtab, *then)?;
                 if let Some(otherwise) = otherwise {
-                    self.walk(otherwise)?;
+                    self.walk(arena, symtab, *otherwise)?;
                 }
                 Ok(())
             }
             AstKind::DoWhile { cond, body } => {
-                check(cond)?;
-                replace(cond, &fold(cond));
-                self.walk(body)?;
+                let cond_val = *cond;
+                check(arena, symtab, cond_val)?;
+                let folded = fold(arena, cond_val);
+                arena[cond_val] = arena[folded].clone();
+                self.walk(arena, symtab, *body)?;
                 Ok(())
             }
             AstKind::While { cond, body } => {
-                check(cond)?;
-                replace(cond, &fold(cond));
-                self.walk(body)?;
+                let cond_val = *cond;
+                check(arena, symtab, cond_val)?;
+                let folded = fold(arena, cond_val);
+                arena[cond_val] = arena[folded].clone();
+                self.walk(arena, symtab, *body)?;
                 Ok(())
             }
             AstKind::For {
@@ -128,130 +148,146 @@ impl Analyser {
                 body,
             } => {
                 if let Some(init) = init {
-                    self.walk(init)?;
+                    self.walk(arena, symtab, *init)?;
                 }
 
                 if let Some(cond) = cond {
-                    check(cond)?;
-                    replace(cond, &fold(cond));
+                    let cond_val = *cond;
+                    check(arena, symtab, cond_val)?;
+                    let folded = fold(arena, cond_val);
+                    arena[cond_val] = arena[folded].clone();
                 }
 
                 if let Some(post) = post {
-                    self.walk(post)?;
+                    self.walk(arena, symtab, *post)?;
                 }
 
-                self.walk(body)?;
+                self.walk(arena, symtab, *body)?;
 
                 Ok(())
             }
 
             AstKind::Continue { .. } => {
-                if upto(scope.clone(), ScopeKind::Loop).is_some() {
+                let scope = arena[id].scope;
+                if symtab.upto(scope, ScopeKind::Loop).is_some() {
                     Ok(())
                 } else {
-                    Err("continue not in a loop".to_string())
+                    Err(error(Semantic(SemanticError::ContinueNotInALoop)))
                 }
             }
 
             AstKind::Break { .. } => {
-                if upto_any(
-                    scope.clone(),
-                    &[ScopeKind::Loop, ScopeKind::Switch],
-                )
-                .is_some()
+                let scope = arena[id].scope;
+                if symtab
+                    .upto_any(scope, &[ScopeKind::Loop, ScopeKind::Switch])
+                    .is_some()
                 {
                     Ok(())
                 } else {
-                    Err("break not in a loop or switch".to_string())
+                    Err(error(Semantic(SemanticError::BreakNotInALoopOrSwitch)))
                 }
             }
             AstKind::ExprStmt { expr } => {
-                check(expr)?;
-                replace(expr, &fold(expr));
+                let expr_val = *expr;
+                check(arena, symtab, expr_val)?;
+                let folded = fold(arena, expr_val);
+                arena[expr_val] = arena[folded].clone();
                 Ok(())
             }
             AstKind::GoTo { label } => {
-                if get_label(scope.clone(), label).is_some() {
+                let scope = arena[id].scope;
+                if symtab.get_label(scope, arena.token_str(label)).is_some() {
                     Ok(())
                 } else {
-                    Err(format!("label {} not found", label))
+                    Err(error(Semantic(SemanticError::LabelNotFound(
+                        arena.token_str(label).to_string(),
+                    ))))
                 }
             }
 
             AstKind::Label { stmt, .. } => {
-                self.walk(stmt)?;
+                self.walk(arena, symtab, *stmt)?;
                 Ok(())
             }
 
             AstKind::Case { expr, stmt, idx: _ } => {
-                if upto(scope.clone(), ScopeKind::Switch).is_some() {
-                    check(expr)?;
-                    replace(expr, &fold(expr));
+                let scope = arena[id].scope;
+                if symtab.upto(scope, ScopeKind::Switch).is_some() {
+                    let expr_val = *expr;
+                    check(arena, symtab, expr_val)?;
+                    let folded = fold(arena, expr_val);
+                    arena[expr_val] = arena[folded].clone();
 
-                    if !is_const_int_expr(expr)
-                        && !is_const_unsigned_int_expr(expr)
+                    if !is_const_int_expr(arena, expr_val)
+                        && !is_const_unsigned_int_expr(arena, expr_val)
                     {
-                        return Err("not a const expression".to_string());
+                        return Err(error(Semantic(
+                            SemanticError::NotAConstExpression,
+                        )));
                     }
 
-                    self.walk(stmt)?;
+                    self.walk(arena, symtab, *stmt)?;
 
                     return Ok(());
                 }
 
-                Err("case outside of a switch statement".to_string())
+                Err(error(Semantic(SemanticError::CaseOutsideOfSwitch)))
             }
 
             AstKind::Default { stmt } => {
-                if upto(scope.clone(), ScopeKind::Switch).is_some() {
-                    self.walk(stmt)?;
+                let scope = arena[id].scope;
+                if symtab.upto(scope, ScopeKind::Switch).is_some() {
+                    self.walk(arena, symtab, *stmt)?;
                     return Ok(());
                 }
 
-                Err("default outside of a switch statement".to_string())
+                Err(error(Semantic(SemanticError::DefaultOutsideOfSwitch)))
             }
 
             AstKind::Switch { cond, body, cases } => {
-                check(cond)?;
-                replace(cond, &fold(cond));
-                self.walk(body)?;
+                let cond_val = *cond;
+                check(arena, symtab, cond_val)?;
+                let folded = fold(arena, cond_val);
+                arena[cond_val] = arena[folded].clone();
+                self.walk(arena, symtab, *body)?;
                 let mut case_values: HashSet<u64> = HashSet::new();
                 let mut has_default = false;
-                for case in cases {
-                    match &case.borrow().kind {
+                for &case in cases {
+                    let case_kind = arena[case].kind.clone();
+                    match &case_kind {
                         AstKind::Case { expr, stmt, .. } => {
-                            if is_const_unsigned_int_expr(expr) {
-                                if !case_values
-                                    .insert(const_unsigned_int_value(expr))
-                                {
-                                    return Err(
-                                        "duplicate case expression".to_string()
-                                    );
+                            if is_const_unsigned_int_expr(arena, *expr) {
+                                if !case_values.insert(
+                                    const_unsigned_int_value(arena, *expr),
+                                ) {
+                                    return Err(error(Semantic(
+                                        SemanticError::DuplicateCaseExpression,
+                                    )));
                                 }
-                            } else if is_const_int_expr(expr) {
+                            } else if is_const_int_expr(arena, *expr) {
                                 if !case_values
-                                    .insert(const_int_value(expr) as u64)
+                                    .insert(const_int_value(arena, *expr) as u64)
                                 {
-                                    return Err(
-                                        "duplicate case expression".to_string()
-                                    );
+                                    return Err(error(Semantic(
+                                        SemanticError::DuplicateCaseExpression,
+                                    )));
                                 }
                             } else {
-                                return Err(
-                                    "not a const expression".to_string()
-                                );
+                                return Err(error(Semantic(
+                                    SemanticError::NotAConstExpression,
+                                )));
                             }
 
-                            self.walk(stmt)?;
+                            self.walk(arena, symtab, *stmt)?;
                         }
                         AstKind::Default { stmt } => {
                             if has_default {
-                                return Err(
-                                    "duplicate default case".to_string()
-                                );
+                                return Err(error(Semantic(
+                                    SemanticError::DuplicateDefaultCase,
+                                )));
                             }
                             has_default = true;
-                            self.walk(stmt)?;
+                            self.walk(arena, symtab, *stmt)?;
                         }
                         _ => unreachable!(),
                     }
@@ -260,9 +296,16 @@ impl Analyser {
             }
             AstKind::EmptyStmt => Ok(()),
 
-            AstKind::StaticInitializer(c_expr) => {
-                check(c_expr)?;
-                replace(c_expr, &fold(c_expr));
+            AstKind::Initialiser {
+                type_spec: _,
+                value,
+            } => {
+                if let Some(expr) = value {
+                    let expr_val = *expr;
+                    check(arena, symtab, expr_val)?;
+                    let folded = fold(arena, expr_val);
+                    arena[expr_val] = arena[folded].clone();
+                }
                 Ok(())
             }
 
@@ -270,9 +313,9 @@ impl Analyser {
         }
     }
 
-    pub fn run(&self, ast: &Vec<AstRef>) -> Result<(), String> {
-        for node in ast {
-            self.walk(node)?;
+    pub fn run(&self, stage: &mut AstStage) -> Result<(), Error> {
+        for &node in &stage.root {
+            self.walk(&mut stage.arena, &stage.symtab, node)?;
         }
 
         Ok(())

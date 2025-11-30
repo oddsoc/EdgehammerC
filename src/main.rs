@@ -30,16 +30,17 @@ use tracing_tree::HierarchicalLayer;
 
 use std::env;
 
+mod air;
 mod ast;
-mod codegen;
 mod driver;
+mod errors;
 mod expr;
-mod ir;
 mod lexing;
+mod mir;
 mod parsing;
 mod preprocessing;
-mod scope;
 mod semantics;
+mod symtab;
 mod types;
 mod x64;
 

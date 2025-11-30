@@ -21,5 +21,5 @@
  *  DEALINGS IN THE SOFTWARE.
  */
 
-pub mod codegen;
-pub mod out;
+pub mod asm;
+pub mod mir;

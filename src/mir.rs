@@ -21,12 +21,12 @@
  *  DEALINGS IN THE SOFTWARE.
  */
 
-use crate::ir::tac::TacRef;
+use crate::air::tac::AirStage;
 
-pub trait CodeGenerator {
-    type Code;
+pub trait MirGenerator {
+    type Mir;
 
     fn new() -> Self;
 
-    fn lower(&mut self, ir: Vec<TacRef>) -> Self::Code;
+    fn lower(&mut self, stage: AirStage) -> Self::Mir;
 }

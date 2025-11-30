@@ -27,6 +27,7 @@ use std::simd::prelude::*;
 use std::ops::Range;
 use std::str;
 
+use crate::errors::{Error, ErrorClass::Lexing, LexingError, error, error_at};
 use unicode_ident::{is_xid_continue, is_xid_start};
 
 #[derive(Debug, PartialEq, Clone)]
@@ -324,7 +325,7 @@ impl<'buf> Tokeniser<'buf> {
         }
     }
 
-    fn const_double(&mut self) -> Result<(), String> {
+    fn const_double(&mut self) -> Result<(), Error> {
         let exp_frac = if self.text().as_bytes().first() == Some(&b'.') {
             false
         } else if self.peek() == '.' {
@@ -361,12 +362,14 @@ impl<'buf> Tokeniser<'buf> {
         let byte = self.peek();
 
         if is_identifier_start(byte) || byte == '.' {
-            return Err("invalid double literal".into());
+            return Err(error(Lexing(LexingError::InvalidDoubleLiteral)));
         }
 
         let value = match self.text().parse::<f64>() {
             Ok(val) => val,
-            Err(_) => return Err("invalid double literal".into()),
+            Err(_) => {
+                return Err(error(Lexing(LexingError::InvalidDoubleLiteral)));
+            }
         };
 
         self.tok.tag = Tag::ConstDouble(value);
@@ -374,7 +377,7 @@ impl<'buf> Tokeniser<'buf> {
     }
 
     #[inline]
-    fn octal_digits(&mut self) -> Result<(), String> {
+    fn octal_digits(&mut self) -> Result<(), Error> {
         let mut len = 0;
         while matches!(self.peek(), '0'..='7') {
             self.take();
@@ -383,12 +386,12 @@ impl<'buf> Tokeniser<'buf> {
         if len > 0 {
             Ok(())
         } else {
-            Err("expected octal digits".into())
+            Err(error(Lexing(LexingError::ExpectedOctalDigits)))
         }
     }
 
     #[inline]
-    fn hex_digits(&mut self) -> Result<(), String> {
+    fn hex_digits(&mut self) -> Result<(), Error> {
         let mut len = 0;
         while self.peek().is_ascii_hexdigit() {
             self.take();
@@ -397,11 +400,11 @@ impl<'buf> Tokeniser<'buf> {
         if len > 0 {
             Ok(())
         } else {
-            Err("expected hexadecimal digits".into())
+            Err(error(Lexing(LexingError::ExpectedHexadecimalDigits)))
         }
     }
 
-    fn const_number(&mut self) -> Result<(), String> {
+    fn const_number(&mut self) -> Result<(), Error> {
         let mut ch = self.peek_byte();
         let mut radix = 10;
 
@@ -438,7 +441,7 @@ impl<'buf> Tokeniser<'buf> {
     }
 
     #[inline]
-    fn decimal_digits(&mut self) -> Result<(), String> {
+    fn decimal_digits(&mut self) -> Result<(), Error> {
         let mut len = 0;
         while self.peek().is_ascii_digit() {
             self.take();
@@ -447,11 +450,11 @@ impl<'buf> Tokeniser<'buf> {
         if len > 0 {
             Ok(())
         } else {
-            Err("expected digits".into())
+            Err(error(Lexing(LexingError::ExpectedDigits)))
         }
     }
 
-    fn escape_sequence(&mut self) -> Result<(), String> {
+    fn escape_sequence(&mut self) -> Result<(), Error> {
         let mut ch = self.peek();
 
         match ch {
@@ -464,13 +467,17 @@ impl<'buf> Tokeniser<'buf> {
                 ch = self.take_and_peek();
 
                 if !ch.is_ascii_hexdigit() {
-                    return Err("not a valid hex escape sequence".into());
+                    return Err(error(Lexing(
+                        LexingError::NotValidHexEscapeSequence,
+                    )));
                 }
 
                 ch = self.take_and_peek();
 
                 if !ch.is_ascii_hexdigit() {
-                    return Err("not a valid hex escape sequence".into());
+                    return Err(error(Lexing(
+                        LexingError::NotValidHexEscapeSequence,
+                    )));
                 } else {
                     self.take();
                 }
@@ -483,9 +490,9 @@ impl<'buf> Tokeniser<'buf> {
                     ch = self.peek();
 
                     if !ch.is_ascii_hexdigit() {
-                        return Err(
-                            "not a valid unicode escape sequence".into()
-                        );
+                        return Err(error(Lexing(
+                            LexingError::NotValidUnicodeEscapeSequence,
+                        )));
                     } else {
                         self.take();
                     }
@@ -495,7 +502,9 @@ impl<'buf> Tokeniser<'buf> {
             _ => {
                 for _ in 0..3 {
                     if ch < '0' || ch > '7' {
-                        return Err("not a valid octal escape sequence".into());
+                        return Err(error(Lexing(
+                            LexingError::NotValidOctalEscapeSequence,
+                        )));
                     } else {
                         self.take();
                     }
@@ -506,7 +515,7 @@ impl<'buf> Tokeniser<'buf> {
         }
     }
 
-    fn const_string(&mut self) -> Result<(), String> {
+    fn const_string(&mut self) -> Result<(), Error> {
         let mut ch: char;
         let mut has_esc_seq = false;
         loop {
@@ -537,7 +546,7 @@ impl<'buf> Tokeniser<'buf> {
         Ok(())
     }
 
-    fn const_char(&mut self) -> Result<(), String> {
+    fn const_char(&mut self) -> Result<(), Error> {
         let mut ch: char;
         self.take();
         while {
@@ -557,7 +566,7 @@ impl<'buf> Tokeniser<'buf> {
         Ok(())
     }
 
-    fn const_integer(&mut self, radix: u32) -> Result<(), String> {
+    fn const_integer(&mut self, radix: u32) -> Result<(), Error> {
         let digits = if radix == 10 {
             self.text()
         } else if radix == 8 {
@@ -568,7 +577,9 @@ impl<'buf> Tokeniser<'buf> {
 
         if let Some(c) = digits.as_bytes().first() {
             if *c == b'0' && digits.len() > 1 && radix == 10 {
-                return Err("leading zero in integer constant".into());
+                return Err(error(Lexing(
+                    LexingError::LeadingZeroInIntegerConstant,
+                )));
             }
         }
 
@@ -589,13 +600,15 @@ impl<'buf> Tokeniser<'buf> {
                             self.tok.tag = Tag::ConstLong(int_value_i64);
                             Ok(())
                         } else {
-                            Err("invalid integer literal".into())
+                            Err(error(Lexing(
+                                LexingError::InvalidIntegerLiteral,
+                            )))
                         }
                     } else if int_value <= u64::MAX {
                         self.tok.tag = Tag::ConstUnsignedLongLong(int_value);
                         Ok(())
                     } else {
-                        Err("invalid integer literal".into())
+                        Err(error(Lexing(LexingError::InvalidIntegerLiteral)))
                     }
                 }
                 ConstTag::Long => {
@@ -606,7 +619,7 @@ impl<'buf> Tokeniser<'buf> {
                         self.tok.tag = Tag::ConstUnsignedLongLong(int_value);
                         Ok(())
                     } else {
-                        Err("invalid integer literal".into())
+                        Err(error(Lexing(LexingError::InvalidIntegerLiteral)))
                     }
                 }
                 ConstTag::LongLong => {
@@ -617,7 +630,7 @@ impl<'buf> Tokeniser<'buf> {
                         self.tok.tag = Tag::ConstUnsignedLongLong(int_value);
                         Ok(())
                     } else {
-                        Err("invalid integer literal".into())
+                        Err(error(Lexing(LexingError::InvalidIntegerLiteral)))
                     }
                 }
                 ConstTag::UnsignedInt => {
@@ -628,7 +641,7 @@ impl<'buf> Tokeniser<'buf> {
                         self.tok.tag = Tag::ConstUnsignedLong(int_value);
                         Ok(())
                     } else {
-                        Err("invalid integer literal".into())
+                        Err(error(Lexing(LexingError::InvalidIntegerLiteral)))
                     }
                 }
                 ConstTag::UnsignedLong => {
@@ -645,22 +658,25 @@ impl<'buf> Tokeniser<'buf> {
                         self.tok.tag = Tag::ConstUnsignedLongLong(int_value);
                         Ok(())
                     } else {
-                        Err("invalid integer literal".into())
+                        Err(error(Lexing(LexingError::InvalidIntegerLiteral)))
                     }
                 }
             },
-            Err(_) => Err("invalid integer literal".into()),
+            Err(_) => Err(error(Lexing(LexingError::InvalidIntegerLiteral))),
         }
     }
 
-    fn identifier_or_keyword(&mut self) -> Result<(), String> {
+    fn identifier_or_keyword(&mut self) -> Result<(), Error> {
         if is_identifier_start(self.peek()) {
             self.take();
             while is_identifier_continue(self.peek()) {
                 self.take();
             }
         } else {
-            return Err(format!("invalid identifier: {}", self.peek()).into());
+            return Err(error_at(
+                self.tok.clone(),
+                Lexing(LexingError::InvalidIdentifier(self.peek().to_string())),
+            ));
         }
 
         if let Some(tag) = keyword_map(self.text()) {
@@ -721,7 +737,7 @@ impl<'buf> Tokeniser<'buf> {
     }
 
     #[cfg(feature = "simd")]
-    fn skip_block_comment_simd(&mut self) -> Result<(), String> {
+    fn skip_block_comment_simd(&mut self) -> Result<(), Error> {
         const LANES: usize = 32;
         let buf = self.buf.as_bytes();
         let mut pos = self.tok.loc.end;
@@ -747,7 +763,7 @@ impl<'buf> Tokeniser<'buf> {
         self.skip_block_comment_scalar()
     }
 
-    fn skip_block_comment_scalar(&mut self) -> Result<(), String> {
+    fn skip_block_comment_scalar(&mut self) -> Result<(), Error> {
         let mut ch;
 
         while {
@@ -765,13 +781,13 @@ impl<'buf> Tokeniser<'buf> {
         }
 
         if ch == '\0' {
-            Err("unterminated block comment".into())
+            Err(error(Lexing(LexingError::UnterminatedBlockComment)))
         } else {
             Ok(())
         }
     }
 
-    fn skip_block_comment(&mut self) -> Result<(), String> {
+    fn skip_block_comment(&mut self) -> Result<(), Error> {
         #[cfg(feature = "simd")]
         return self.skip_block_comment_simd();
         #[cfg(not(feature = "simd"))]
@@ -841,7 +857,7 @@ impl<'buf> Tokeniser<'buf> {
         self.skip_whitespace_scalar();
     }
 
-    fn scan(&mut self) -> Result<Option<()>, String> {
+    fn scan(&mut self) -> Result<Option<()>, Error> {
         if self.is_whitespace() {
             self.skip_whitespace();
         }
@@ -1139,14 +1155,14 @@ impl<'buf> Tokeniser<'buf> {
         }
     }
 
-    pub fn advance(&mut self) -> Result<(), String> {
+    pub fn advance(&mut self) -> Result<(), Error> {
         while self.scan()?.is_none() {}
         Ok(())
     }
 }
 
 impl<'buf> Iterator for Tokeniser<'buf> {
-    type Item = Result<Token, String>;
+    type Item = Result<Token, Error>;
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {

@@ -22,12 +22,15 @@
  */
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::rc::Rc;
 
 use crate::ast::*;
+use crate::errors::{
+    Error, ErrorClass::TypeChecking, TypeCheckingError, error,
+};
 use crate::expr::{is_lvalue, is_null_pointer_const_expr};
-use crate::scope::*;
+use crate::symtab::*;
 
 pub type TypeRef = Rc<RefCell<Type>>;
 
@@ -54,6 +57,7 @@ pub enum TypeKind {
     LongLong,
     Double,
     LongDouble,
+    Array(usize),
     Function {
         param_tys: Vec<TypeRef>,
         return_ty: TypeRef,
@@ -118,6 +122,10 @@ pub fn long_long_type(is_signed: bool) -> TypeRef {
     }))
 }
 
+pub fn is_undefined_type(ty: &TypeRef) -> bool {
+    matches!(ty.borrow().kind, TypeKind::Undefined)
+}
+
 pub fn is_signed(ty: &TypeRef) -> bool {
     ty.borrow().flags & IS_SIGNED != 0
 }
@@ -174,8 +182,44 @@ pub fn pointer_type(basetype: &TypeRef) -> TypeRef {
     }))
 }
 
+pub fn array_type(basetype: &TypeRef, len: usize) -> TypeRef {
+    Rc::new(RefCell::new(Type {
+        kind: TypeKind::Array(len),
+        basetype: Some(basetype.clone()),
+        alignment: alignment_of(basetype),
+        size: size_of(basetype) * len,
+        flags: 0,
+    }))
+}
+
 pub fn base_type(ty: &TypeRef) -> Option<TypeRef> {
     ty.borrow().basetype.clone()
+}
+
+pub fn base_type_v2(ty: &TypeRef) -> TypeRef {
+    if let Some(base_ty) = ty.borrow().basetype.clone() {
+        base_ty
+    } else {
+        ty.clone()
+    }
+}
+
+pub fn innermost_base_type(ty: &TypeRef) -> TypeRef {
+    let mut ty_iter = base_type(ty);
+
+    while let Some(base_ty) = &mut ty_iter {
+        if base_ty.borrow().basetype.is_some() {
+            ty_iter = base_type(base_ty);
+        } else {
+            break;
+        }
+    }
+
+    if let Some(base_ty) = ty_iter {
+        base_ty
+    } else {
+        ty.clone()
+    }
 }
 
 pub fn is_compatible(ty0: &TypeRef, ty1: &TypeRef) -> bool {
@@ -212,6 +256,14 @@ pub fn is_pointer_type(ty: &TypeRef) -> bool {
     matches!(ty.borrow().kind, TypeKind::Pointer)
 }
 
+pub fn is_array_type(ty: &TypeRef) -> bool {
+    matches!(ty.borrow().kind, TypeKind::Array(_))
+}
+
+pub fn is_function_type(ty: &TypeRef) -> bool {
+    matches!(ty.borrow().kind, TypeKind::Function { .. })
+}
+
 pub fn is_scalar_type(ty: &TypeRef) -> bool {
     ty.borrow().flags & IS_SCALAR != 0
 }
@@ -225,36 +277,42 @@ fn int_type_rank(ty: &TypeRef) -> usize {
 }
 
 fn convert_by_assignment(
-    expr: &AstRef,
+    arena: &mut AstArena,
+    id: AstId,
     ty: &TypeRef,
-) -> Result<AstRef, String> {
-    if *type_of(expr).borrow() == *ty.borrow() {
-        Ok(expr.clone())
-    } else if is_arithmetic_type(&type_of(expr)) && is_arithmetic_type(ty) {
-        Ok(cast_to(expr, ty))
-    } else if is_null_pointer_const_expr(expr) && is_pointer_type(ty) {
-        Ok(cast_to(expr, ty))
+) -> Result<AstId, Error> {
+    if *type_of(arena, id).borrow() == *ty.borrow() {
+        Ok(id)
+    } else if is_arithmetic_type(&type_of(arena, id)) && is_arithmetic_type(ty)
+    {
+        Ok(cast_to(arena, id, ty))
+    } else if is_null_pointer_const_expr(arena, id) && is_pointer_type(ty) {
+        Ok(cast_to(arena, id, ty))
     } else {
-        println!("{:#?} to {:#?}", expr.borrow(), ty.borrow());
-        Err("cannot convert type for assignment".into())
+        Err(error(TypeChecking(
+            TypeCheckingError::CannotConvertTypeForAssign,
+        )))
     }
 }
 
 fn get_common_pointer_type(
-    e0: &AstRef,
-    e1: &AstRef,
-) -> Result<TypeRef, String> {
-    let ty0 = type_of(e0);
-    let ty1 = type_of(e1);
+    arena: &AstArena,
+    e0: AstId,
+    e1: AstId,
+) -> Result<TypeRef, Error> {
+    let ty0 = type_of(arena, e0);
+    let ty1 = type_of(arena, e1);
 
     if *ty0.borrow() == *ty1.borrow() {
         Ok(ty0.clone())
-    } else if is_null_pointer_const_expr(e0) {
+    } else if is_null_pointer_const_expr(arena, e0) {
         Ok(ty1.clone())
-    } else if is_null_pointer_const_expr(e1) {
+    } else if is_null_pointer_const_expr(arena, e1) {
         Ok(ty0.clone())
     } else {
-        Err("expressions have incompatible types".into())
+        Err(error(TypeChecking(
+            TypeCheckingError::IncompatibleExprTypes,
+        )))
     }
 }
 
@@ -292,64 +350,66 @@ fn get_common_type(ty0: &TypeRef, ty1: &TypeRef) -> TypeRef {
     }
 }
 
-pub fn type_of(node: &AstRef) -> TypeRef {
-    node.borrow().ty.clone()
+pub fn type_of(arena: &AstArena, id: AstId) -> TypeRef {
+    arena[id].ty.clone()
 }
 
-pub fn has_type(node: &AstRef) -> bool {
-    !matches!(type_of(node).borrow().kind, TypeKind::Undefined)
+pub fn has_type(arena: &AstArena, id: AstId) -> bool {
+    !is_undefined_type(&arena[id].ty)
 }
 
-fn cast_to(expr: &AstRef, ty: &TypeRef) -> AstRef {
-    if *type_of(expr).borrow() == *ty.borrow() {
-        return Rc::clone(expr);
+fn cast_to(arena: &mut AstArena, expr: AstId, ty: &TypeRef) -> AstId {
+    if *type_of(arena, expr).borrow() == *ty.borrow() {
+        return expr;
     }
 
-    if let AstKind::Cast { .. } = &expr.borrow().kind {
-        return Rc::clone(expr);
+    if let AstKind::Cast { .. } = &arena[expr].kind {
+        return expr;
     }
 
-    let scope = scope_of(expr);
+    let scope = scope_of(arena, expr);
 
-    let subexpr = Rc::new(RefCell::new(expr.borrow().clone()));
-    let cast = Rc::new(RefCell::new(Ast {
-        id: 0,
-        ty: ty.clone(),
-        kind: AstKind::Cast {
+    let subexpr_id = arena.alloc_clone(expr);
+    arena.alloc(
+        AstKind::Cast {
             type_spec: None,
-            expr: subexpr,
+            expr: subexpr_id,
         },
-        scope: scope.clone(),
-    }));
-
-    cast
+        Some(ty.clone()),
+        scope,
+    )
 }
 
 pub struct TypeAnnotator {
-    file_decls: HashSet<String>,
-    decl_types: HashMap<usize, TypeRef>,
-    current_fn: Option<SymRef>,
+    decls: HashSet<String>,
+    current_fn: Option<SymId>,
 }
 
 impl TypeAnnotator {
     pub fn new() -> TypeAnnotator {
         TypeAnnotator {
-            file_decls: HashSet::new(),
-            decl_types: HashMap::new(),
+            decls: HashSet::new(),
             current_fn: None,
         }
     }
 
-    fn check_decls(&self, decls: &Vec<SymRef>) -> Result<(), String> {
+    fn check_decls(
+        &self,
+        decls: &Vec<SymId>,
+        arena: &AstArena,
+        symtab: &SymTab,
+    ) -> Result<(), Error> {
         let mut prev_ty: Option<TypeRef> = None;
 
-        for decl in decls {
-            if let Some(node) = sym_as_node(decl.clone()) {
-                let decl_ty = node.borrow().ty.clone();
+        for &decl in decls {
+            if let Some(node) = sym_as_node(symtab, decl) {
+                let decl_ty = arena[node].ty.clone();
 
                 if let Some(ty) = &prev_ty {
                     if !is_match(&ty, &decl_ty) {
-                        return Err("mismatching types".to_string());
+                        return Err(error(TypeChecking(
+                            TypeCheckingError::TypeMismatch,
+                        )));
                     }
                 } else {
                     prev_ty = Some(decl_ty.clone());
@@ -360,14 +420,20 @@ impl TypeAnnotator {
         Ok(())
     }
 
-    fn annotate(&mut self, ast: &AstRef) -> Result<(AstRef, TypeRef), String> {
-        if has_type(ast) {
-            return Ok((ast.clone(), type_of(ast)));
+    fn annotate(
+        &mut self,
+        arena: &mut AstArena,
+        symtab: &SymTab,
+        id: AstId,
+    ) -> Result<(AstId, TypeRef), Error> {
+        if has_type(arena, id) {
+            return Ok((id, type_of(arena, id)));
         }
 
-        let mut node_ty = type_of(ast);
+        let mut node_ty = type_of(arena, id);
+        let kind = arena[id].kind.clone();
 
-        match &ast.borrow().kind {
+        match &kind {
             AstKind::Function {
                 name,
                 sym,
@@ -376,10 +442,16 @@ impl TypeAnnotator {
                 type_spec: rty_spec,
                 ..
             } => {
+                if let AstKind::Array { .. } = &arena[*rty_spec].kind {
+                    return Err(error(TypeChecking(
+                        TypeCheckingError::CannotReturnArray,
+                    )));
+                }
+
                 let mut param_tys: Vec<TypeRef> = vec![];
 
-                for param in params {
-                    let (_, par_ty) = self.annotate(param)?;
+                for &param in params {
+                    let (_, par_ty) = self.annotate(arena, symtab, param)?;
                     param_tys.push(par_ty);
                 }
 
@@ -388,15 +460,19 @@ impl TypeAnnotator {
                     .any(|p| matches!(p.borrow().kind, TypeKind::Void));
 
                 if has_void && param_tys.len() > 1 {
-                    return Err("void must be the only parameter".to_string());
+                    return Err(error(TypeChecking(
+                        TypeCheckingError::SurplusVoidParam,
+                    )));
                 } else if has_void {
                     param_tys.clear()
                 }
 
-                let (_, return_ty) = self.annotate(rty_spec)?;
+                let (_, return_ty) = self.annotate(arena, symtab, *rty_spec)?;
 
                 if let TypeKind::Function { .. } = &return_ty.borrow().kind {
-                    return Err("a function cannot return a function".into());
+                    return Err(error(TypeChecking(
+                        TypeCheckingError::CannotReturnFunction,
+                    )));
                 }
 
                 let ty = Rc::new(RefCell::new(Type {
@@ -411,26 +487,23 @@ impl TypeAnnotator {
                 }));
 
                 node_ty = ty.clone();
+                arena[id].ty = node_ty.clone();
 
                 if let Some(name) = name {
-                    self.file_decls.insert(name.clone());
+                    self.decls.insert(arena.token_str(name).to_string());
                 }
 
-                self.decl_types.insert(ast.borrow().id, node_ty.clone());
-
                 if let Some(body) = block {
-                    if let Some(sym) = sym {
-                        self.current_fn = sym.upgrade();
-                    }
-                    self.annotate(body)?;
+                    self.current_fn = *sym;
+                    self.annotate(arena, symtab, *body)?;
 
                     self.current_fn = None;
                 }
             }
 
             AstKind::Block { body } => {
-                for stmt in body {
-                    self.annotate(stmt)?;
+                for &stmt in body {
+                    self.annotate(arena, symtab, stmt)?;
                 }
             }
 
@@ -440,39 +513,48 @@ impl TypeAnnotator {
                 name,
                 ..
             } => {
-                let (_, ty) = self.annotate(type_spec)?;
+                let (_, ty) = self.annotate(arena, symtab, *type_spec)?;
 
-                self.decl_types.insert(ast.borrow().id, ty.clone());
-                self.file_decls.insert(name.clone());
+                node_ty = ty.clone();
+                arena[id].ty = node_ty.clone();
+
+                self.decls.insert(arena.token_str(name).to_string());
 
                 if let Some(init) = init {
-                    let (new_init, _init_ty) = self.annotate(init)?;
-                    let rhs = convert_by_assignment(&new_init, &ty)?;
-                    replace(init, &rhs);
+                    let (_new_init, _init_ty) =
+                        self.annotate(arena, symtab, *init)?;
                 }
+            }
+
+            AstKind::Parameter {
+                type_spec, name, ..
+            } => {
+                let (_, ty) =
+                    self.annotate_and_convert(arena, symtab, *type_spec)?;
+
+                self.decls.insert(arena.token_str(name).to_string());
 
                 node_ty = ty.clone();
             }
 
             AstKind::Return { expr } => {
-                let (e, _expr_ty) = self.annotate(expr)?;
+                let (e, _expr_ty) =
+                    self.annotate_and_convert(arena, symtab, *expr)?;
                 let mut ty = undefined_type();
 
-                if let Some(sym) = &self.current_fn {
-                    if let Some(f) = sym_as_node(sym.clone()) {
-                        let id = f.borrow().id;
-                        if let Some(t) = self.decl_types.get(&id) {
-                            if let TypeKind::Function { return_ty, .. } =
-                                &t.borrow().kind
-                            {
-                                ty = return_ty.clone();
-                            }
+                if let Some(sym) = self.current_fn {
+                    if let Some(f) = sym_as_node(symtab, sym) {
+                        if let TypeKind::Function { return_ty, .. } =
+                            &type_of(arena, f).borrow().kind
+                        {
+                            ty = return_ty.clone();
                         }
                     }
                 }
 
-                let new_expr = convert_by_assignment(&e, &ty)?;
-                replace(expr, &cast_to(&new_expr, &ty));
+                let new_expr = convert_by_assignment(arena, e, &ty)?;
+                let _cast_new_expr = cast_to(arena, new_expr, &ty);
+                arena[*expr] = arena[_cast_new_expr].clone();
 
                 node_ty = ty;
             }
@@ -482,45 +564,55 @@ impl TypeAnnotator {
                 then,
                 otherwise,
             } => {
-                let (new_cond, cond_ty) = self.annotate(cond)?;
+                let (new_cond, cond_ty) =
+                    self.annotate_and_convert(arena, symtab, *cond)?;
 
                 if !is_scalar_type(&cond_ty) {
-                    return Err("expected scalar type".to_string());
+                    return Err(error(TypeChecking(
+                        TypeCheckingError::ExpectedScalarType,
+                    )));
                 }
 
-                replace(cond, &new_cond);
+                arena[*cond] = arena[new_cond].clone();
 
-                let (new_then, _) = self.annotate(then)?;
-                replace(then, &new_then);
+                let (new_then, _) = self.annotate(arena, symtab, *then)?;
+                arena[*then] = arena[new_then].clone();
 
                 if let Some(otherwise) = otherwise {
-                    let (new_otherwise, _) = self.annotate(otherwise)?;
-                    replace(otherwise, &new_otherwise);
+                    let (new_otherwise, _) =
+                        self.annotate(arena, symtab, *otherwise)?;
+                    arena[*otherwise] = arena[new_otherwise].clone();
                 }
             }
 
             AstKind::DoWhile { cond, body } => {
-                let (new_cond, cond_ty) = self.annotate(cond)?;
+                let (new_cond, cond_ty) =
+                    self.annotate_and_convert(arena, symtab, *cond)?;
 
                 if !is_scalar_type(&cond_ty) {
-                    return Err("expected scalar type".to_string());
+                    return Err(error(TypeChecking(
+                        TypeCheckingError::ExpectedScalarType,
+                    )));
                 }
 
-                replace(cond, &new_cond);
+                arena[*cond] = arena[new_cond].clone();
 
-                self.annotate(body)?;
+                self.annotate(arena, symtab, *body)?;
             }
 
             AstKind::While { cond, body } => {
-                let (new_cond, cond_ty) = self.annotate(cond)?;
+                let (new_cond, cond_ty) =
+                    self.annotate_and_convert(arena, symtab, *cond)?;
 
                 if !is_scalar_type(&cond_ty) {
-                    return Err("expected scalar type".to_string());
+                    return Err(error(TypeChecking(
+                        TypeCheckingError::ExpectedScalarType,
+                    )));
                 }
 
-                replace(cond, &new_cond);
+                arena[*cond] = arena[new_cond].clone();
 
-                self.annotate(body)?;
+                self.annotate(arena, symtab, *body)?;
             }
 
             AstKind::For {
@@ -530,73 +622,79 @@ impl TypeAnnotator {
                 body,
             } => {
                 if let Some(init) = init {
-                    let (new_init, _) = self.annotate(init)?;
-                    replace(init, &new_init);
+                    let (new_init, _) = self.annotate(arena, symtab, *init)?;
+                    arena[*init] = arena[new_init].clone();
                 }
 
                 if let Some(c) = cond {
-                    let (new_cond, cond_ty) = self.annotate(c)?;
+                    let (new_cond, cond_ty) =
+                        self.annotate_and_convert(arena, symtab, *c)?;
 
                     if !is_scalar_type(&cond_ty) {
-                        return Err("expected scalar type".to_string());
+                        return Err(error(TypeChecking(
+                            TypeCheckingError::ExpectedScalarType,
+                        )));
                     }
 
-                    replace(c, &new_cond);
+                    arena[*c] = arena[new_cond].clone();
                 }
 
                 if let Some(post) = post {
-                    self.annotate(post)?;
+                    self.annotate(arena, symtab, *post)?;
                 }
 
-                self.annotate(body)?;
+                self.annotate(arena, symtab, *body)?;
             }
 
             AstKind::ExprStmt { expr } => {
-                let _ = self.annotate(expr)?;
+                let _ = self.annotate_and_convert(arena, symtab, *expr)?;
             }
             AstKind::GoTo { .. } => {}
 
             AstKind::Label { stmt, .. } => {
-                self.annotate(stmt)?;
+                self.annotate(arena, symtab, *stmt)?;
             }
 
-            AstKind::Case { expr, stmt, idx: _ } => {
-                let (new_expr, expr_ty) = self.annotate(expr)?;
+            AstKind::Case { expr, stmt, .. } => {
+                let (new_expr, expr_ty) =
+                    self.annotate_and_convert(arena, symtab, *expr)?;
 
                 if !is_int_type(&expr_ty) {
-                    return Err(
-                        "switch expression must be an integer".to_string()
-                    );
+                    return Err(error(TypeChecking(
+                        TypeCheckingError::NonIntegerSwitchExprType,
+                    )));
                 }
 
-                replace(expr, &new_expr);
+                arena[*expr] = arena[new_expr].clone();
 
-                self.annotate(stmt)?;
+                self.annotate(arena, symtab, *stmt)?;
             }
 
             AstKind::Default { stmt } => {
-                self.annotate(stmt)?;
+                self.annotate(arena, symtab, *stmt)?;
             }
 
             AstKind::Switch { cond, body, cases } => {
-                let (new_cond, cond_ty) = self.annotate(cond)?;
+                let (new_cond, cond_ty) =
+                    self.annotate_and_convert(arena, symtab, *cond)?;
 
                 if !is_int_type(&cond_ty) {
-                    return Err(
-                        "switch expression must be an integer".to_string()
-                    );
+                    return Err(error(TypeChecking(
+                        TypeCheckingError::NonIntegerSwitchExprType,
+                    )));
                 }
 
-                replace(cond, &new_cond);
+                arena[*cond] = arena[new_cond].clone();
 
-                for case in cases {
-                    if let AstKind::Case { expr, .. } = &case.borrow().kind {
-                        let e = cast_to(&expr, &cond_ty);
-                        replace(expr, &e);
+                for &case_id in cases {
+                    let case_kind = arena[case_id].kind.clone();
+                    if let AstKind::Case { expr, .. } = &case_kind {
+                        let e = cast_to(arena, *expr, &cond_ty);
+                        arena[*expr] = arena[e].clone();
                     }
                 }
 
-                self.annotate(body)?;
+                self.annotate(arena, symtab, *body)?;
             }
 
             AstKind::Void => {
@@ -614,37 +712,41 @@ impl TypeAnnotator {
                 qualifiers: _,
             } => {
                 let (new_base_type_spec, base_ty) =
-                    self.annotate(base_type_spec)?;
-                replace(base_type_spec, &new_base_type_spec);
+                    self.annotate(arena, symtab, *base_type_spec)?;
+                arena[*base_type_spec] = arena[new_base_type_spec].clone();
                 node_ty = pointer_type(&base_ty);
             }
 
             AstKind::Identifier { .. } => {
-                if let Some(sym) = resolve(&ast.clone()) {
-                    if let Some(sym_node) = sym_as_node(sym.clone()) {
-                        let id = sym_node.borrow().id;
-                        if let Some(ty) = self.decl_types.get(&id) {
-                            node_ty = ty.clone();
-                        }
+                if let Some(sym) = resolve(symtab, arena, &id) {
+                    if let Some(sym_node) = sym_as_node(symtab, sym) {
+                        let (_, ty) = self.annotate(arena, symtab, sym_node)?;
+                        node_ty = ty.clone();
                     }
                 }
             }
 
             AstKind::LogicAnd { left, right }
             | AstKind::LogicOr { left, right } => {
-                let (lhs, lhs_ty) = self.annotate(left)?;
-                let (rhs, rhs_ty) = self.annotate(right)?;
+                let (lhs, lhs_ty) =
+                    self.annotate_and_convert(arena, symtab, *left)?;
+                let (rhs, rhs_ty) =
+                    self.annotate_and_convert(arena, symtab, *right)?;
 
                 if !is_scalar_type(&lhs_ty) {
-                    return Err("expected scalar type".to_string());
+                    return Err(error(TypeChecking(
+                        TypeCheckingError::ExpectedScalarType,
+                    )));
                 }
 
                 if !is_scalar_type(&rhs_ty) {
-                    return Err("expected scalar type".to_string());
+                    return Err(error(TypeChecking(
+                        TypeCheckingError::ExpectedScalarType,
+                    )));
                 }
 
-                replace(left, &lhs);
-                replace(right, &rhs);
+                arena[*left] = arena[lhs].clone();
+                arena[*right] = arena[rhs].clone();
 
                 let ty = int_type(false);
 
@@ -653,66 +755,178 @@ impl TypeAnnotator {
 
             AstKind::CompoundAssign { left, right }
             | AstKind::Assign { left, right } => {
-                let (_, lhs_ty) = self.annotate(left)?;
-                let (rhs, rhs_ty) = self.annotate(right)?;
+                let (new_left, lhs_ty) =
+                    self.annotate_and_convert(arena, symtab, *left)?;
+                let (rhs, rhs_ty) =
+                    self.annotate_and_convert(arena, symtab, *right)?;
+
+                if is_array_type(&lhs_ty) {
+                    return Err(error(TypeChecking(
+                        TypeCheckingError::CannotAssignToArrayType,
+                    )));
+                }
+
+                if !is_lvalue(arena, new_left) {
+                    return Err(error(TypeChecking(
+                        TypeCheckingError::CannotAssignToNonLvalue,
+                    )));
+                }
 
                 if !is_scalar_type(&lhs_ty) {
-                    return Err("expected scalar type".to_string());
+                    return Err(error(TypeChecking(
+                        TypeCheckingError::ExpectedScalarType,
+                    )));
                 }
 
                 if !is_scalar_type(&rhs_ty) {
-                    return Err("expected scalar type".to_string());
+                    return Err(error(TypeChecking(
+                        TypeCheckingError::ExpectedScalarType,
+                    )));
                 }
 
-                let new_rhs = convert_by_assignment(&rhs, &lhs_ty)?;
-                replace(right, &new_rhs);
+                let new_rhs = convert_by_assignment(arena, rhs, &lhs_ty)?;
+                arena[*right] = arena[new_rhs].clone();
 
                 node_ty = lhs_ty.clone();
             }
 
-            AstKind::Add { left, right }
-            | AstKind::Subtract { left, right } => {
-                let (lhs, lhs_ty) = self.annotate(left)?;
-                let (rhs, rhs_ty) = self.annotate(right)?;
+            AstKind::Subscript { left, right } => {
+                let (lhs, lhs_ty) =
+                    self.annotate_and_convert(arena, symtab, *left)?;
+                let (rhs, rhs_ty) =
+                    self.annotate_and_convert(arena, symtab, *right)?;
+
+                if is_pointer_type(&lhs_ty) && is_int_type(&rhs_ty) {
+                    let _cast_rhs = cast_to(arena, rhs, &long_type(true));
+                    arena[*right] = arena[_cast_rhs].clone();
+                    node_ty = base_type(&lhs_ty).expect("expected a pointer");
+                } else if is_int_type(&lhs_ty) && is_pointer_type(&rhs_ty) {
+                    let int_cast = cast_to(arena, lhs, &long_type(true));
+                    arena[*left] = arena[rhs].clone();
+                    arena[*right] = arena[int_cast].clone();
+                    node_ty = base_type(&rhs_ty).expect("expected a pointer");
+                } else {
+                    return Err(error(TypeChecking(
+                        TypeCheckingError::InvalidSubscriptOperands,
+                    )));
+                }
+            }
+
+            AstKind::Add { left, right } => {
+                let (lhs, lhs_ty) =
+                    self.annotate_and_convert(arena, symtab, *left)?;
+                let (rhs, rhs_ty) =
+                    self.annotate_and_convert(arena, symtab, *right)?;
 
                 if !is_scalar_type(&lhs_ty) {
-                    return Err("expected scalar type".to_string());
+                    return Err(error(TypeChecking(
+                        TypeCheckingError::ExpectedScalarType,
+                    )));
                 }
 
                 if !is_scalar_type(&rhs_ty) {
-                    return Err("expected scalar type".to_string());
+                    return Err(error(TypeChecking(
+                        TypeCheckingError::ExpectedScalarType,
+                    )));
                 }
 
-                let common_ty =
-                    if is_pointer_type(&lhs_ty) || is_pointer_type(&rhs_ty) {
-                        get_common_pointer_type(&lhs, &rhs)?
-                    } else {
-                        get_common_type(&lhs_ty, &rhs_ty)
-                    };
+                if is_arithmetic_type(&lhs_ty) && is_arithmetic_type(&rhs_ty) {
+                    let common_ty = get_common_type(&lhs_ty, &rhs_ty);
 
-                replace(left, &cast_to(&lhs, &common_ty));
-                replace(right, &cast_to(&rhs, &common_ty));
+                    let lhs = cast_to(arena, lhs, &common_ty);
+                    arena[*left] = arena[lhs].clone();
+                    let rhs = cast_to(arena, rhs, &common_ty);
+                    arena[*right] = arena[rhs].clone();
 
-                node_ty = common_ty.clone();
+                    node_ty = common_ty.clone();
+                } else if is_pointer_type(&lhs_ty) && is_int_type(&rhs_ty) {
+                    let new_rhs_ty = long_type(true);
+                    let rhs = cast_to(arena, rhs, &new_rhs_ty);
+                    arena[*right] = arena[rhs].clone();
+                    node_ty = lhs_ty.clone();
+                } else if is_int_type(&lhs_ty) && is_pointer_type(&rhs_ty) {
+                    let int_cast = cast_to(arena, lhs, &long_type(true));
+                    arena[*left] = arena[rhs].clone();
+                    arena[*right] = arena[int_cast].clone();
+                    node_ty = rhs_ty.clone();
+                } else {
+                    return Err(error(TypeChecking(
+                        TypeCheckingError::InvalidAddOperands,
+                    )));
+                }
+            }
+
+            AstKind::Subtract { left, right } => {
+                let (lhs, lhs_ty) =
+                    self.annotate_and_convert(arena, symtab, *left)?;
+                let (rhs, rhs_ty) =
+                    self.annotate_and_convert(arena, symtab, *right)?;
+
+                if !is_scalar_type(&lhs_ty) {
+                    return Err(error(TypeChecking(
+                        TypeCheckingError::ExpectedScalarType,
+                    )));
+                }
+
+                if !is_scalar_type(&rhs_ty) {
+                    return Err(error(TypeChecking(
+                        TypeCheckingError::ExpectedScalarType,
+                    )));
+                }
+
+                if is_arithmetic_type(&lhs_ty) && is_arithmetic_type(&rhs_ty) {
+                    let common_ty = get_common_type(&lhs_ty, &rhs_ty);
+
+                    let lhs = cast_to(arena, lhs, &common_ty);
+                    arena[*left] = arena[lhs].clone();
+                    let rhs = cast_to(arena, rhs, &common_ty);
+                    arena[*right] = arena[rhs].clone();
+
+                    node_ty = common_ty.clone();
+                } else if is_pointer_type(&lhs_ty) && is_int_type(&rhs_ty) {
+                    let new_rhs_ty = long_type(true);
+                    let rhs = cast_to(arena, rhs, &new_rhs_ty);
+                    arena[*right] = arena[rhs].clone();
+                    node_ty = lhs_ty.clone();
+                } else if is_pointer_type(&lhs_ty) && is_pointer_type(&rhs_ty) {
+                    if !is_match(&lhs_ty, &rhs_ty) {
+                        return Err(error(TypeChecking(
+                            TypeCheckingError::SubtractingDifferingPointers,
+                        )));
+                    }
+                    node_ty = long_type(true);
+                } else {
+                    return Err(error(TypeChecking(
+                        TypeCheckingError::InvalidSubtractOperands,
+                    )));
+                }
             }
 
             AstKind::Multiply { left, right }
             | AstKind::Divide { left, right } => {
-                let (lhs, lhs_ty) = self.annotate(left)?;
-                let (rhs, rhs_ty) = self.annotate(right)?;
+                let (lhs, lhs_ty) =
+                    self.annotate_and_convert(arena, symtab, *left)?;
+                let (rhs, rhs_ty) =
+                    self.annotate_and_convert(arena, symtab, *right)?;
 
                 if !is_arithmetic_type(&lhs_ty) {
-                    return Err("expected arithmetic type".to_string());
+                    return Err(error(TypeChecking(
+                        TypeCheckingError::ExpectedArithmeticType,
+                    )));
                 }
 
                 if !is_arithmetic_type(&rhs_ty) {
-                    return Err("expected arithmetic type".to_string());
+                    return Err(error(TypeChecking(
+                        TypeCheckingError::ExpectedArithmeticType,
+                    )));
                 }
 
                 let common_ty = get_common_type(&lhs_ty, &rhs_ty);
 
-                replace(left, &cast_to(&lhs, &common_ty));
-                replace(right, &cast_to(&rhs, &common_ty));
+                let lhs = cast_to(arena, lhs, &common_ty);
+                arena[*left] = arena[lhs].clone();
+                let rhs = cast_to(arena, rhs, &common_ty);
+                arena[*right] = arena[rhs].clone();
 
                 node_ty = common_ty.clone();
             }
@@ -721,40 +935,54 @@ impl TypeAnnotator {
             | AstKind::And { left, right }
             | AstKind::Or { left, right }
             | AstKind::Xor { left, right } => {
-                let (lhs, lhs_ty) = self.annotate(left)?;
-                let (rhs, rhs_ty) = self.annotate(right)?;
+                let (lhs, lhs_ty) =
+                    self.annotate_and_convert(arena, symtab, *left)?;
+                let (rhs, rhs_ty) =
+                    self.annotate_and_convert(arena, symtab, *right)?;
 
                 if !is_int_type(&lhs_ty) {
-                    return Err("expected integer type".to_string());
+                    return Err(error(TypeChecking(
+                        TypeCheckingError::ExpectedIntegerType,
+                    )));
                 }
 
                 if !is_int_type(&rhs_ty) {
-                    return Err("expected integer type".to_string());
+                    return Err(error(TypeChecking(
+                        TypeCheckingError::ExpectedIntegerType,
+                    )));
                 }
 
                 let common_ty = get_common_type(&lhs_ty, &rhs_ty);
 
-                replace(left, &cast_to(&lhs, &common_ty));
-                replace(right, &cast_to(&rhs, &common_ty));
+                let lhs = cast_to(arena, lhs, &common_ty);
+                arena[*left] = arena[lhs].clone();
+                let rhs = cast_to(arena, rhs, &common_ty);
+                arena[*right] = arena[rhs].clone();
 
                 node_ty = common_ty.clone();
             }
 
             AstKind::LeftShift { left, right }
             | AstKind::RightShift { left, right } => {
-                let (lhs, lhs_ty) = self.annotate(left)?;
-                let (rhs, rhs_ty) = self.annotate(right)?;
+                let (lhs, lhs_ty) =
+                    self.annotate_and_convert(arena, symtab, *left)?;
+                let (rhs, rhs_ty) =
+                    self.annotate_and_convert(arena, symtab, *right)?;
 
                 if !is_int_type(&lhs_ty) {
-                    return Err("expected integer type".to_string());
+                    return Err(error(TypeChecking(
+                        TypeCheckingError::ExpectedIntegerType,
+                    )));
                 }
 
                 if !is_int_type(&rhs_ty) {
-                    return Err("expected integer type".to_string());
+                    return Err(error(TypeChecking(
+                        TypeCheckingError::ExpectedIntegerType,
+                    )));
                 }
 
-                replace(left, &lhs);
-                replace(right, &rhs);
+                arena[*left] = arena[lhs].clone();
+                arena[*right] = arena[rhs].clone();
 
                 node_ty = lhs_ty.clone();
             }
@@ -765,34 +993,58 @@ impl TypeAnnotator {
             | AstKind::LessOrEq { left, right }
             | AstKind::Greater { left, right }
             | AstKind::GreaterOrEq { left, right } => {
-                let (lhs, lhs_ty) = self.annotate(left)?;
-                let (rhs, rhs_ty) = self.annotate(right)?;
+                let (lhs, lhs_ty) =
+                    self.annotate_and_convert(arena, symtab, *left)?;
+                let (rhs, rhs_ty) =
+                    self.annotate_and_convert(arena, symtab, *right)?;
 
-                if !is_scalar_type(&lhs_ty) {
-                    return Err("expected scalar type".to_string());
+                if !is_scalar_type(&lhs_ty) || !is_scalar_type(&rhs_ty) {
+                    return Err(error(TypeChecking(
+                        TypeCheckingError::ExpectedScalarType,
+                    )));
                 }
 
-                if !is_scalar_type(&rhs_ty) {
-                    return Err("expected scalar type".to_string());
-                }
+                let is_equality = matches!(
+                    arena[id].kind,
+                    AstKind::Equal { .. } | AstKind::NotEq { .. }
+                );
 
-                let common_ty =
-                    if is_pointer_type(&lhs_ty) || is_pointer_type(&rhs_ty) {
-                        get_common_pointer_type(&lhs, &rhs)?
-                    } else {
-                        get_common_type(&lhs_ty, &rhs_ty)
-                    };
-
-                replace(left, &cast_to(&lhs, &common_ty));
-                replace(right, &cast_to(&rhs, &common_ty));
-
-                node_ty = if is_pointer_type(&common_ty)
-                    || is_double_type(&common_ty)
+                let common_ty = if is_pointer_type(&lhs_ty)
+                    || is_pointer_type(&rhs_ty)
                 {
-                    int_type(false)
+                    if is_pointer_type(&lhs_ty) && !is_pointer_type(&rhs_ty) {
+                        if !is_equality
+                            || !is_null_pointer_const_expr(arena, *right)
+                        {
+                            return Err(error(TypeChecking(
+                                TypeCheckingError::ComparePointerNonZeroInteger,
+                            )));
+                        }
+                        lhs_ty.clone()
+                    } else if !is_pointer_type(&lhs_ty)
+                        && is_pointer_type(&rhs_ty)
+                    {
+                        if !is_equality
+                            || !is_null_pointer_const_expr(arena, *left)
+                        {
+                            return Err(error(TypeChecking(
+                                TypeCheckingError::ComparePointerNonZeroInteger,
+                            )));
+                        }
+                        rhs_ty.clone()
+                    } else {
+                        get_common_pointer_type(arena, lhs, rhs)?
+                    }
                 } else {
-                    common_ty.clone()
+                    get_common_type(&lhs_ty, &rhs_ty)
                 };
+
+                let lhs = cast_to(arena, lhs, &common_ty);
+                arena[*left] = arena[lhs].clone();
+                let rhs = cast_to(arena, rhs, &common_ty);
+                arena[*right] = arena[rhs].clone();
+
+                node_ty = int_type(false);
             }
 
             AstKind::Ternary {
@@ -800,123 +1052,139 @@ impl TypeAnnotator {
                 middle,
                 right,
             } => {
-                let (lhs, lhs_ty) = self.annotate(left)?;
+                let (lhs, lhs_ty) =
+                    self.annotate_and_convert(arena, symtab, *left)?;
 
                 if !is_scalar_type(&lhs_ty) {
-                    return Err("expected a scalar type".to_string());
+                    return Err(error(TypeChecking(
+                        TypeCheckingError::ExpectedScalarType,
+                    )));
                 }
 
-                replace(left, &lhs);
+                arena[*left] = arena[lhs].clone();
 
-                let (mhs, mhs_ty) = self.annotate(middle)?;
+                let (mhs, mhs_ty) = self.annotate(arena, symtab, *middle)?;
 
                 if !is_scalar_type(&mhs_ty) {
-                    return Err("expected a scalar type".to_string());
+                    return Err(error(TypeChecking(
+                        TypeCheckingError::ExpectedScalarType,
+                    )));
                 }
 
-                let (rhs, rhs_ty) = self.annotate(right)?;
+                let (rhs, rhs_ty) = self.annotate(arena, symtab, *right)?;
 
                 if !is_scalar_type(&rhs_ty) {
-                    return Err("expected a scalar type".to_string());
+                    return Err(error(TypeChecking(
+                        TypeCheckingError::ExpectedScalarType,
+                    )));
                 }
 
                 if !is_compatible(&mhs_ty, &rhs_ty) {
-                    return Err("incompatible types".to_string());
+                    return Err(error(TypeChecking(
+                        TypeCheckingError::IncompatibleTypes,
+                    )));
                 }
 
                 let common_ty =
                     if is_pointer_type(&mhs_ty) || is_pointer_type(&rhs_ty) {
-                        get_common_pointer_type(&mhs, &rhs)?
+                        get_common_pointer_type(arena, mhs, rhs)?
                     } else {
                         get_common_type(&mhs_ty, &rhs_ty)
                     };
 
-                replace(middle, &cast_to(&mhs, &common_ty));
-                replace(right, &cast_to(&rhs, &common_ty));
+                let mhs = cast_to(arena, mhs, &common_ty);
+                arena[*middle] = arena[mhs].clone();
+                let rhs = cast_to(arena, rhs, &common_ty);
+                arena[*right] = arena[rhs].clone();
 
                 node_ty = common_ty.clone();
             }
 
             AstKind::Not { expr: inner } => {
-                let (new_inner, inner_ty) = self.annotate(inner)?;
+                let (new_inner, inner_ty) =
+                    self.annotate_and_convert(arena, symtab, *inner)?;
 
                 if !is_scalar_type(&inner_ty) {
-                    return Err("expected scalar type".to_string());
+                    return Err(error(TypeChecking(
+                        TypeCheckingError::ExpectedScalarType,
+                    )));
                 }
 
-                replace(inner, &new_inner);
+                arena[*inner] = arena[new_inner].clone();
 
                 node_ty = int_type(true);
             }
 
             AstKind::Complement { expr: inner } => {
-                let (new_inner, inner_ty) = self.annotate(inner)?;
+                let (new_inner, inner_ty) =
+                    self.annotate_and_convert(arena, symtab, *inner)?;
 
                 if !is_int_type(&inner_ty) {
-                    return Err("expected integer type".to_string());
+                    return Err(error(TypeChecking(
+                        TypeCheckingError::ExpectedIntegerType,
+                    )));
                 }
 
-                replace(inner, &new_inner);
+                arena[*inner] = arena[new_inner].clone();
 
                 node_ty = inner_ty.clone();
             }
 
             AstKind::AddrOf { expr: inner } => {
-                let (new_inner, inner_ty) = self.annotate(inner)?;
+                let (new_inner, inner_ty) =
+                    self.annotate(arena, symtab, *inner)?;
 
-                replace(inner, &new_inner);
+                arena[*inner] = arena[new_inner].clone();
 
-                if !is_lvalue(&inner) {
-                    return Err("cannot dereference an rvalue".into());
+                if !is_lvalue(arena, *inner) {
+                    return Err(error(TypeChecking(
+                        TypeCheckingError::DereferencingRvalue,
+                    )));
                 }
 
                 node_ty = pointer_type(&inner_ty.clone());
             }
 
             AstKind::Deref { expr: inner } => {
-                let (new_inner, inner_ty) = self.annotate(inner)?;
+                let (new_inner, inner_ty) =
+                    self.annotate_and_convert(arena, symtab, *inner)?;
 
-                replace(inner, &new_inner);
+                arena[*inner] = arena[new_inner].clone();
 
-                let mut ty = inner_ty.clone();
-
-                match inner_ty.borrow().kind {
-                    TypeKind::Pointer => {
-                        let base_ty = ty.borrow().basetype.clone().unwrap();
-                        ty = base_ty;
-                    }
-                    _ => {
-                        unreachable!()
-                    }
-                }
-
+                let ty = base_type(&inner_ty).expect("expected a pointer");
                 node_ty = ty.clone();
             }
 
             AstKind::Negate { expr: inner } => {
-                let (new_inner, inner_ty) = self.annotate(inner)?;
+                let (new_inner, inner_ty) =
+                    self.annotate_and_convert(arena, symtab, *inner)?;
 
                 if !is_arithmetic_type(&inner_ty) {
-                    return Err("expected scalar type".to_string());
+                    return Err(error(TypeChecking(
+                        TypeCheckingError::ExpectedScalarType,
+                    )));
                 }
 
-                replace(inner, &new_inner);
+                arena[*inner] = arena[new_inner].clone();
 
                 node_ty = inner_ty.clone();
             }
 
-            AstKind::PostIncr { expr: inner }
+            AstKind::PreIncr { expr: inner }
+            | AstKind::PreDecr { expr: inner }
+            | AstKind::PostIncr { expr: inner }
             | AstKind::PostDecr { expr: inner } => {
-                let (new_inner, inner_ty) = self.annotate(inner)?;
+                let (new_inner, inner_ty) =
+                    self.annotate_and_convert(arena, symtab, *inner)?;
 
                 if !is_arithmetic_type(&inner_ty) && !is_pointer_type(&inner_ty)
                 {
-                    return Err(
-                        "expected arithmetic or pointer type".to_string()
-                    );
+                    return Err(error(TypeChecking(
+                        TypeCheckingError::ExpectedArithmeticType,
+                    )));
                 }
 
-                replace(inner, &new_inner);
+                arena[*inner] = arena[new_inner].clone();
 
                 node_ty = inner_ty.clone();
             }
@@ -925,27 +1193,34 @@ impl TypeAnnotator {
                 type_spec,
                 expr: inner,
             } => {
-                let (new_inner, inner_ty) = self.annotate(inner)?;
+                let (new_inner, inner_ty) =
+                    self.annotate_and_convert(arena, symtab, *inner)?;
 
                 if let Some(ty_spec) = type_spec {
-                    let (_, ty) = self.annotate(ty_spec)?;
+                    let (_, ty) = self.annotate(arena, symtab, *ty_spec)?;
 
                     if is_pointer_type(&inner_ty) && is_double_type(&ty) {
-                        return Err("cannot cast pointer to double".to_string());
+                        return Err(error(TypeChecking(
+                            TypeCheckingError::CannotCastDoubleToPointer,
+                        )));
                     }
 
                     if is_pointer_type(&ty) && is_double_type(&inner_ty) {
-                        return Err("cannot cast double to pointer".to_string());
+                        return Err(error(TypeChecking(
+                            TypeCheckingError::CannotCastPointerToDouble,
+                        )));
                     }
 
-                    replace(inner, &cast_to(&new_inner, &ty));
+                    let new_inner = cast_to(arena, new_inner, &ty);
+                    arena[*inner] = arena[new_inner].clone();
                     node_ty = ty.clone();
                 }
             }
 
             AstKind::Call { expr: callee, args } => {
-                let (new_callee, call_ty) = self.annotate(callee)?;
-                replace(callee, &new_callee);
+                let (new_callee, call_ty) =
+                    self.annotate_and_convert(arena, symtab, *callee)?;
+                arena[*callee] = arena[new_callee].clone();
 
                 if let TypeKind::Function {
                     param_tys,
@@ -953,21 +1228,44 @@ impl TypeAnnotator {
                 } = &call_ty.clone().borrow().kind
                 {
                     if args.len() > param_tys.len() {
-                        return Err("too many arguments".to_string());
+                        return Err(error(TypeChecking(
+                            TypeCheckingError::TooManyArguments,
+                        )));
                     } else if args.len() < param_tys.len() {
-                        return Err("too few arguments".to_string());
+                        return Err(error(TypeChecking(
+                            TypeCheckingError::TooFewArguments,
+                        )));
                     } else {
                         for (arg, param_ty) in args.iter().zip(param_tys.iter())
                         {
-                            self.annotate(arg)?;
+                            self.annotate_and_convert(arena, symtab, *arg)?;
 
                             let new_arg =
-                                convert_by_assignment(&arg, &param_ty)?;
-                            replace(&arg, &new_arg);
+                                convert_by_assignment(arena, *arg, param_ty)?;
+                            arena[*arg] = arena[new_arg].clone();
                         }
                         node_ty = return_ty.clone();
                     }
                 }
+            }
+
+            AstKind::Array {
+                type_spec,
+                dimension: _,
+                len,
+            } => {
+                let (new_type_spec, base_ty) =
+                    self.annotate(arena, symtab, *type_spec)?;
+
+                if is_function_type(&base_ty) {
+                    return Err(error(TypeChecking(
+                        TypeCheckingError::FunctionArray,
+                    )));
+                }
+
+                arena[*type_spec] = arena[new_type_spec].clone();
+
+                node_ty = array_type(&base_ty, len.get());
             }
 
             AstKind::ConstInt(_) => {
@@ -990,16 +1288,52 @@ impl TypeAnnotator {
                 node_ty = ty.clone();
             }
 
-            AstKind::StaticInitializer(c_expr) => {
-                let (e, ty) = self.annotate(c_expr)?;
-                replace(c_expr, &e);
-                node_ty = ty.clone();
+            AstKind::Initialiser { type_spec, value } => {
+                let (_, type_spec_ty) =
+                    self.annotate(arena, symtab, *type_spec)?;
+                if let Some(expr) = value {
+                    let (e, _ty) =
+                        self.annotate_and_convert(arena, symtab, *expr)?;
+                    let cast_expr =
+                        convert_by_assignment(arena, e, &type_spec_ty)?;
+                    arena[*expr] = arena[cast_expr].clone();
+                }
+                node_ty = type_spec_ty.clone();
             }
 
-            AstKind::Initializer(expr) => {
-                let (e, ty) = self.annotate(expr)?;
-                replace(expr, &e);
-                node_ty = ty.clone();
+            AstKind::CompoundInitialiser(initialiser) => {
+                let (_, type_spec_ty) =
+                    self.annotate(arena, symtab, initialiser.type_spec)?;
+                node_ty = type_spec_ty.clone();
+
+                if initialiser.initialisers.len() == 0 {
+                    return Err(error(TypeChecking(
+                        TypeCheckingError::EmptyInitialiserList,
+                    )));
+                }
+
+                let base_ty = if is_array_type(&type_spec_ty)
+                    || is_pointer_type(&type_spec_ty)
+                {
+                    base_type(&type_spec_ty).ok_or(error(TypeChecking(
+                        TypeCheckingError::EmptyInitialiserList,
+                    )))?
+                } else {
+                    unreachable!();
+                };
+
+                for expr in &initialiser.initialisers {
+                    let (e, ty) = self.annotate(arena, symtab, *expr)?;
+
+                    if !is_compatible(&base_ty, &ty) {
+                        return Err(error(TypeChecking(
+                            TypeCheckingError::IncompatibleElementInArrayInitialiser,
+                        )));
+                    }
+
+                    let cast_expr = cast_to(arena, e, &base_ty);
+                    arena[*expr] = arena[cast_expr].clone();
+                }
             }
 
             _ => {
@@ -1008,25 +1342,67 @@ impl TypeAnnotator {
             }
         }
 
-        ast.borrow_mut().ty = node_ty.clone();
+        arena[id].ty = node_ty.clone();
 
-        Ok((ast.clone(), node_ty.clone()))
+        Ok((id, node_ty.clone()))
     }
 
-    pub fn run(&mut self, ast: &[AstRef]) -> Result<(), String> {
-        if ast.len() == 0 {
+    fn type_convert(&mut self, ty: &TypeRef) -> Result<TypeRef, Error> {
+        let node_ty = if is_array_type(ty) {
+            let base_ty = base_type(ty).expect("array without basetype");
+            pointer_type(&base_ty)
+        } else {
+            ty.clone()
+        };
+
+        Ok(node_ty.clone())
+    }
+
+    fn annotate_and_convert(
+        &mut self,
+        arena: &mut AstArena,
+        symtab: &SymTab,
+        id: AstId,
+    ) -> Result<(AstId, TypeRef), Error> {
+        let (node, ty) = self.annotate(arena, symtab, id)?;
+        let conv_ty = self.type_convert(&ty)?;
+
+        if is_array_type(&ty) {
+            let inner = arena.alloc_clone(node);
+            let scope = scope_of(arena, node);
+            let addr_of = arena.alloc(
+                AstKind::AddrOf { expr: inner },
+                Some(conv_ty.clone()),
+                scope,
+            );
+            arena[id] = arena[addr_of].clone();
+            Ok((addr_of, conv_ty))
+        } else {
+            let _cast_node = cast_to(arena, node, &conv_ty);
+            arena[id] = arena[_cast_node].clone();
+            Ok((node, conv_ty.clone()))
+        }
+    }
+
+    pub fn run(&mut self, stage: &mut AstStage) -> Result<(), Error> {
+        if stage.root.is_empty() {
             return Ok(());
         }
 
-        let scope = upto(scope_of(&ast[0]), ScopeKind::File).unwrap();
+        let scope = stage
+            .symtab
+            .upto(scope_of(&stage.arena, stage.root[0]), ScopeKind::File)
+            .unwrap();
 
-        for node in ast {
-            self.annotate(node)?;
+        for &node in &stage.root {
+            self.annotate(&mut stage.arena, &stage.symtab, node)?;
         }
 
-        for name in &self.file_decls {
-            if let Some(decls) = get_all_named_sym_decls(scope.clone(), name) {
-                self.check_decls(&decls)?;
+        for name in &self.decls {
+            if let Some(decls) =
+                stage.symtab.get_all_named_sym_decls(scope, name)
+            {
+                self.check_decls(&decls, &mut stage.arena, &stage.symtab)?;
             }
         }
 

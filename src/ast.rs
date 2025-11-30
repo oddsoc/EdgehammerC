@@ -21,29 +21,47 @@
  *  DEALINGS IN THE SOFTWARE.
  */
 
-use std::cell::RefCell;
-use std::rc::{Rc, Weak};
+use std::cell::Cell;
+use std::fmt;
 
-use crate::scope::*;
+use crate::lexing::Token;
+use crate::symtab::*;
 use crate::types::*;
 
-pub type AstRef = Rc<RefCell<Ast>>;
-pub type AstWeakRef = Weak<RefCell<Ast>>;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AstId(pub usize);
 
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
+#[derive(Clone)]
 pub struct Ast {
-    pub id: usize,
     pub ty: TypeRef,
     pub kind: AstKind,
-    pub scope: ScopeRef,
+    pub scope: ScopeId,
+}
+
+impl fmt::Debug for Ast {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Ast")
+            .field("ty", &self.ty.borrow())
+            .field("kind", &self.kind)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
+pub struct CompoundInitialiser {
+    pub type_spec: AstId,
+    pub initialisers: Vec<AstId>,
+    pub max_initialisers: Option<usize>,
+}
+
+#[derive(Debug, Clone)]
+#[allow(unused)]
 pub enum AstKind {
-    StaticInitializer(AstRef),
-    Initializer(AstRef),
+    Initialiser {
+        type_spec: AstId,
+        value: Option<AstId>,
+    },
+    CompoundInitialiser(CompoundInitialiser),
     ConstInt(i32),
     ConstUnsignedInt(u32),
     ConstLong(i64),
@@ -53,223 +71,274 @@ pub enum AstKind {
     Int,
     Double,
     Pointer {
-        base_type_spec: AstRef,
+        base_type_spec: AstId,
         qualifiers: Vec<String>,
     },
     Function {
-        name: Option<String>,
-        sym: Option<SymWeakRef>,
-        params: Vec<AstRef>,
-        block: Option<AstRef>,
-        type_spec: AstRef,
+        name: Option<Token>,
+        sym: Option<SymId>,
+        params: Vec<AstId>,
+        block: Option<AstId>,
+        type_spec: AstId,
     },
     Block {
-        body: Vec<AstRef>,
+        body: Vec<AstId>,
     },
     Variable {
-        name: String,
-        sym: Option<SymWeakRef>,
-        type_spec: AstRef,
-        init: Option<AstRef>,
+        name: Token,
+        sym: Option<SymId>,
+        type_spec: AstId,
+        init: Option<AstId>,
+    },
+    Parameter {
+        name: Token,
+        sym: Option<SymId>,
+        type_spec: AstId,
+    },
+    Array {
+        type_spec: AstId,
+        dimension: Option<AstId>,
+        len: Cell<usize>,
     },
     Identifier {
-        name: String,
-        sym: Option<SymWeakRef>,
+        name: Token,
+        sym: Option<SymId>,
     },
     Return {
-        expr: AstRef,
+        expr: AstId,
     },
     If {
-        cond: AstRef,
-        then: AstRef,
-        otherwise: Option<AstRef>,
+        cond: AstId,
+        then: AstId,
+        otherwise: Option<AstId>,
     },
     Break {
-        to: Option<AstRef>,
+        to: Option<AstId>,
     },
     Continue {
-        to: Option<AstRef>,
+        to: Option<AstId>,
     },
     While {
-        cond: AstRef,
-        body: AstRef,
+        cond: AstId,
+        body: AstId,
     },
     DoWhile {
-        cond: AstRef,
-        body: AstRef,
+        cond: AstId,
+        body: AstId,
     },
     For {
-        init: Option<AstRef>,
-        cond: Option<AstRef>,
-        post: Option<AstRef>,
-        body: AstRef,
+        init: Option<AstId>,
+        cond: Option<AstId>,
+        post: Option<AstId>,
+        body: AstId,
     },
     Switch {
-        cond: AstRef,
-        body: AstRef,
-        cases: Vec<AstRef>,
+        cond: AstId,
+        body: AstId,
+        cases: Vec<AstId>,
     },
     ExprStmt {
-        expr: AstRef,
+        expr: AstId,
     },
     GoTo {
-        label: String,
+        label: Token,
     },
     Label {
-        name: String,
-        stmt: AstRef,
+        name: Token,
+        stmt: AstId,
     },
     Case {
-        expr: AstRef,
-        stmt: AstRef,
+        expr: AstId,
+        stmt: AstId,
         idx: usize,
     },
     Default {
-        stmt: AstRef,
+        stmt: AstId,
     },
     EmptyStmt,
     Ternary {
-        left: AstRef,
-        middle: AstRef,
-        right: AstRef,
+        left: AstId,
+        middle: AstId,
+        right: AstId,
     },
     Complement {
-        expr: AstRef,
+        expr: AstId,
     },
     Negate {
-        expr: AstRef,
+        expr: AstId,
     },
     Not {
-        expr: AstRef,
+        expr: AstId,
+    },
+    PreIncr {
+        expr: AstId,
+    },
+    PreDecr {
+        expr: AstId,
     },
     PostIncr {
-        expr: AstRef,
+        expr: AstId,
     },
     PostDecr {
-        expr: AstRef,
+        expr: AstId,
     },
     Add {
-        left: AstRef,
-        right: AstRef,
+        left: AstId,
+        right: AstId,
     },
     Subtract {
-        left: AstRef,
-        right: AstRef,
+        left: AstId,
+        right: AstId,
     },
     Multiply {
-        left: AstRef,
-        right: AstRef,
+        left: AstId,
+        right: AstId,
     },
     Divide {
-        left: AstRef,
-        right: AstRef,
+        left: AstId,
+        right: AstId,
     },
     Modulo {
-        left: AstRef,
-        right: AstRef,
+        left: AstId,
+        right: AstId,
     },
     LeftShift {
-        left: AstRef,
-        right: AstRef,
+        left: AstId,
+        right: AstId,
     },
     RightShift {
-        left: AstRef,
-        right: AstRef,
+        left: AstId,
+        right: AstId,
     },
     And {
-        left: AstRef,
-        right: AstRef,
+        left: AstId,
+        right: AstId,
     },
     Or {
-        left: AstRef,
-        right: AstRef,
+        left: AstId,
+        right: AstId,
     },
     Xor {
-        left: AstRef,
-        right: AstRef,
+        left: AstId,
+        right: AstId,
     },
     LogicAnd {
-        left: AstRef,
-        right: AstRef,
+        left: AstId,
+        right: AstId,
     },
     LogicOr {
-        left: AstRef,
-        right: AstRef,
+        left: AstId,
+        right: AstId,
     },
     Equal {
-        left: AstRef,
-        right: AstRef,
+        left: AstId,
+        right: AstId,
     },
     NotEq {
-        left: AstRef,
-        right: AstRef,
+        left: AstId,
+        right: AstId,
     },
     Less {
-        left: AstRef,
-        right: AstRef,
+        left: AstId,
+        right: AstId,
     },
     LessOrEq {
-        left: AstRef,
-        right: AstRef,
+        left: AstId,
+        right: AstId,
     },
     Greater {
-        left: AstRef,
-        right: AstRef,
+        left: AstId,
+        right: AstId,
     },
     GreaterOrEq {
-        left: AstRef,
-        right: AstRef,
+        left: AstId,
+        right: AstId,
     },
     Assign {
-        left: AstRef,
-        right: AstRef,
+        left: AstId,
+        right: AstId,
     },
     CompoundAssign {
-        left: AstRef,
-        right: AstRef,
+        left: AstId,
+        right: AstId,
     },
     Call {
-        expr: AstRef,
-        args: Vec<AstRef>,
+        expr: AstId,
+        args: Vec<AstId>,
+    },
+    Subscript {
+        left: AstId,
+        right: AstId,
     },
     Cast {
-        type_spec: Option<AstRef>,
-        expr: AstRef,
+        type_spec: Option<AstId>,
+        expr: AstId,
     },
     AddrOf {
-        expr: AstRef,
+        expr: AstId,
     },
     Deref {
-        expr: AstRef,
+        expr: AstId,
     },
 }
 
-impl Ast {
-    pub fn new(
-        id: usize,
+#[derive(Debug, Clone, Default)]
+pub struct AstArena {
+    pub arena: Vec<Ast>,
+    pub source: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct AstStage {
+    pub arena: AstArena,
+    pub root: Vec<AstId>,
+    pub symtab: SymTab,
+}
+
+impl AstArena {
+    pub fn new() -> Self {
+        AstArena {
+            arena: Vec::new(),
+            source: String::new(),
+        }
+    }
+
+    pub fn token_str(&self, token: &Token) -> &str {
+        &self.source[token.loc.clone()]
+    }
+
+    pub fn alloc(
+        &mut self,
         kind: AstKind,
         ty: Option<TypeRef>,
-        scope: ScopeRef,
-    ) -> AstRef {
-        Rc::new(RefCell::new(Ast {
-            id,
-            ty: if let Some(t) = ty {
-                t.clone()
-            } else {
-                undefined_type()
-            },
+        scope: ScopeId,
+    ) -> AstId {
+        let id = AstId(self.arena.len());
+        self.arena.push(Ast {
+            ty: ty.unwrap_or_else(undefined_type),
             kind,
             scope,
-        }))
+        });
+        id
+    }
+
+    pub fn alloc_clone(&mut self, node: AstId) -> AstId {
+        let id = AstId(self.arena.len());
+        self.arena.push(self.arena[node.0].clone());
+        id
     }
 }
 
-pub fn deep_clone(node: &AstRef) -> AstRef {
-    Rc::new(RefCell::new(node.borrow().clone()))
+impl std::ops::Index<AstId> for AstArena {
+    type Output = Ast;
+
+    fn index(&self, id: AstId) -> &Ast {
+        &self.arena[id.0]
+    }
 }
 
-pub fn replace(node: &AstRef, with: &AstRef) {
-    if !Rc::ptr_eq(node, with) {
-        *node.borrow_mut() = with.borrow().clone();
+impl std::ops::IndexMut<AstId> for AstArena {
+    fn index_mut(&mut self, id: AstId) -> &mut Ast {
+        &mut self.arena[id.0]
     }
 }

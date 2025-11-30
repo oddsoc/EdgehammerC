@@ -1,12 +1,12 @@
 # EdgehammerC
 
-**EdgehammerC** is an in-development C compiler inspired by *Writing a C Compiler* by Nora Sandler.
+**EdgehammerC** is an in-development C compiler based on the book *Writing a C Compiler* by Nora Sandler.
 
-The compiler currently supports all C language features required to pass the book’s official test suite up through **chapter 14**, including every extra-credit feature.
+The compiler currently supports all C language features required to pass the book’s official test suite up through **chapter 15**, including every extra-credit feature. I have also added support for some features not covered by the book, for example, EdgehammerC can handle lazy array initialisers with nested brackets ommitted (see tests/array_decls.c for examples that are handled). 
 
-The long-term vision for EdgehammerC is to serve as a playground for exploring language design. For now, I am focussed on working through the book.
+The long-term vision for EdgehammerC is to serve as a playground for exploring language design. For now, I am focussed on working through the book with a secondary goal of learning Rust as I go along.
 
-Each chapter corresponds to a single commit in the repository, the only exception is chapters 6 and 7 — the test cases for chapter 7 passed as a side effect of changes I made for chapter 6 (oops!).  
+Each chapter corresponds to a single commit in the repository, the only exception is chapters 6 and 7 — the test cases for chapter 7 passed as a side effect of changes I made for chapter 6 (oops!). 
 
 To keep the history aligned with the book, commits are limited to chapter completions. Each commit will contain the changes needed to pass the chapter's test cases and will also incorporate any refactoring, bug fixes, and general improvements made since completing the previous chapter.
 
@@ -39,11 +39,11 @@ or, with simd acceleration:
 cargo +nightly build -r --features "simd"
 ```
 
-## Performance
+## Performance / Procrastination
 
-It's very premature to talk about performance but I found chapter 13 particularly hard and optimising the tokeniser was more fun! 🙂
+I found chapter 13 particularly hard to wrap my head around and optimising the tokeniser was more fun! 🙂
 
-As procrastination goes this was quite productive! I've measured the performance of the tokeniser (using Criterion) at **~595MiB/s** on the sqlite3.c amalgamation* with simd enabled, and **~490MiB/s** without. Tested on an Intel Core Ultra 7 165U, YMMV.
+I've measured the performance of the tokeniser (using Criterion) at **~595MiB/s** on the sqlite3.c amalgamation* with simd enabled, and **~490MiB/s** without. Tested on an Intel Core Ultra 7 165U, YMMV.
 
 *preprocessed to remove # directives but with comments left in place.
 

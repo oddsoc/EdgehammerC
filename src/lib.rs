@@ -24,10 +24,11 @@
 #![cfg_attr(feature = "simd", feature(portable_simd))]
 
 //mod ast;
-//mod codegen;
+//mod mir;
 //mod driver;
 //mod expr;
-//mod ir;
+//mod air;
+pub mod errors;
 pub mod lexing;
 pub mod preprocessing;
 //pub mod parsing;

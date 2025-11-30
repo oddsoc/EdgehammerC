@@ -21,14 +21,14 @@
  *  DEALINGS IN THE SOFTWARE.
  */
 
-use crate::ast::AstRef;
+use crate::ast::AstStage;
 
 pub mod tac;
 
-pub trait IrGenerator {
-    type Ir;
+pub trait AirGenerator {
+    type Air;
 
     fn new() -> Self;
 
-    fn lower(&mut self, ast: Vec<AstRef>) -> Self::Ir;
+    fn lower(&mut self, stage: AstStage) -> Self::Air;
 }
