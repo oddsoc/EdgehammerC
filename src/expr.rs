@@ -25,7 +25,7 @@ use crate::ast::*;
 use crate::errors::{
     Error,
     ErrorClass::{Parsing, Semantic},
-    ParsingError, SemanticError, error,
+    ParsingError, SemanticError,
 };
 use crate::symtab::*;
 use crate::types::*;
@@ -144,14 +144,14 @@ pub fn fold(arena: &mut AstArena, id: AstId) -> AstId {
                     AstKind::ConstUnsignedInt(lhs),
                     AstKind::ConstUnsignedInt(rhs),
                 ) => {
-                    let res = (*lhs as u32).wrapping_add(*rhs as u32) as u32;
+                    let res = (*lhs).wrapping_add(*rhs);
                     as_const_unsigned_int(arena, res, scope)
                 }
                 (
                     AstKind::ConstUnsignedLong(lhs),
                     AstKind::ConstUnsignedLong(rhs),
                 ) => {
-                    let res = (*lhs as u64).wrapping_add(*rhs as u64) as u64;
+                    let res = (*lhs).wrapping_add(*rhs);
                     as_const_unsigned_long(arena, res, scope)
                 }
                 _ => id,
@@ -174,14 +174,14 @@ pub fn fold(arena: &mut AstArena, id: AstId) -> AstId {
                     AstKind::ConstUnsignedInt(lhs),
                     AstKind::ConstUnsignedInt(rhs),
                 ) => {
-                    let res = (*lhs as u32).wrapping_sub(*rhs as u32) as u32;
+                    let res = (*lhs).wrapping_sub(*rhs);
                     as_const_unsigned_int(arena, res, scope)
                 }
                 (
                     AstKind::ConstUnsignedLong(lhs),
                     AstKind::ConstUnsignedLong(rhs),
                 ) => {
-                    let res = (*lhs as u64).wrapping_sub(*rhs as u64) as u64;
+                    let res = (*lhs).wrapping_sub(*rhs);
                     as_const_unsigned_long(arena, res, scope)
                 }
                 _ => id,
@@ -204,14 +204,14 @@ pub fn fold(arena: &mut AstArena, id: AstId) -> AstId {
                     AstKind::ConstUnsignedInt(lhs),
                     AstKind::ConstUnsignedInt(rhs),
                 ) => {
-                    let res = (*lhs as u32).wrapping_mul(*rhs as u32) as u32;
+                    let res = (*lhs).wrapping_mul(*rhs);
                     as_const_unsigned_int(arena, res, scope)
                 }
                 (
                     AstKind::ConstUnsignedLong(lhs),
                     AstKind::ConstUnsignedLong(rhs),
                 ) => {
-                    let res = (*lhs as u64).wrapping_mul(*rhs as u64) as u64;
+                    let res = (*lhs).wrapping_mul(*rhs);
                     as_const_unsigned_long(arena, res, scope)
                 }
                 _ => id,
@@ -234,22 +234,14 @@ pub fn fold(arena: &mut AstArena, id: AstId) -> AstId {
                     AstKind::ConstUnsignedInt(lhs),
                     AstKind::ConstUnsignedInt(rhs),
                 ) => {
-                    let res = if *rhs == 0 {
-                        0
-                    } else {
-                        (*lhs as u32) / (*rhs as u32) as u32
-                    } as u32;
+                    let res = lhs.checked_div(*rhs).unwrap_or(0);
                     as_const_unsigned_int(arena, res, scope)
                 }
                 (
                     AstKind::ConstUnsignedLong(lhs),
                     AstKind::ConstUnsignedLong(rhs),
                 ) => {
-                    let res = if *rhs == 0 {
-                        0
-                    } else {
-                        (*lhs as u64) / (*rhs as u64) as u64
-                    } as u64;
+                    let res = lhs.checked_div(*rhs).unwrap_or(0);
                     as_const_unsigned_long(arena, res, scope)
                 }
                 _ => id,
@@ -272,22 +264,14 @@ pub fn fold(arena: &mut AstArena, id: AstId) -> AstId {
                     AstKind::ConstUnsignedInt(lhs),
                     AstKind::ConstUnsignedInt(rhs),
                 ) => {
-                    let res = if *rhs == 0 {
-                        0
-                    } else {
-                        (*lhs as u32) % (*rhs as u32) as u32
-                    } as u32;
+                    let res = if *rhs == 0 { 0 } else { *lhs % *rhs };
                     as_const_unsigned_int(arena, res, scope)
                 }
                 (
                     AstKind::ConstUnsignedLong(lhs),
                     AstKind::ConstUnsignedLong(rhs),
                 ) => {
-                    let res = if *rhs == 0 {
-                        0
-                    } else {
-                        (*lhs as u64) % (*rhs as u64) as u64
-                    } as u64;
+                    let res = if *rhs == 0 { 0 } else { *lhs % *rhs };
                     as_const_unsigned_long(arena, res, scope)
                 }
                 _ => id,
@@ -310,14 +294,14 @@ pub fn fold(arena: &mut AstArena, id: AstId) -> AstId {
                     AstKind::ConstUnsignedInt(lhs),
                     AstKind::ConstUnsignedInt(rhs),
                 ) => {
-                    let res = (*lhs as u32) & (*rhs as u32) as u32;
+                    let res = *lhs & *rhs;
                     as_const_unsigned_int(arena, res, scope)
                 }
                 (
                     AstKind::ConstUnsignedLong(lhs),
                     AstKind::ConstUnsignedLong(rhs),
                 ) => {
-                    let res = (*lhs as u64) & (*rhs as u64) as u64;
+                    let res = *lhs & *rhs;
                     as_const_unsigned_long(arena, res, scope)
                 }
                 _ => id,
@@ -340,14 +324,14 @@ pub fn fold(arena: &mut AstArena, id: AstId) -> AstId {
                     AstKind::ConstUnsignedInt(lhs),
                     AstKind::ConstUnsignedInt(rhs),
                 ) => {
-                    let res = (*lhs as u32) | (*rhs as u32) as u32;
+                    let res = *lhs | *rhs;
                     as_const_unsigned_int(arena, res, scope)
                 }
                 (
                     AstKind::ConstUnsignedLong(lhs),
                     AstKind::ConstUnsignedLong(rhs),
                 ) => {
-                    let res = (*lhs as u64) | (*rhs as u64) as u64;
+                    let res = *lhs | *rhs;
                     as_const_unsigned_long(arena, res, scope)
                 }
                 _ => id,
@@ -370,14 +354,14 @@ pub fn fold(arena: &mut AstArena, id: AstId) -> AstId {
                     AstKind::ConstUnsignedInt(lhs),
                     AstKind::ConstUnsignedInt(rhs),
                 ) => {
-                    let res = (*lhs as u32).wrapping_shl(*rhs as u32) as u32;
+                    let res = (*lhs).wrapping_shl(*rhs);
                     as_const_unsigned_int(arena, res, scope)
                 }
                 (
                     AstKind::ConstUnsignedLong(lhs),
                     AstKind::ConstUnsignedLong(rhs),
                 ) => {
-                    let res = (*lhs as u64).wrapping_shl(*rhs as u32) as u64;
+                    let res = (*lhs).wrapping_shl(*rhs as u32);
                     as_const_unsigned_long(arena, res, scope)
                 }
                 _ => id,
@@ -400,14 +384,14 @@ pub fn fold(arena: &mut AstArena, id: AstId) -> AstId {
                     AstKind::ConstUnsignedInt(lhs),
                     AstKind::ConstUnsignedInt(rhs),
                 ) => {
-                    let res = (*lhs as u32) >> (*rhs as u32);
+                    let res = *lhs >> *rhs;
                     as_const_unsigned_int(arena, res, scope)
                 }
                 (
                     AstKind::ConstUnsignedLong(lhs),
                     AstKind::ConstUnsignedLong(rhs),
                 ) => {
-                    let res = (*lhs as u64) >> (*rhs as u32);
+                    let res = *lhs >> (*rhs as u32);
                     as_const_unsigned_long(arena, res, scope)
                 }
                 _ => id,
@@ -430,14 +414,14 @@ pub fn fold(arena: &mut AstArena, id: AstId) -> AstId {
                     AstKind::ConstUnsignedInt(lhs),
                     AstKind::ConstUnsignedInt(rhs),
                 ) => {
-                    let res = (*lhs as u32) ^ (*rhs as u32) as u32;
+                    let res = *lhs ^ *rhs;
                     as_const_unsigned_int(arena, res, scope)
                 }
                 (
                     AstKind::ConstUnsignedLong(lhs),
                     AstKind::ConstUnsignedLong(rhs),
                 ) => {
-                    let res = (*lhs as u64) ^ (*rhs as u64) as u64;
+                    let res = *lhs ^ *rhs;
                     as_const_unsigned_long(arena, res, scope)
                 }
                 _ => id,
@@ -520,14 +504,14 @@ pub fn fold(arena: &mut AstArena, id: AstId) -> AstId {
                     AstKind::ConstUnsignedInt(lhs),
                     AstKind::ConstUnsignedInt(rhs),
                 ) => {
-                    let res = if (*lhs as u32) < (*rhs as u32) { 1 } else { 0 };
+                    let res = if *lhs < *rhs { 1 } else { 0 };
                     as_const_unsigned_int(arena, res, scope)
                 }
                 (
                     AstKind::ConstUnsignedLong(lhs),
                     AstKind::ConstUnsignedLong(rhs),
                 ) => {
-                    let res = if (*lhs as u64) < (*rhs as u64) { 1 } else { 0 };
+                    let res = if *lhs < *rhs { 1 } else { 0 };
                     as_const_unsigned_long(arena, res, scope)
                 }
                 _ => id,
@@ -550,16 +534,14 @@ pub fn fold(arena: &mut AstArena, id: AstId) -> AstId {
                     AstKind::ConstUnsignedInt(lhs),
                     AstKind::ConstUnsignedInt(rhs),
                 ) => {
-                    let res =
-                        if (*lhs as u32) <= (*rhs as u32) { 1 } else { 0 };
+                    let res = if *lhs <= *rhs { 1 } else { 0 };
                     as_const_unsigned_int(arena, res, scope)
                 }
                 (
                     AstKind::ConstUnsignedLong(lhs),
                     AstKind::ConstUnsignedLong(rhs),
                 ) => {
-                    let res =
-                        if (*lhs as u64) <= (*rhs as u64) { 1 } else { 0 };
+                    let res = if *lhs <= *rhs { 1 } else { 0 };
                     as_const_unsigned_long(arena, res, scope)
                 }
                 _ => id,
@@ -582,14 +564,14 @@ pub fn fold(arena: &mut AstArena, id: AstId) -> AstId {
                     AstKind::ConstUnsignedInt(lhs),
                     AstKind::ConstUnsignedInt(rhs),
                 ) => {
-                    let res = if (*lhs as u32) > (*rhs as u32) { 1 } else { 0 };
+                    let res = if *lhs > *rhs { 1 } else { 0 };
                     as_const_unsigned_int(arena, res, scope)
                 }
                 (
                     AstKind::ConstUnsignedLong(lhs),
                     AstKind::ConstUnsignedLong(rhs),
                 ) => {
-                    let res = if (*lhs as u64) > (*rhs as u64) { 1 } else { 0 };
+                    let res = if *lhs > *rhs { 1 } else { 0 };
                     as_const_unsigned_long(arena, res, scope)
                 }
                 _ => id,
@@ -612,16 +594,14 @@ pub fn fold(arena: &mut AstArena, id: AstId) -> AstId {
                     AstKind::ConstUnsignedInt(lhs),
                     AstKind::ConstUnsignedInt(rhs),
                 ) => {
-                    let res =
-                        if (*lhs as u32) >= (*rhs as u32) { 1 } else { 0 };
+                    let res = if *lhs >= *rhs { 1 } else { 0 };
                     as_const_unsigned_int(arena, res, scope)
                 }
                 (
                     AstKind::ConstUnsignedLong(lhs),
                     AstKind::ConstUnsignedLong(rhs),
                 ) => {
-                    let res =
-                        if (*lhs as u64) >= (*rhs as u64) { 1 } else { 0 };
+                    let res = if *lhs >= *rhs { 1 } else { 0 };
                     as_const_unsigned_long(arena, res, scope)
                 }
                 _ => id,
@@ -740,53 +720,53 @@ pub fn fold(arena: &mut AstArena, id: AstId) -> AstId {
 
             match &arena[*inner].kind {
                 AstKind::ConstInt(n) => {
-                    if ty.borrow().kind == TypeKind::Int {
+                    if ty.kind == TypeKind::Int {
                         as_const_int(arena, *n, scope)
-                    } else if ty.borrow().kind == TypeKind::Long {
+                    } else if ty.kind == TypeKind::Long {
                         as_const_long(arena, *n as i64, scope)
-                    } else if !signed && ty.borrow().kind == TypeKind::Int {
+                    } else if !signed && ty.kind == TypeKind::Int {
                         as_const_unsigned_int(arena, *n as u32, scope)
-                    } else if !signed && ty.borrow().kind == TypeKind::Long {
+                    } else if !signed && ty.kind == TypeKind::Long {
                         as_const_unsigned_long(arena, *n as u64, scope)
                     } else {
                         id
                     }
                 }
                 AstKind::ConstLong(n) => {
-                    if signed && ty.borrow().kind == TypeKind::Int {
+                    if signed && ty.kind == TypeKind::Int {
                         as_const_int(arena, *n as i32, scope)
-                    } else if signed && ty.borrow().kind == TypeKind::Long {
+                    } else if signed && ty.kind == TypeKind::Long {
                         as_const_long(arena, *n, scope)
-                    } else if !signed && ty.borrow().kind == TypeKind::Int {
+                    } else if !signed && ty.kind == TypeKind::Int {
                         as_const_unsigned_int(arena, *n as u32, scope)
-                    } else if !signed && ty.borrow().kind == TypeKind::Long {
+                    } else if !signed && ty.kind == TypeKind::Long {
                         as_const_unsigned_long(arena, *n as u64, scope)
                     } else {
                         id
                     }
                 }
                 AstKind::ConstUnsignedInt(n) => {
-                    if signed && ty.borrow().kind == TypeKind::Int {
+                    if signed && ty.kind == TypeKind::Int {
                         as_const_int(arena, *n as i32, scope)
-                    } else if signed && ty.borrow().kind == TypeKind::Long {
+                    } else if signed && ty.kind == TypeKind::Long {
                         as_const_long(arena, *n as i64, scope)
-                    } else if !signed && ty.borrow().kind == TypeKind::Int {
-                        as_const_unsigned_int(arena, *n as u32, scope)
-                    } else if !signed && ty.borrow().kind == TypeKind::Long {
+                    } else if !signed && ty.kind == TypeKind::Int {
+                        as_const_unsigned_int(arena, *n, scope)
+                    } else if !signed && ty.kind == TypeKind::Long {
                         as_const_unsigned_long(arena, *n as u64, scope)
                     } else {
                         id
                     }
                 }
                 AstKind::ConstUnsignedLong(n) => {
-                    if signed && ty.borrow().kind == TypeKind::Int {
+                    if signed && ty.kind == TypeKind::Int {
                         as_const_int(arena, *n as i32, scope)
-                    } else if signed && ty.borrow().kind == TypeKind::Long {
+                    } else if signed && ty.kind == TypeKind::Long {
                         as_const_long(arena, *n as i64, scope)
-                    } else if !signed && ty.borrow().kind == TypeKind::Int {
+                    } else if !signed && ty.kind == TypeKind::Int {
                         as_const_unsigned_int(arena, *n as u32, scope)
-                    } else if !signed && ty.borrow().kind == TypeKind::Long {
-                        as_const_unsigned_long(arena, *n as u64, scope)
+                    } else if !signed && ty.kind == TypeKind::Long {
+                        as_const_unsigned_long(arena, *n, scope)
                     } else {
                         id
                     }
@@ -830,14 +810,13 @@ pub fn fold(arena: &mut AstArena, id: AstId) -> AstId {
 }
 
 pub fn is_callable(arena: &AstArena, symtab: &SymTab, id: AstId) -> bool {
-    if let AstKind::Identifier { .. } = &arena[id].kind {
-        if let Some(sym) = resolve(symtab, arena, &id) {
-            if let Some(node) = sym_as_node(symtab, sym) {
-                match &arena[node].kind {
-                    AstKind::Function { .. } => return true,
-                    _ => return false,
-                }
-            }
+    if let AstKind::Identifier { .. } = &arena[id].kind
+        && let Some(sym) = resolve(symtab, arena, &id)
+        && let Some(node) = sym_as_node(symtab, sym)
+    {
+        match &arena[node].kind {
+            AstKind::Function { .. } => return true,
+            _ => return false,
         }
     }
 
@@ -845,12 +824,12 @@ pub fn is_callable(arena: &AstArena, symtab: &SymTab, id: AstId) -> bool {
 }
 
 pub fn is_lvalue(arena: &AstArena, id: AstId) -> bool {
-    match &arena[id].kind {
-        AstKind::Identifier { .. } => true,
-        AstKind::Deref { .. } => true,
-        AstKind::Subscript { .. } => true,
-        _ => false,
-    }
+    matches!(
+        &arena[id].kind,
+        AstKind::Identifier { .. }
+            | AstKind::Deref { .. }
+            | AstKind::Subscript { .. }
+    )
 }
 
 pub fn is_const_unsigned_int_expr(arena: &AstArena, id: AstId) -> bool {
@@ -935,12 +914,9 @@ pub fn is_const_expr(arena: &AstArena, id: AstId) -> bool {
 pub fn is_null_pointer_const_expr(arena: &AstArena, id: AstId) -> bool {
     if is_const_int_expr(arena, id) && const_int_value(arena, id) == 0 {
         true
-    } else if is_const_unsigned_int_expr(arena, id)
-        && const_unsigned_int_value(arena, id) == 0
-    {
-        true
     } else {
-        false
+        is_const_unsigned_int_expr(arena, id)
+            && const_unsigned_int_value(arena, id) == 0
     }
 }
 
@@ -949,16 +925,10 @@ pub fn const_int_value(arena: &AstArena, id: AstId) -> i64 {
     match &arena[id].kind {
         AstKind::Initialiser {
             type_spec: _,
-            value,
-        } => {
-            if let Some(subexpr) = value {
-                const_int_value(arena, *subexpr)
-            } else {
-                unreachable!()
-            }
-        }
+            value: Some(subexpr),
+        } => const_int_value(arena, *subexpr),
         AstKind::Cast { expr: subexpr, .. } => const_int_value(arena, *subexpr),
-        AstKind::ConstInt(value) => *value as i32 as i64,
+        AstKind::ConstInt(value) => *value as i64,
         AstKind::ConstLong(value) => *value,
         _ => {
             unreachable!()
@@ -982,7 +952,7 @@ pub fn const_unsigned_int_value(arena: &AstArena, id: AstId) -> u64 {
         AstKind::Cast { expr: subexpr, .. } => {
             const_unsigned_int_value(arena, *subexpr)
         }
-        AstKind::ConstUnsignedInt(value) => *value as u32 as u64,
+        AstKind::ConstUnsignedInt(value) => *value as u64,
         AstKind::ConstUnsignedLong(value) => *value,
         _ => unreachable!(),
     }
@@ -1020,16 +990,21 @@ pub fn check(
             if resolve(symtab, arena, &id).is_some() {
                 Ok(())
             } else {
-                Err(error(Parsing(ParsingError::UndeclaredIdentifier(
-                    arena.token_str(name).to_string(),
-                ))))
+                Err(arena.node_error(
+                    id,
+                    Parsing(ParsingError::UndeclaredIdentifier(
+                        arena.token_str(name).to_string(),
+                    )),
+                ))
             }
         }
 
         AstKind::CompoundAssign { left, right }
         | AstKind::Assign { left, right } => {
             if !is_lvalue(arena, *left) {
-                return Err(error(Semantic(SemanticError::NotAnLvalue)));
+                return Err(
+                    arena.node_error(id, Semantic(SemanticError::NotAnLvalue))
+                );
             } else {
                 check(arena, symtab, *left)?;
                 check(arena, symtab, *right)?;
@@ -1096,7 +1071,9 @@ pub fn check(
 
         AstKind::AddrOf { expr: inner } => {
             if !is_lvalue(arena, *inner) {
-                return Err(error(Semantic(SemanticError::NotAnLvalue)));
+                return Err(
+                    arena.node_error(id, Semantic(SemanticError::NotAnLvalue))
+                );
             } else {
                 check(arena, symtab, *inner)?;
             }
@@ -1123,7 +1100,9 @@ pub fn check(
         | AstKind::PostDecr { expr: inner } => {
             check(arena, symtab, *inner)?;
             if !is_lvalue(arena, *inner) {
-                return Err(error(Semantic(SemanticError::NotAnLvalue)));
+                return Err(
+                    arena.node_error(id, Semantic(SemanticError::NotAnLvalue))
+                );
             }
 
             Ok(())
@@ -1136,7 +1115,9 @@ pub fn check(
             check(arena, symtab, *callee)?;
 
             if !is_callable(arena, symtab, *callee) {
-                return Err(error(Semantic(SemanticError::NotAFunction)));
+                return Err(
+                    arena.node_error(id, Semantic(SemanticError::NotAFunction))
+                );
             }
 
             Ok(())

@@ -23,8 +23,10 @@
 
 use std::collections::HashMap;
 
+use super::abi::SysvAbi;
 use crate::air::tac::{self, AirStage, Tac, TacArena, TacId};
 use crate::mir::MirGenerator as AbstractMirGenerator;
+use crate::mir::abi::Abi;
 
 use crate::types::{TypeRef, alignment_of, is_double_type, is_signed, size_of};
 
@@ -232,31 +234,16 @@ impl Register {
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum Operand {
-    Imm {
-        val: u64,
-        size: usize,
-    },
-    Mem {
-        reg: MirId,
-        off: i32,
-        size: usize,
-    },
-    Indexed {
+    Imm(u64),
+    Mem(MirId, i32),
+    Idx {
         base: MirId,
         index: MirId,
         scale: usize,
         off: i32,
-        size: usize,
     },
-    Reg {
-        reg: Register,
-        size: usize,
-    },
-    Data {
-        name: String,
-        size: usize,
-    },
-    FunctionRef(String, bool),
+    Reg(Register),
+    Sym(String),
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -266,41 +253,41 @@ pub enum Op {
     Mov(MirId, MirId, usize),
     Movsd(MirId, MirId),
     MovAbs(MirId, MirId, usize),
-    MovSignExt(MirId, MirId, usize),
-    DoubleToInt(MirId, MirId, usize),
-    IntToDouble(MirId, MirId, usize),
+    Movsx(MirId, MirId, usize),
+    Cvttsd2si(MirId, MirId, usize),
+    Cvtsi2sd(MirId, MirId, usize),
     Not(MirId, usize),
     Neg(MirId, usize),
-    SignedMul(MirId, MirId, usize),
-    UnsignedMul(MirId, usize),
-    SignedDiv(MirId, usize),
-    UnsignedDiv(MirId, usize),
+    Imul(MirId, MirId, usize),
+    Mul(MirId, usize),
+    Idiv(MirId, usize),
+    Div(MirId, usize),
     Add(MirId, MirId, usize),
     Sub(MirId, MirId, usize),
-    LeftShift(MirId, MirId, usize),
-    RightShift(MirId, MirId, usize),
-    ArithRightShift(MirId, MirId, usize),
+    Shl(MirId, MirId, usize),
+    Shr(MirId, MirId, usize),
+    Sar(MirId, MirId, usize),
     And(MirId, MirId, usize),
     Or(MirId, MirId, usize),
     Xor(MirId, MirId, usize),
-    XorDouble(MirId, MirId),
+    Xorpd(MirId, MirId),
     Cmp(MirId, MirId, usize),
-    CompareDouble(MirId, MirId),
+    Ucomisd(MirId, MirId),
     Push(MirId, usize),
     Call(MirId),
     Label(usize),
     PushBytes(usize),
     PopBytes(usize),
-    Jump(MirId),
-    JumpNotZero(MirId),
-    JumpCond { cond: CondCode, label: MirId },
-    SetCond { cond: CondCode, dst: MirId },
+    Jmp(MirId),
+    Jnz(MirId),
+    Jcc { cond: CondCode, label: MirId },
+    Setcc { cond: CondCode, dst: MirId },
     Test(MirId, MirId),
-    SignExtend(usize),
-    AddDouble(MirId, MirId),
-    SubDouble(MirId, MirId),
-    MulDouble(MirId, MirId),
-    DivDouble(MirId, MirId),
+    Cqo(usize),
+    Addsd(MirId, MirId),
+    Subsd(MirId, MirId),
+    Mulsd(MirId, MirId),
+    Divsd(MirId, MirId),
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -311,16 +298,13 @@ pub enum Object {
         stack: usize,
         mir: Vec<MirId>,
     },
-    StaticVar {
+    Data {
         name: String,
         global: bool,
+        read_only: bool,
         inits: Vec<MirId>,
         alignment: usize,
         total_size: usize,
-    },
-    RoData {
-        name: String,
-        bits: u64,
     },
     InitInteger {
         size: usize,
@@ -332,7 +316,7 @@ pub enum Object {
 #[derive(Debug, PartialEq, Clone)]
 pub enum Mir {
     Op(Op),
-    Operand(Operand),
+    Operand(Operand, usize),
     Object(Object),
 }
 
@@ -365,6 +349,7 @@ pub struct MirGenerator {
     label_map: LabelMap,
     stack_top: i32,
     tac_arena: TacArena,
+    abi: SysvAbi,
 }
 
 impl MirGenerator {
@@ -379,30 +364,16 @@ impl MirGenerator {
 
     fn operand_size(&self, operand: MirId) -> usize {
         match &self.arena[operand.0] {
-            Mir::Operand(op) => match op {
-                Operand::Reg { size, .. }
-                | Operand::Imm { size, .. }
-                | Operand::Mem { size, .. }
-                | Operand::Data { size, .. }
-                | Operand::Indexed { size, .. } => *size,
-                _ => unreachable!(),
-            },
+            Mir::Operand(_, size) => *size,
             _ => unreachable!(),
         }
     }
 
     fn reg_for(&mut self, reg: Register, src: MirId) -> MirId {
         match &self.arena[src.0] {
-            Mir::Operand(op) => match op {
-                Operand::Reg { size, .. }
-                | Operand::Imm { size, .. }
-                | Operand::Mem { size, .. }
-                | Operand::Data { size, .. }
-                | Operand::Indexed { size, .. } => {
-                    self.alloc(Mir::Operand(Operand::Reg { reg, size: *size }))
-                }
-                _ => unreachable!(),
-            },
+            Mir::Operand(_, size) => {
+                self.alloc(Mir::Operand(Operand::Reg(reg), *size))
+            }
             _ => unreachable!(),
         }
     }
@@ -412,14 +383,8 @@ impl MirGenerator {
     }
 
     fn mov_to_xmm_regs(&mut self, src: MirId, dst: MirId) -> (MirId, MirId) {
-        let xmm0 = self.alloc(Mir::Operand(Operand::Reg {
-            reg: Register::Xmm0,
-            size: 8,
-        }));
-        let xmm1 = self.alloc(Mir::Operand(Operand::Reg {
-            reg: Register::Xmm1,
-            size: 8,
-        }));
+        let xmm0 = self.alloc(Mir::Operand(Operand::Reg(Register::Xmm0), 8));
+        let xmm1 = self.alloc(Mir::Operand(Operand::Reg(Register::Xmm1), 8));
 
         let v0 = self.alloc(Mir::Op(Op::Movsd(src, xmm0)));
         self.emit(v0);
@@ -438,9 +403,9 @@ impl MirGenerator {
         }
     }
 
-    fn xorpd_op(&mut self, lhs: MirId, rhs: MirId, dst: MirId) -> MirId {
+    fn xorpd(&mut self, lhs: MirId, rhs: MirId, dst: MirId) -> MirId {
         let (xmm0, xmm1) = self.mov_to_xmm_regs(lhs, rhs);
-        let v0 = self.alloc(Mir::Op(Op::XorDouble(xmm1, xmm0)));
+        let v0 = self.alloc(Mir::Op(Op::Xorpd(xmm1, xmm0)));
         self.emit(v0);
         self.alloc(Mir::Op(Op::Movsd(xmm0, dst)))
     }
@@ -452,29 +417,29 @@ impl MirGenerator {
 
     fn comisd(&mut self, lhs: MirId, rhs: MirId) -> MirId {
         let (xmm0, xmm1) = self.mov_to_xmm_regs(lhs, rhs);
-        self.alloc(Mir::Op(Op::CompareDouble(xmm0, xmm1)))
+        self.alloc(Mir::Op(Op::Ucomisd(xmm0, xmm1)))
     }
 
     fn mulsd(&mut self, lhs: MirId, rhs: MirId, dst: MirId) -> MirId {
         let (xmm0, xmm1) = self.mov_to_xmm_regs(rhs, lhs);
-        let v0 = self.alloc(Mir::Op(Op::MulDouble(xmm0, xmm1)));
+        let v0 = self.alloc(Mir::Op(Op::Mulsd(xmm0, xmm1)));
         self.emit(v0);
         self.alloc(Mir::Op(Op::Movsd(xmm1, dst)))
     }
 
     fn divsd(&mut self, lhs: MirId, rhs: MirId, dst: MirId) -> MirId {
         let (xmm0, xmm1) = self.mov_to_xmm_regs(rhs, lhs);
-        let v0 = self.alloc(Mir::Op(Op::DivDouble(xmm0, xmm1)));
+        let v0 = self.alloc(Mir::Op(Op::Divsd(xmm0, xmm1)));
         self.emit(v0);
         self.alloc(Mir::Op(Op::Movsd(xmm1, dst)))
     }
 
     fn idiv(&mut self, src: MirId, size: usize) -> MirId {
         let src = if is_immediate(&self.arena[src.0]) {
-            let r11 = self.alloc(Mir::Operand(Operand::Reg {
-                reg: Register::R11,
-                size: self.operand_size(src),
-            }));
+            let r11 = self.alloc(Mir::Operand(
+                Operand::Reg(Register::R11),
+                self.operand_size(src),
+            ));
             let v0 = self.mov(src, r11);
             self.emit(v0);
             r11
@@ -482,15 +447,15 @@ impl MirGenerator {
             src
         };
 
-        self.alloc(Mir::Op(Op::SignedDiv(src, size)))
+        self.alloc(Mir::Op(Op::Idiv(src, size)))
     }
 
     fn div(&mut self, src: MirId, size: usize) -> MirId {
         let src = if is_immediate(&self.arena[src.0]) {
-            let r11 = self.alloc(Mir::Operand(Operand::Reg {
-                reg: Register::R11,
-                size: self.operand_size(src),
-            }));
+            let r11 = self.alloc(Mir::Operand(
+                Operand::Reg(Register::R11),
+                self.operand_size(src),
+            ));
             let v0 = self.mov(src, r11);
             self.emit(v0);
             r11
@@ -498,43 +463,37 @@ impl MirGenerator {
             src
         };
 
-        let edx = self.alloc(Mir::Operand(Operand::Reg {
-            reg: Register::Rdx,
-            size: 4,
-        }));
+        let edx = self.alloc(Mir::Operand(Operand::Reg(Register::Rdx), 4));
         let v1 = self.alloc(Mir::Op(Op::Xor(edx, edx, 4)));
         self.emit(v1);
 
-        self.alloc(Mir::Op(Op::UnsignedDiv(src, size)))
+        self.alloc(Mir::Op(Op::Div(src, size)))
     }
 
     fn stack_variable(&mut self, ty: &TypeRef, name: &str) -> MirId {
         if !self.var_map.contains_key(name) {
             let ty_size = size_of(ty);
             let size = ty_size as i32;
-            let align = if ty_size >= 16 {
-                16
+            let stack_align = self.abi.stack_alignment() as i32;
+            let align = if ty_size >= self.abi.stack_alignment() {
+                stack_align
             } else {
                 alignment_of(ty) as i32
             };
 
             self.stack_top -= size;
-            self.stack_top = self.stack_top & !(align - 1);
-            let rbp = self.alloc(Mir::Operand(Operand::Reg {
-                reg: Register::Rbp,
-                size: 8,
-            }));
-            let v0 = self.alloc(Mir::Operand(Operand::Mem {
-                reg: rbp,
-                off: self.stack_top,
-                size: ty_size,
-            }));
+            self.stack_top &= !(align - 1);
+            let rbp = self.alloc(Mir::Operand(Operand::Reg(Register::Rbp), 8));
+            let v0 = self.alloc(Mir::Operand(
+                Operand::Mem(rbp, self.stack_top),
+                ty_size,
+            ));
             self.var_map.insert(name.to_string(), v0);
         }
         self.var_map[name]
     }
 
-    fn invert(&mut self, _ty: &TypeRef, lhs: TacId, dst: TacId) -> MirId {
+    fn invert(&mut self, lhs: TacId, dst: TacId) -> MirId {
         let v0 = self.expr(lhs);
         let v1 = self.expr(dst);
         let size = self.operand_size(v1);
@@ -544,7 +503,7 @@ impl MirGenerator {
         self.alloc(Mir::Op(Op::Not(v1, size)))
     }
 
-    fn negate(&mut self, _ty: &TypeRef, lhs: TacId, dst: TacId) -> MirId {
+    fn negate(&mut self, lhs: TacId, dst: TacId) -> MirId {
         let v0 = self.expr(lhs);
         let v1 = self.expr(dst);
         let size = self.operand_size(v1);
@@ -554,35 +513,27 @@ impl MirGenerator {
         self.alloc(Mir::Op(Op::Neg(v1, size)))
     }
 
-    fn not(&mut self, _ty: &TypeRef, lhs: TacId, dst: TacId) -> MirId {
+    fn not(&mut self, lhs: TacId, dst: TacId) -> MirId {
         let v0 = self.expr(lhs);
         let v1 = self.expr(dst);
-        let v2 = self.alloc(Mir::Operand(Operand::Imm {
-            val: 0,
-            size: self.operand_size(v0),
-        }));
+        let v2 =
+            self.alloc(Mir::Operand(Operand::Imm(0), self.operand_size(v0)));
         let v3 = self.cmp(v2, v0);
         self.emit(v3);
         let v4 = self.mov(v2, v1);
         self.emit(v4);
-        self.alloc(Mir::Op(Op::SetCond {
+        self.alloc(Mir::Op(Op::Setcc {
             cond: CondCode::Eq,
             dst: v1,
         }))
     }
 
     fn integer(&mut self, ty: &TypeRef, value: u64) -> MirId {
-        self.alloc(Mir::Operand(Operand::Imm {
-            val: value,
-            size: size_of(ty),
-        }))
+        self.alloc(Mir::Operand(Operand::Imm(value), size_of(ty)))
     }
 
     fn double(&mut self, value: f64) -> MirId {
-        self.alloc(Mir::Operand(Operand::Imm {
-            val: value.to_bits(),
-            size: 8,
-        }))
+        self.alloc(Mir::Operand(Operand::Imm(value.to_bits()), 8))
     }
 
     fn multiply(
@@ -605,20 +556,18 @@ impl MirGenerator {
             if signed {
                 let v3 = self.mov(v0, v2);
                 self.emit(v3);
-                self.alloc(Mir::Op(Op::SignedMul(v1, v2, size)))
+                self.alloc(Mir::Op(Op::Imul(v1, v2, size)))
             } else {
-                let rax = self.alloc(Mir::Operand(Operand::Reg {
-                    reg: Register::Rax,
-                    size,
-                }));
+                let rax =
+                    self.alloc(Mir::Operand(Operand::Reg(Register::Rax), size));
                 let v3 = self.mov(v0, rax);
                 self.emit(v3);
 
                 let v4 = if is_immediate(&self.arena[v1.0]) {
-                    let r11 = self.alloc(Mir::Operand(Operand::Reg {
-                        reg: Register::R11,
-                        size: self.operand_size(v1),
-                    }));
+                    let r11 = self.alloc(Mir::Operand(
+                        Operand::Reg(Register::R11),
+                        self.operand_size(v1),
+                    ));
                     let v5 = self.mov(v1, r11);
                     self.emit(v5);
                     r11
@@ -626,12 +575,10 @@ impl MirGenerator {
                     v1
                 };
 
-                let v6 = self.alloc(Mir::Op(Op::UnsignedMul(v4, size)));
+                let v6 = self.alloc(Mir::Op(Op::Mul(v4, size)));
                 self.emit(v6);
-                let rax = self.alloc(Mir::Operand(Operand::Reg {
-                    reg: Register::Rax,
-                    size,
-                }));
+                let rax =
+                    self.alloc(Mir::Operand(Operand::Reg(Register::Rax), size));
                 self.mov(rax, v2)
             }
         }
@@ -656,7 +603,7 @@ impl MirGenerator {
             self.emit(v4);
             let signed = is_signed(ty);
             if signed {
-                let v5 = self.alloc(Mir::Op(Op::SignExtend(size_of(ty))));
+                let v5 = self.alloc(Mir::Op(Op::Cqo(size_of(ty))));
                 self.emit(v5);
             }
 
@@ -687,7 +634,7 @@ impl MirGenerator {
         let signed = is_signed(ty);
 
         if signed {
-            let v3 = self.alloc(Mir::Op(Op::SignExtend(size_of(ty))));
+            let v3 = self.alloc(Mir::Op(Op::Cqo(size_of(ty))));
             self.emit(v3);
         }
 
@@ -717,7 +664,7 @@ impl MirGenerator {
 
         if is_double_type(ty) {
             let (v3, v4) = self.mov_to_xmm_regs(v1, v0);
-            let v5 = self.alloc(Mir::Op(Op::AddDouble(v3, v4)));
+            let v5 = self.alloc(Mir::Op(Op::Addsd(v3, v4)));
             self.emit(v5);
             self.alloc(Mir::Op(Op::Movsd(v4, v2)))
         } else {
@@ -731,7 +678,6 @@ impl MirGenerator {
 
     fn add_ptr(
         &mut self,
-        _ty: &TypeRef,
         lhs: TacId,
         rhs: TacId,
         mut scale: usize,
@@ -740,14 +686,8 @@ impl MirGenerator {
         let v0 = self.expr(lhs);
         let v1 = self.expr(rhs);
         let v2 = self.expr(dst);
-        let rbx = self.alloc(Mir::Operand(Operand::Reg {
-            reg: Register::Rbx,
-            size: 8,
-        }));
-        let rdx = self.alloc(Mir::Operand(Operand::Reg {
-            reg: Register::Rdx,
-            size: 8,
-        }));
+        let rbx = self.alloc(Mir::Operand(Operand::Reg(Register::Rbx), 8));
+        let rdx = self.alloc(Mir::Operand(Operand::Reg(Register::Rdx), 8));
 
         let v3 = self.mov(v0, rbx);
         self.emit(v3);
@@ -756,36 +696,34 @@ impl MirGenerator {
 
         if !matches!(scale, 1 | 2 | 4 | 8) {
             let size = self.operand_size(v1);
-            let rax = self.alloc(Mir::Operand(Operand::Reg {
-                reg: Register::Rax,
-                size,
-            }));
-            let r11 = self.alloc(Mir::Operand(Operand::Reg {
-                reg: Register::R11,
-                size,
-            }));
+            let rax =
+                self.alloc(Mir::Operand(Operand::Reg(Register::Rax), size));
+            let r11 =
+                self.alloc(Mir::Operand(Operand::Reg(Register::R11), size));
             let v5 = self.mov(rdx, rax);
             self.emit(v5);
-            let v6 = self.alloc(Mir::Operand(Operand::Imm {
-                val: scale as u64,
-                size: self.operand_size(v1),
-            }));
+            let v6 = self.alloc(Mir::Operand(
+                Operand::Imm(scale as u64),
+                self.operand_size(v1),
+            ));
             let v7 = self.mov(v6, r11);
             self.emit(v7);
-            let v8 = self.alloc(Mir::Op(Op::UnsignedMul(r11, size)));
+            let v8 = self.alloc(Mir::Op(Op::Mul(r11, size)));
             self.emit(v8);
             let v9 = self.mov(rax, rdx);
             self.emit(v9);
             scale = 1;
         }
 
-        let v10 = self.alloc(Mir::Operand(Operand::Indexed {
-            base: rbx,
-            index: rdx,
-            scale,
-            off: 0,
-            size: scale,
-        }));
+        let v10 = self.alloc(Mir::Operand(
+            Operand::Idx {
+                base: rbx,
+                index: rdx,
+                scale,
+                off: 0,
+            },
+            8,
+        ));
         let v11 = self.alloc(Mir::Op(Op::Lea(v10, rbx, 8)));
 
         self.op_res(v11, rbx, v2)
@@ -804,7 +742,7 @@ impl MirGenerator {
 
         if is_double_type(ty) {
             let (v3, v4) = self.mov_to_xmm_regs(v1, v0);
-            let v5 = self.alloc(Mir::Op(Op::SubDouble(v3, v4)));
+            let v5 = self.alloc(Mir::Op(Op::Subsd(v3, v4)));
             self.emit(v5);
             self.alloc(Mir::Op(Op::Movsd(v4, v2)))
         } else {
@@ -816,13 +754,7 @@ impl MirGenerator {
         }
     }
 
-    fn shift_left(
-        &mut self,
-        _ty: &TypeRef,
-        lhs: TacId,
-        rhs: TacId,
-        dst: TacId,
-    ) -> MirId {
+    fn shift_left(&mut self, lhs: TacId, rhs: TacId, dst: TacId) -> MirId {
         let v0 = self.expr(lhs);
         let v1 = self.expr(rhs);
         let v2 = self.expr(dst);
@@ -830,7 +762,7 @@ impl MirGenerator {
 
         let v3 = self.mov(v0, v2);
         self.emit(v3);
-        self.alloc(Mir::Op(Op::LeftShift(v1, v2, size)))
+        self.alloc(Mir::Op(Op::Shl(v1, v2, size)))
     }
 
     fn shift_right(
@@ -849,19 +781,13 @@ impl MirGenerator {
         self.emit(v3);
 
         if is_signed(ty) {
-            self.alloc(Mir::Op(Op::ArithRightShift(v1, v2, size)))
+            self.alloc(Mir::Op(Op::Sar(v1, v2, size)))
         } else {
-            self.alloc(Mir::Op(Op::RightShift(v1, v2, size)))
+            self.alloc(Mir::Op(Op::Shr(v1, v2, size)))
         }
     }
 
-    fn and(
-        &mut self,
-        _ty: &TypeRef,
-        lhs: TacId,
-        rhs: TacId,
-        dst: TacId,
-    ) -> MirId {
+    fn and(&mut self, lhs: TacId, rhs: TacId, dst: TacId) -> MirId {
         let v0 = self.expr(lhs);
         let v1 = self.expr(rhs);
         let v2 = self.expr(dst);
@@ -872,13 +798,7 @@ impl MirGenerator {
         self.alloc(Mir::Op(Op::And(v1, v2, size)))
     }
 
-    fn or(
-        &mut self,
-        _ty: &TypeRef,
-        lhs: TacId,
-        rhs: TacId,
-        dst: TacId,
-    ) -> MirId {
+    fn or(&mut self, lhs: TacId, rhs: TacId, dst: TacId) -> MirId {
         let v0 = self.expr(lhs);
         let v1 = self.expr(rhs);
         let v2 = self.expr(dst);
@@ -901,7 +821,7 @@ impl MirGenerator {
         let v2 = self.expr(dst);
 
         if is_double_type(ty) {
-            self.xorpd_op(v0, v1, v2)
+            self.xorpd(v0, v1, v2)
         } else {
             let size = self.operand_size(v2);
 
@@ -911,13 +831,7 @@ impl MirGenerator {
         }
     }
 
-    fn equal(
-        &mut self,
-        _ty: &TypeRef,
-        lhs: TacId,
-        rhs: TacId,
-        dst: TacId,
-    ) -> MirId {
+    fn equal(&mut self, lhs: TacId, rhs: TacId, dst: TacId) -> MirId {
         let double = self.is_double(lhs);
         let v0 = self.expr(lhs);
         let v1 = self.expr(rhs);
@@ -930,22 +844,14 @@ impl MirGenerator {
         };
         self.emit(v2);
         let v3 = self.expr(dst);
-        let v4 = self.alloc(Mir::Operand(Operand::Imm {
-            val: 0,
-            size: self.operand_size(v3),
-        }));
+        let v4 =
+            self.alloc(Mir::Operand(Operand::Imm(0), self.operand_size(v3)));
         let v5 = self.mov(v4, v3);
         self.emit(v5);
         self.check_cond(CondCode::Eq, np_check, v3)
     }
 
-    fn not_eq(
-        &mut self,
-        _ty: &TypeRef,
-        lhs: TacId,
-        rhs: TacId,
-        dst: TacId,
-    ) -> MirId {
+    fn not_eq(&mut self, lhs: TacId, rhs: TacId, dst: TacId) -> MirId {
         let double = self.is_double(lhs);
         let v0 = self.expr(lhs);
         let v1 = self.expr(rhs);
@@ -958,10 +864,8 @@ impl MirGenerator {
         };
         self.emit(v2);
         let v3 = self.expr(dst);
-        let v4 = self.alloc(Mir::Operand(Operand::Imm {
-            val: 0,
-            size: self.operand_size(v3),
-        }));
+        let v4 =
+            self.alloc(Mir::Operand(Operand::Imm(0), self.operand_size(v3)));
         let v5 = self.mov(v4, v3);
         self.emit(v5);
         self.check_neq_cond(v3, np_check)
@@ -986,10 +890,8 @@ impl MirGenerator {
         };
         let v3 = self.expr(dst);
         self.emit(v2);
-        let v4 = self.alloc(Mir::Operand(Operand::Imm {
-            val: 0,
-            size: self.operand_size(v3),
-        }));
+        let v4 =
+            self.alloc(Mir::Operand(Operand::Imm(0), self.operand_size(v3)));
         let v5 = self.mov(v4, v3);
         self.emit(v5);
         let cond = if is_signed(ty) {
@@ -1019,10 +921,8 @@ impl MirGenerator {
         };
         let v3 = self.expr(dst);
         self.emit(v2);
-        let v4 = self.alloc(Mir::Operand(Operand::Imm {
-            val: 0,
-            size: self.operand_size(v3),
-        }));
+        let v4 =
+            self.alloc(Mir::Operand(Operand::Imm(0), self.operand_size(v3)));
         let v5 = self.mov(v4, v3);
         self.emit(v5);
         let cond = if is_signed(ty) {
@@ -1052,10 +952,8 @@ impl MirGenerator {
         };
         let v3 = self.expr(dst);
         self.emit(v2);
-        let v4 = self.alloc(Mir::Operand(Operand::Imm {
-            val: 0,
-            size: self.operand_size(v3),
-        }));
+        let v4 =
+            self.alloc(Mir::Operand(Operand::Imm(0), self.operand_size(v3)));
         let v5 = self.mov(v4, v3);
         self.emit(v5);
         let cond = if is_signed(ty) {
@@ -1085,10 +983,8 @@ impl MirGenerator {
         };
         let v3 = self.expr(dst);
         self.emit(v2);
-        let v4 = self.alloc(Mir::Operand(Operand::Imm {
-            val: 0,
-            size: self.operand_size(v3),
-        }));
+        let v4 =
+            self.alloc(Mir::Operand(Operand::Imm(0), self.operand_size(v3)));
         let v5 = self.mov(v4, v3);
         self.emit(v5);
         let cond = if is_signed(ty) {
@@ -1099,7 +995,7 @@ impl MirGenerator {
         self.check_cond(cond, np_check, v3)
     }
 
-    fn copy(&mut self, _ty: &TypeRef, src: TacId, dst: TacId) -> MirId {
+    fn copy(&mut self, src: TacId, dst: TacId) -> MirId {
         let v0 = self.expr(src);
         let v1 = self.expr(dst);
         self.mov(v0, v1)
@@ -1116,25 +1012,19 @@ impl MirGenerator {
 
         let v1 = self.expr(dst);
         let base_off = match &self.arena[v1.0] {
-            Mir::Operand(Operand::Mem { off: base_off, .. }) => *base_off,
+            Mir::Operand(Operand::Mem(_, base_off), _) => *base_off,
             _ => unreachable!(),
         };
 
-        let rbp = self.alloc(Mir::Operand(Operand::Reg {
-            reg: Register::Rbp,
-            size: 8,
-        }));
-        let v2 = self.alloc(Mir::Operand(Operand::Mem {
-            reg: rbp,
-            off: base_off + off as i32,
-            size: size_of(ty),
-        }));
+        let rbp = self.alloc(Mir::Operand(Operand::Reg(Register::Rbp), 8));
+        let v2 = self.alloc(Mir::Operand(
+            Operand::Mem(rbp, base_off + off as i32),
+            size_of(ty),
+        ));
 
         if is_double_type(ty) {
-            let xmm0 = self.alloc(Mir::Operand(Operand::Reg {
-                reg: Register::Xmm0,
-                size: 8,
-            }));
+            let xmm0 =
+                self.alloc(Mir::Operand(Operand::Reg(Register::Xmm0), 8));
             let v3 = self.alloc(Mir::Op(Op::Movsd(v0, xmm0)));
             self.emit(v3);
             self.alloc(Mir::Op(Op::Movsd(xmm0, v2)))
@@ -1143,36 +1033,25 @@ impl MirGenerator {
         }
     }
 
-    fn truncate(&mut self, ty: &TypeRef, lhs: TacId, dst: TacId) -> MirId {
-        self.copy(ty, lhs, dst)
+    fn truncate(&mut self, lhs: TacId, dst: TacId) -> MirId {
+        self.copy(lhs, dst)
     }
 
-    fn int_to_double(
-        &mut self,
-        _ty: &TypeRef,
-        signed: bool,
-        lhs: TacId,
-        dst: TacId,
-    ) -> MirId {
+    fn int_to_double(&mut self, signed: bool, lhs: TacId, dst: TacId) -> MirId {
         let mut v0 = self.expr(lhs);
         let v1 = self.expr(dst);
         let conv_size = if signed { self.operand_size(v0) } else { 8 };
 
         if !is_register(&self.arena[v0.0]) {
-            let r10 = self.alloc(Mir::Operand(Operand::Reg {
-                reg: Register::R10,
-                size: conv_size,
-            }));
+            let r10 = self
+                .alloc(Mir::Operand(Operand::Reg(Register::R10), conv_size));
             let v2 = self.mov(v0, r10);
             self.emit(v2);
             v0 = r10;
         }
 
-        let xmm0 = self.alloc(Mir::Operand(Operand::Reg {
-            reg: Register::Xmm0,
-            size: 8,
-        }));
-        let v3 = self.alloc(Mir::Op(Op::IntToDouble(v0, xmm0, conv_size)));
+        let xmm0 = self.alloc(Mir::Operand(Operand::Reg(Register::Xmm0), 8));
+        let v3 = self.alloc(Mir::Op(Op::Cvtsi2sd(v0, xmm0, conv_size)));
         self.emit(v3);
         self.alloc(Mir::Op(Op::Movsd(xmm0, v1)))
     }
@@ -1182,15 +1061,13 @@ impl MirGenerator {
         let v1 = self.expr(dst);
 
         if !is_register(&self.arena[v1.0]) {
-            let r10 = self.alloc(Mir::Operand(Operand::Reg {
-                reg: Register::R10,
-                size: size_of(ty),
-            }));
-            let v2 = self.alloc(Mir::Op(Op::DoubleToInt(v0, r10, size_of(ty))));
+            let r10 = self
+                .alloc(Mir::Operand(Operand::Reg(Register::R10), size_of(ty)));
+            let v2 = self.alloc(Mir::Op(Op::Cvttsd2si(v0, r10, size_of(ty))));
             self.emit(v2);
             self.mov(r10, v1)
         } else {
-            self.alloc(Mir::Op(Op::DoubleToInt(v0, v1, size_of(ty))))
+            self.alloc(Mir::Op(Op::Cvttsd2si(v0, v1, size_of(ty))))
         }
     }
 
@@ -1203,40 +1080,35 @@ impl MirGenerator {
         let v0 = self.expr(lhs);
         let v1 = self.expr(dst);
 
-        let r10 = self.alloc(Mir::Operand(Operand::Reg {
-            reg: Register::R10,
-            size: size_of(ty),
-        }));
+        let r10 =
+            self.alloc(Mir::Operand(Operand::Reg(Register::R10), size_of(ty)));
 
-        let v2 = self.alloc(Mir::Op(Op::DoubleToInt(v0, r10, 8)));
+        let v2 = self.alloc(Mir::Op(Op::Cvttsd2si(v0, r10, 8)));
         self.emit(v2);
         self.mov(r10, v1)
     }
 
     fn jump(&mut self, lhs: TacId) -> MirId {
         let v0 = self.expr(lhs);
-        self.alloc(Mir::Op(Op::Jump(v0)))
+        self.alloc(Mir::Op(Op::Jmp(v0)))
     }
 
     fn check_neq_cond(&mut self, dst: MirId, np: bool) -> MirId {
         if np {
-            let v0 = self.alloc(Mir::Op(Op::SetCond {
+            let v0 = self.alloc(Mir::Op(Op::Setcc {
                 cond: CondCode::NotEq,
                 dst,
             }));
             self.emit(v0);
-            let r10 = self.alloc(Mir::Operand(Operand::Reg {
-                reg: Register::R10,
-                size: 1,
-            }));
-            let v1 = self.alloc(Mir::Op(Op::SetCond {
+            let r10 = self.alloc(Mir::Operand(Operand::Reg(Register::R10), 1));
+            let v1 = self.alloc(Mir::Op(Op::Setcc {
                 cond: CondCode::Parity,
                 dst: r10,
             }));
             self.emit(v1);
             self.alloc(Mir::Op(Op::Or(r10, dst, 1)))
         } else {
-            self.alloc(Mir::Op(Op::SetCond {
+            self.alloc(Mir::Op(Op::Setcc {
                 cond: CondCode::NotEq,
                 dst,
             }))
@@ -1244,15 +1116,12 @@ impl MirGenerator {
     }
 
     fn check_cond(&mut self, cond: CondCode, np: bool, dst: MirId) -> MirId {
-        let v0 = self.alloc(Mir::Op(Op::SetCond { cond, dst }));
+        let v0 = self.alloc(Mir::Op(Op::Setcc { cond, dst }));
 
         if np {
             self.emit(v0);
-            let r11 = self.alloc(Mir::Operand(Operand::Reg {
-                reg: Register::R11,
-                size: 1,
-            }));
-            let v1 = self.alloc(Mir::Op(Op::SetCond {
+            let r11 = self.alloc(Mir::Operand(Operand::Reg(Register::R11), 1));
+            let v1 = self.alloc(Mir::Op(Op::Setcc {
                 cond: CondCode::NoParity,
                 dst: r11,
             }));
@@ -1263,88 +1132,69 @@ impl MirGenerator {
         }
     }
 
-    fn jump_on_zero(&mut self, _ty: &TypeRef, lhs: TacId, rhs: TacId) -> MirId {
+    fn jump_on_zero(&mut self, lhs: TacId, rhs: TacId) -> MirId {
         let double = self.is_double(lhs);
         let v0 = self.expr(lhs);
         let v1 = self.expr(rhs);
         let mut np_check = false;
 
         if double {
-            let xmm1 = self.alloc(Mir::Operand(Operand::Reg {
-                reg: Register::Xmm1,
-                size: 8,
-            }));
-            let v2 = self.alloc(Mir::Op(Op::XorDouble(xmm1, xmm1)));
+            let xmm1 =
+                self.alloc(Mir::Operand(Operand::Reg(Register::Xmm1), 8));
+            let v2 = self.alloc(Mir::Op(Op::Xorpd(xmm1, xmm1)));
             self.emit(v2);
             let v3 = self.comisd(v0, xmm1);
             self.emit(v3);
             np_check = true;
         } else {
-            let imm = self.alloc(Mir::Operand(Operand::Imm {
-                val: 0,
-                size: self.operand_size(v0),
-            }));
+            let imm = self
+                .alloc(Mir::Operand(Operand::Imm(0), self.operand_size(v0)));
             let v2 = self.cmp(imm, v0);
             self.emit(v2);
         }
 
-        let r10 = self.alloc(Mir::Operand(Operand::Reg {
-            reg: Register::R10,
-            size: 1,
-        }));
+        let r10 = self.alloc(Mir::Operand(Operand::Reg(Register::R10), 1));
         let v4 = self.check_cond(CondCode::Eq, np_check, r10);
         self.emit(v4);
         let v5 = self.alloc(Mir::Op(Op::Test(r10, r10)));
         self.emit(v5);
 
-        self.alloc(Mir::Op(Op::JumpNotZero(v1)))
+        self.alloc(Mir::Op(Op::Jnz(v1)))
     }
 
-    fn jump_on_not_zero(
-        &mut self,
-        _ty: &TypeRef,
-        lhs: TacId,
-        rhs: TacId,
-    ) -> MirId {
+    fn jump_on_not_zero(&mut self, lhs: TacId, rhs: TacId) -> MirId {
         let double = self.is_double(lhs);
         let v0 = self.expr(lhs);
         let mut np_check = false;
         let v1 = self.expr(rhs);
 
         if double {
-            let xmm1 = self.alloc(Mir::Operand(Operand::Reg {
-                reg: Register::Xmm1,
-                size: 8,
-            }));
-            let v2 = self.alloc(Mir::Op(Op::XorDouble(xmm1, xmm1)));
+            let xmm1 =
+                self.alloc(Mir::Operand(Operand::Reg(Register::Xmm1), 8));
+            let v2 = self.alloc(Mir::Op(Op::Xorpd(xmm1, xmm1)));
             self.emit(v2);
             let v3 = self.comisd(v0, xmm1);
             self.emit(v3);
-            let v4 = self.alloc(Mir::Op(Op::JumpCond {
+            let v4 = self.alloc(Mir::Op(Op::Jcc {
                 cond: CondCode::Parity,
                 label: v1,
             }));
             self.emit(v4);
             np_check = true;
         } else {
-            let imm = self.alloc(Mir::Operand(Operand::Imm {
-                val: 0,
-                size: self.operand_size(v0),
-            }));
+            let imm = self
+                .alloc(Mir::Operand(Operand::Imm(0), self.operand_size(v0)));
             let v2 = self.cmp(imm, v0);
             self.emit(v2);
         }
 
-        let r10 = self.alloc(Mir::Operand(Operand::Reg {
-            reg: Register::R10,
-            size: 1,
-        }));
+        let r10 = self.alloc(Mir::Operand(Operand::Reg(Register::R10), 1));
         let v5 = self.check_cond(CondCode::NotEq, np_check, r10);
         self.emit(v5);
         let v6 = self.alloc(Mir::Op(Op::Test(r10, r10)));
         self.emit(v6);
 
-        self.alloc(Mir::Op(Op::JumpNotZero(v1)))
+        self.alloc(Mir::Op(Op::Jnz(v1)))
     }
 
     fn is_double(&self, tac: TacId) -> bool {
@@ -1371,13 +1221,11 @@ impl MirGenerator {
             | Tac::Op(tac::Op::Or { ty, .. })
             | Tac::Op(tac::Op::Xor { ty, .. })
             | Tac::Op(tac::Op::Not { ty, .. }) => is_double_type(ty),
-            Tac::Operand(tac::Operand::Var(ty, _)) => is_double_type(ty),
-            Tac::Object(tac::Object::StaticVar(ty, _, _, _)) => {
+            Tac::Operand(tac::Operand::Pseudo(ty, _)) => is_double_type(ty),
+            Tac::Object(tac::Object::Data(ty, _, _, _, _)) => {
                 is_double_type(ty)
             }
-            Tac::Operand(tac::Operand::StaticVarRef(ty, _)) => {
-                is_double_type(ty)
-            }
+            Tac::Operand(tac::Operand::Sym(ty, _)) => is_double_type(ty),
             _ => false,
         }
     }
@@ -1392,13 +1240,13 @@ impl MirGenerator {
 
         for arg in args {
             if self.is_double(*arg) {
-                if fp_reg_args.len() < 8 {
+                if fp_reg_args.len() < self.abi.max_fp_arg_regs() {
                     fp_reg_args.push(*arg);
                 } else {
                     stack_args.push(*arg);
                 }
             } else {
-                if gp_reg_args.len() < 6 {
+                if gp_reg_args.len() < self.abi.max_gp_arg_regs() {
                     gp_reg_args.push(*arg);
                 } else {
                     stack_args.push(*arg);
@@ -1437,7 +1285,9 @@ impl MirGenerator {
 
         let (gp_reg_args, fp_reg_args, stack_args) = self.classify_args(args);
 
-        let stack_padding = if (stack_args.len() & 1) != 0 { 8 } else { 0 };
+        let stack_align = self.abi.stack_alignment();
+        let stack_padding =
+            (stack_align - (stack_args.len() * 8 % stack_align)) % stack_align;
 
         if stack_padding != 0 {
             let v0 = self.alloc(Mir::Op(Op::PushBytes(stack_padding)));
@@ -1470,10 +1320,8 @@ impl MirGenerator {
                 let op_size = self.operand_size(v2);
                 let v3 = self.alloc(Mir::Op(Op::Mov(v1, v2, op_size)));
                 self.emit(v3);
-                let rax = self.alloc(Mir::Operand(Operand::Reg {
-                    reg: Register::Rax,
-                    size: 8,
-                }));
+                let rax =
+                    self.alloc(Mir::Operand(Operand::Reg(Register::Rax), 8));
                 let v4 = self.alloc(Mir::Op(Op::Push(rax, 8)));
                 self.emit(v4);
             }
@@ -1504,10 +1352,7 @@ impl MirGenerator {
 
     fn push(&mut self, src: MirId) -> MirId {
         if is_large_immediate(&self.arena[src.0]) {
-            let r11 = self.alloc(Mir::Operand(Operand::Reg {
-                reg: Register::R11,
-                size: 8,
-            }));
+            let r11 = self.alloc(Mir::Operand(Operand::Reg(Register::R11), 8));
             let v0 = self.mov(src, r11);
             self.emit(v0);
             self.alloc(Mir::Op(Op::Push(r11, 8)))
@@ -1519,23 +1364,13 @@ impl MirGenerator {
     fn load(&mut self, ty: &TypeRef, lhs: TacId, rhs: TacId) -> MirId {
         let v0 = self.expr(lhs);
         let v1 = self.expr(rhs);
-        let rax = self.alloc(Mir::Operand(Operand::Reg {
-            reg: Register::Rax,
-            size: 8,
-        }));
+        let rax = self.alloc(Mir::Operand(Operand::Reg(Register::Rax), 8));
 
         let v2 = self.mov(v0, rax);
         self.emit(v2);
 
-        let rax = self.alloc(Mir::Operand(Operand::Reg {
-            reg: Register::Rax,
-            size: 8,
-        }));
-        let v3 = self.alloc(Mir::Operand(Operand::Mem {
-            reg: rax,
-            off: 0,
-            size: size_of(ty),
-        }));
+        let rax = self.alloc(Mir::Operand(Operand::Reg(Register::Rax), 8));
+        let v3 = self.alloc(Mir::Operand(Operand::Mem(rax, 0), size_of(ty)));
 
         self.mov(v3, v1)
     }
@@ -1543,10 +1378,7 @@ impl MirGenerator {
     fn lea(&mut self, lhs: TacId, rhs: TacId) -> MirId {
         let v0 = self.expr(lhs);
         let v1 = self.expr(rhs);
-        let rax = self.alloc(Mir::Operand(Operand::Reg {
-            reg: Register::Rax,
-            size: 8,
-        }));
+        let rax = self.alloc(Mir::Operand(Operand::Reg(Register::Rax), 8));
 
         let v2 = self.alloc(Mir::Op(Op::Lea(v0, rax, 8)));
         self.op_res(v2, rax, v1)
@@ -1555,31 +1387,21 @@ impl MirGenerator {
     fn store(&mut self, ty: &TypeRef, lhs: TacId, rhs: TacId) -> MirId {
         let v0 = self.expr(lhs);
         let v1 = self.expr(rhs);
-        let rax = self.alloc(Mir::Operand(Operand::Reg {
-            reg: Register::Rax,
-            size: 8,
-        }));
+        let rax = self.alloc(Mir::Operand(Operand::Reg(Register::Rax), 8));
 
         let v2 = self.mov(v1, rax);
         self.emit(v2);
 
-        let rax = self.alloc(Mir::Operand(Operand::Reg {
-            reg: Register::Rax,
-            size: 8,
-        }));
-        let v3 = self.alloc(Mir::Operand(Operand::Mem {
-            reg: rax,
-            off: 0,
-            size: size_of(ty),
-        }));
+        let rax = self.alloc(Mir::Operand(Operand::Reg(Register::Rax), 8));
+        let v3 = self.alloc(Mir::Operand(Operand::Mem(rax, 0), size_of(ty)));
 
         let v4 = if is_register(&self.arena[v0.0]) {
             v0
         } else {
-            let r11 = self.alloc(Mir::Operand(Operand::Reg {
-                reg: Register::R11,
-                size: self.operand_size(v0),
-            }));
+            let r11 = self.alloc(Mir::Operand(
+                Operand::Reg(Register::R11),
+                self.operand_size(v0),
+            ));
             let v5 = self.mov(v0, r11);
             self.emit(v5);
             r11
@@ -1596,16 +1418,14 @@ impl MirGenerator {
                 self.integer(ty, *value)
             }
             Tac::Operand(tac::Operand::Double(value)) => self.double(*value),
-            Tac::Operand(tac::Operand::Var(ty, name)) => {
+            Tac::Operand(tac::Operand::Pseudo(ty, name)) => {
                 self.stack_variable(ty, name)
             }
-            Tac::Op(tac::Op::Inv { ty, src, dst }) => {
-                self.invert(ty, *src, *dst)
+            Tac::Op(tac::Op::Inv { src, dst }) => self.invert(*src, *dst),
+            Tac::Op(tac::Op::Neg { ty: _, src, dst }) => {
+                self.negate(*src, *dst)
             }
-            Tac::Op(tac::Op::Neg { ty, src, dst }) => {
-                self.negate(ty, *src, *dst)
-            }
-            Tac::Op(tac::Op::Not { ty, src, dst }) => self.not(ty, *src, *dst),
+            Tac::Op(tac::Op::Not { ty: _, src, dst }) => self.not(*src, *dst),
             Tac::Op(tac::Op::Mul { ty, lhs, rhs, dst }) => {
                 self.multiply(ty, *lhs, *rhs, *dst)
             }
@@ -1621,18 +1441,24 @@ impl MirGenerator {
             Tac::Op(tac::Op::Sub { ty, lhs, rhs, dst }) => {
                 self.subtract(ty, *lhs, *rhs, *dst)
             }
-            Tac::Op(tac::Op::LeftShift { ty, lhs, rhs, dst }) => {
-                self.shift_left(ty, *lhs, *rhs, *dst)
+            Tac::Op(tac::Op::LeftShift { lhs, rhs, dst }) => {
+                self.shift_left(*lhs, *rhs, *dst)
             }
             Tac::Op(tac::Op::RightShift { ty, lhs, rhs, dst }) => {
                 self.shift_right(ty, *lhs, *rhs, *dst)
             }
-            Tac::Op(tac::Op::And { ty, lhs, rhs, dst }) => {
-                self.and(ty, *lhs, *rhs, *dst)
-            }
-            Tac::Op(tac::Op::Or { ty, lhs, rhs, dst }) => {
-                self.or(ty, *lhs, *rhs, *dst)
-            }
+            Tac::Op(tac::Op::And {
+                ty: _,
+                lhs,
+                rhs,
+                dst,
+            }) => self.and(*lhs, *rhs, *dst),
+            Tac::Op(tac::Op::Or {
+                ty: _,
+                lhs,
+                rhs,
+                dst,
+            }) => self.or(*lhs, *rhs, *dst),
             Tac::Op(tac::Op::Xor { ty, lhs, rhs, dst }) => {
                 self.xor(ty, *lhs, *rhs, *dst)
             }
@@ -1648,27 +1474,30 @@ impl MirGenerator {
             Tac::Op(tac::Op::GreaterOrEq { ty, lhs, rhs, dst }) => {
                 self.greater_or_eq(ty, *lhs, *rhs, *dst)
             }
-            Tac::Op(tac::Op::Equal { ty, lhs, rhs, dst }) => {
-                self.equal(ty, *lhs, *rhs, *dst)
-            }
-            Tac::Op(tac::Op::NotEq { ty, lhs, rhs, dst }) => {
-                self.not_eq(ty, *lhs, *rhs, *dst)
-            }
-            Tac::Op(tac::Op::Copy { ty, src, dst }) => {
-                self.copy(ty, *src, *dst)
-            }
+            Tac::Op(tac::Op::Equal {
+                ty: _,
+                lhs,
+                rhs,
+                dst,
+            }) => self.equal(*lhs, *rhs, *dst),
+            Tac::Op(tac::Op::NotEq {
+                ty: _,
+                lhs,
+                rhs,
+                dst,
+            }) => self.not_eq(*lhs, *rhs, *dst),
+            Tac::Op(tac::Op::Copy { ty: _, src, dst }) => self.copy(*src, *dst),
             Tac::Op(tac::Op::CopyToOffset { ty, src, dst, off }) => {
                 self.copy_to_offset(ty, *src, *dst, *off)
             }
             Tac::Op(tac::Op::AddPtr {
-                ty,
                 lhs,
                 rhs,
                 scale,
                 dst,
-            }) => self.add_ptr(ty, *lhs, *rhs, *scale, *dst),
-            Tac::Op(tac::Op::Truncate { ty, src, dst }) => {
-                self.truncate(ty, *src, *dst)
+            }) => self.add_ptr(*lhs, *rhs, *scale, *dst),
+            Tac::Op(tac::Op::Truncate { ty: _, src, dst }) => {
+                self.truncate(*src, *dst)
             }
             Tac::Op(tac::Op::SignExt { ty, src, dst }) => {
                 let v0 = self.expr(*src);
@@ -1681,20 +1510,18 @@ impl MirGenerator {
                     let v3 = if dst_size == 8 && src_imm {
                         self.alloc(Mir::Op(Op::MovAbs(v0, v2, dst_size)))
                     } else {
-                        self.alloc(Mir::Op(Op::MovSignExt(v0, v2, dst_size)))
+                        self.alloc(Mir::Op(Op::Movsx(v0, v2, dst_size)))
                     };
                     self.emit(v3);
-                    let r11 = self.alloc(Mir::Operand(Operand::Reg {
-                        reg: Register::R11,
-                        size: 8,
-                    }));
+                    let r11 = self
+                        .alloc(Mir::Operand(Operand::Reg(Register::R11), 8));
                     self.mov(r11, v1)
                 } else {
                     self.mov(v0, v1)
                 }
             }
-            Tac::Op(tac::Op::ZeroExt { ty, src, dst }) => {
-                self.copy(ty, *src, *dst)
+            Tac::Op(tac::Op::ZeroExt { ty: _, src, dst }) => {
+                self.copy(*src, *dst)
             }
             Tac::Op(tac::Op::DoubleToInt { ty, src, dst }) => {
                 self.double_to_int(ty, *src, *dst)
@@ -1702,41 +1529,26 @@ impl MirGenerator {
             Tac::Op(tac::Op::DoubleToUlong { ty, src, dst }) => {
                 self.double_to_ulong(ty, *src, *dst)
             }
-            Tac::Op(tac::Op::IntToDouble { ty, src, dst }) => {
-                let signed = matches!(&self.tac_arena[*src], Tac::Operand(tac::Operand::Var(ty, _)) if is_signed(ty));
-                self.int_to_double(ty, signed, *src, *dst)
+            Tac::Op(tac::Op::IntToDouble { src, dst }) => {
+                let signed = matches!(&self.tac_arena[*src], Tac::Operand(tac::Operand::Pseudo(ty, _)) if is_signed(ty));
+                self.int_to_double(signed, *src, *dst)
             }
             Tac::Op(tac::Op::Jump(label)) => self.jump(*label),
-            Tac::Op(tac::Op::JumpOnZero { ty, expr, label }) => {
-                self.jump_on_zero(ty, *expr, *label)
+            Tac::Op(tac::Op::JumpOnZero { expr, label }) => {
+                self.jump_on_zero(*expr, *label)
             }
-            Tac::Op(tac::Op::JumpOnNotZero { ty, expr, label }) => {
-                self.jump_on_not_zero(ty, *expr, *label)
+            Tac::Op(tac::Op::JumpOnNotZero { expr, label }) => {
+                self.jump_on_not_zero(*expr, *label)
             }
             Tac::Op(tac::Op::Label(idx)) => self.label(*idx),
-            Tac::Operand(tac::Operand::FunctionRef(name, defined)) => self
-                .alloc(Mir::Operand(Operand::FunctionRef(
-                    name.clone(),
-                    *defined,
-                ))),
-            Tac::Operand(tac::Operand::StaticVarRef(ty, name)) => {
-                self.alloc(Mir::Operand(Operand::Data {
-                    name: name.clone(),
-                    size: size_of(&ty),
-                }))
-            }
+            Tac::Operand(tac::Operand::Sym(ty, name)) => self
+                .alloc(Mir::Operand(Operand::Sym(name.clone()), size_of(ty))),
             Tac::Op(tac::Op::Call {
                 ty,
                 func,
                 args,
                 dst,
             }) => self.call(ty, *func, args, *dst),
-            Tac::Object(tac::Object::RoData(ty, name, bits)) => {
-                self.alloc(Mir::Object(Object::RoData {
-                    name: name.clone(),
-                    bits: *bits,
-                }))
-            }
             Tac::Op(tac::Op::GetAddr { ty, src, dst }) => self.lea(*src, *dst),
             Tac::Op(tac::Op::Load { ty, src, dst }) => {
                 self.load(ty, *src, *dst)
@@ -1744,6 +1556,7 @@ impl MirGenerator {
             Tac::Op(tac::Op::Store { ty, src, dst }) => {
                 self.store(ty, *src, *dst)
             }
+            Tac::Op(tac::Op::Return(ty, expr)) => self.return_stmt(ty, *expr),
             _ => {
                 unreachable!()
             }
@@ -1752,7 +1565,7 @@ impl MirGenerator {
 
     fn function(
         &mut self,
-        name: &String,
+        name: &str,
         global: bool,
         params: &[TacId],
         body: &[TacId],
@@ -1805,15 +1618,11 @@ impl MirGenerator {
 
         for param in stack_params.iter() {
             let v0 = self.expr(*param);
-            let rbp = self.alloc(Mir::Operand(Operand::Reg {
-                reg: Register::Rbp,
-                size: 8,
-            }));
-            let v1 = self.alloc(Mir::Operand(Operand::Mem {
-                reg: rbp,
-                off,
-                size: self.operand_size(v0),
-            }));
+            let rbp = self.alloc(Mir::Operand(Operand::Reg(Register::Rbp), 8));
+            let v1 = self.alloc(Mir::Operand(
+                Operand::Mem(rbp, off),
+                self.operand_size(v0),
+            ));
 
             let v2 = self.reg_for(Register::R10, v1);
             let v3 = self.mov(v1, v2);
@@ -1824,21 +1633,23 @@ impl MirGenerator {
         }
 
         for op in body {
-            self.stmt_or_decl(*op);
+            self.lower_node(*op);
         }
 
-        let stack_size = ((-self.stack_top) as usize + 15) & !15;
+        let stack_align = self.abi.stack_alignment();
+        let stack_size = ((-self.stack_top) as usize + (stack_align - 1))
+            & !(stack_align - 1);
 
-        let body_mir: Vec<MirId> =
+        let mut body_mir: Vec<MirId> =
             self.mir_ids.drain(saved_mir_len..).collect();
-        let body_mir = self.fixup_function_body(body_mir);
+        self.fixup_function_body(&mut body_mir);
 
         self.var_map = saved_var_map;
         self.label_map = saved_label_map;
         self.stack_top = saved_stack_top;
 
         let func = self.alloc(Mir::Object(Object::Function {
-            name: name.clone(),
+            name: name.to_owned(),
             global,
             stack: stack_size,
             mir: body_mir,
@@ -1867,16 +1678,17 @@ impl MirGenerator {
         }
     }
 
-    fn static_variable(
+    fn data(
         &mut self,
-        name: &String,
+        name: &str,
         global: bool,
+        read_only: bool,
         init: TacId,
         ty: &TypeRef,
     ) {
-        let (init_list, alignment) = match &self.tac_arena[init] {
+        let (init_list, alignment) = match &mut self.tac_arena.arena[init.0] {
             Tac::Object(tac::Object::StaticInitList(list, align)) => {
-                (list.clone(), *align)
+                (std::mem::take(list), *align)
             }
             _ => return,
         };
@@ -1889,9 +1701,10 @@ impl MirGenerator {
         }
 
         if !inits.is_empty() {
-            let sv = self.alloc(Mir::Object(Object::StaticVar {
-                name: name.clone(),
+            let sv = self.alloc(Mir::Object(Object::Data {
+                name: name.to_owned(),
                 global,
+                read_only,
                 inits,
                 alignment,
                 total_size: size_of(ty),
@@ -1900,85 +1713,48 @@ impl MirGenerator {
         }
     }
 
-    fn return_stmt(&mut self, ty: &TypeRef, lhs: TacId) {
+    fn return_stmt(&mut self, ty: &TypeRef, lhs: TacId) -> MirId {
         let v0 = self.expr(lhs);
 
         if is_double_type(ty) {
             let v1 = self.reg_for(Register::Xmm0, v0);
             if v0 != v1 {
                 let v2 = self.alloc(Mir::Op(Op::Movsd(v0, v1)));
-                self.mir_ids.push(v2);
+                self.emit(v2);
             }
         } else {
             let v1 = self.reg_for(Register::Rax, v0);
             if v0 != v1 {
                 let op_size = self.operand_size(v1);
                 let v2 = self.alloc(Mir::Op(Op::Mov(v0, v1, op_size)));
-                self.mir_ids.push(v2);
+                self.emit(v2);
             }
         }
 
-        let v2 = self.alloc(Mir::Op(Op::Ret));
-        self.emit(v2);
+        self.alloc(Mir::Op(Op::Ret))
     }
 
-    fn stmt_or_decl(&mut self, node: TacId) {
+    fn lower_node(&mut self, node: TacId) {
         let node_data = self.tac_arena[node].clone();
         match &node_data {
             Tac::Object(tac::Object::Function {
                 name,
                 global,
                 params,
-                code,
+                tac,
             }) => {
-                self.function(name, *global, params, code);
+                self.function(name, *global, params, tac);
             }
-            Tac::Object(tac::Object::StaticVar(ty, name, global, init)) => {
-                self.static_variable(name, *global, *init, ty);
+            Tac::Object(tac::Object::Data(
+                ty,
+                name,
+                global,
+                read_only,
+                init,
+            )) => {
+                self.data(name, *global, *read_only, *init, ty);
             }
-            Tac::Op(tac::Op::Inv { .. })
-            | Tac::Op(tac::Op::Neg { .. })
-            | Tac::Op(tac::Op::Not { .. })
-            | Tac::Op(tac::Op::Mul { .. })
-            | Tac::Op(tac::Op::Div { .. })
-            | Tac::Op(tac::Op::Mod { .. })
-            | Tac::Op(tac::Op::Add { .. })
-            | Tac::Op(tac::Op::Sub { .. })
-            | Tac::Op(tac::Op::LeftShift { .. })
-            | Tac::Op(tac::Op::RightShift { .. })
-            | Tac::Op(tac::Op::And { .. })
-            | Tac::Op(tac::Op::Or { .. })
-            | Tac::Op(tac::Op::Xor { .. })
-            | Tac::Op(tac::Op::Less { .. })
-            | Tac::Op(tac::Op::LessOrEq { .. })
-            | Tac::Op(tac::Op::Greater { .. })
-            | Tac::Op(tac::Op::GreaterOrEq { .. })
-            | Tac::Op(tac::Op::Equal { .. })
-            | Tac::Op(tac::Op::NotEq { .. })
-            | Tac::Op(tac::Op::Copy { .. })
-            | Tac::Op(tac::Op::CopyToOffset { .. })
-            | Tac::Op(tac::Op::Jump(_))
-            | Tac::Op(tac::Op::JumpOnZero { .. })
-            | Tac::Op(tac::Op::JumpOnNotZero { .. })
-            | Tac::Op(tac::Op::Call { .. })
-            | Tac::Op(tac::Op::Truncate { .. })
-            | Tac::Op(tac::Op::SignExt { .. })
-            | Tac::Op(tac::Op::ZeroExt { .. })
-            | Tac::Op(tac::Op::DoubleToInt { .. })
-            | Tac::Op(tac::Op::DoubleToUlong { .. })
-            | Tac::Op(tac::Op::IntToDouble { .. })
-            | Tac::Op(tac::Op::GetAddr { .. })
-            | Tac::Op(tac::Op::Load { .. })
-            | Tac::Op(tac::Op::Store { .. })
-            | Tac::Op(tac::Op::AddPtr { .. })
-            | Tac::Op(tac::Op::Label(_)) => {
-                let expr = self.expr(node);
-                self.emit(expr);
-            }
-            Tac::Op(tac::Op::Return(ty, expr)) => {
-                self.return_stmt(ty, *expr);
-            }
-            Tac::Object(tac::Object::RoData(_, _, _)) => {
+            Tac::Op(..) => {
                 let expr = self.expr(node);
                 self.emit(expr);
             }
@@ -2003,16 +1779,13 @@ impl MirGenerator {
 
         let v0 = if src_is_large_imm && src_size > dst_size {
             match &self.arena[src.0] {
-                Mir::Operand(Operand::Imm { val, .. }) => {
+                Mir::Operand(Operand::Imm(val), _) => {
                     let mask = if dst_size >= 8 {
                         !0u64
                     } else {
                         (1u64 << (dst_size * 8)) - 1
                     };
-                    self.alloc(Mir::Operand(Operand::Imm {
-                        val: val & mask,
-                        size: dst_size,
-                    }))
+                    self.alloc(Mir::Operand(Operand::Imm(val & mask), dst_size))
                 }
                 _ => unreachable!(),
             }
@@ -2023,20 +1796,10 @@ impl MirGenerator {
         let v0_is_large_imm = is_large_immediate(&self.arena[v0.0]);
         let v0_is_mem = is_memory(&self.arena[v0.0]);
 
-        let v1 = if v0_is_mem && dst_is_mem {
+        let v1 = if (v0_is_mem || v0_is_large_imm) && dst_is_mem {
             let load_size = src_size.min(dst_size);
-            let r11 = self.alloc(Mir::Operand(Operand::Reg {
-                reg: Register::R11,
-                size: load_size,
-            }));
-            result.push(self.alloc(Mir::Op(Op::Mov(v0, r11, load_size))));
-            r11
-        } else if v0_is_large_imm && dst_is_mem {
-            let load_size = src_size.min(dst_size);
-            let r11 = self.alloc(Mir::Operand(Operand::Reg {
-                reg: Register::R11,
-                size: load_size,
-            }));
+            let r11 = self
+                .alloc(Mir::Operand(Operand::Reg(Register::R11), load_size));
             result.push(self.alloc(Mir::Op(Op::Mov(v0, r11, load_size))));
             r11
         } else {
@@ -2053,17 +1816,12 @@ impl MirGenerator {
             if dst_size == 8 && v1_imm {
                 result.push(self.alloc(Mir::Op(Op::MovAbs(v1, v2, dst_size))));
             } else {
-                let r11d = self.alloc(Mir::Operand(Operand::Reg {
-                    reg: Register::R11,
-                    size: 4,
-                }));
+                let r11d =
+                    self.alloc(Mir::Operand(Operand::Reg(Register::R11), 4));
                 result.push(self.alloc(Mir::Op(Op::Mov(v1, r11d, v1_size))));
             }
 
-            let r11 = self.alloc(Mir::Operand(Operand::Reg {
-                reg: Register::R11,
-                size: 8,
-            }));
+            let r11 = self.alloc(Mir::Operand(Operand::Reg(Register::R11), 8));
             result.push(self.alloc(Mir::Op(Op::Mov(r11, dst, dst_size))));
         } else {
             result.push(self.alloc(Mir::Op(Op::Mov(v1, dst, dst_size))));
@@ -2082,19 +1840,13 @@ impl MirGenerator {
         let src_is_reg = is_register(&self.arena[src.0]);
 
         let v0 = if !src_is_imm && !src_is_reg {
-            let cl = self.alloc(Mir::Operand(Operand::Reg {
-                reg: Register::Rcx,
-                size: 1,
-            }));
+            let cl = self.alloc(Mir::Operand(Operand::Reg(Register::Rcx), 1));
             result.push(self.alloc(Mir::Op(Op::Mov(src, cl, 1))));
             cl
         } else if src_is_reg && self.operand_size(src) == 1 {
             src
         } else if src_is_reg {
-            let cl = self.alloc(Mir::Operand(Operand::Reg {
-                reg: Register::Rcx,
-                size: 1,
-            }));
+            let cl = self.alloc(Mir::Operand(Operand::Reg(Register::Rcx), 1));
             result.push(self.alloc(Mir::Op(Op::Mov(src, cl, 1))));
             cl
         } else {
@@ -2135,7 +1887,7 @@ impl MirGenerator {
         };
 
         let id = MirId(self.arena.len());
-        self.arena.push(Mir::Op(Op::SignedMul(v2, v0, size)));
+        self.arena.push(Mir::Op(Op::Imul(v2, v0, size)));
         result.push(id);
 
         if dst_is_mem && v0 != dst {
@@ -2165,12 +1917,9 @@ impl MirGenerator {
         let src_is_mem = is_memory(&self.arena[src.0]);
         let src_is_large_imm = is_large_immediate(&self.arena[src.0]);
 
-        let v2 = if src_is_mem && is_memory(&self.arena[v0.0]) {
-            let v3 = self.reg_for(Register::R11, src);
-            let load_size = self.operand_size(src);
-            result.push(self.alloc(Mir::Op(Op::Mov(src, v3, load_size))));
-            v3
-        } else if src_is_large_imm {
+        let v2 = if (src_is_mem && is_memory(&self.arena[v0.0]))
+            || src_is_large_imm
+        {
             let v3 = self.reg_for(Register::R11, src);
             let load_size = self.operand_size(src);
             result.push(self.alloc(Mir::Op(Op::Mov(src, v3, load_size))));
@@ -2184,68 +1933,49 @@ impl MirGenerator {
         result.push(id);
     }
 
-    fn fixup_function_body(&mut self, body: Vec<MirId>) -> Vec<MirId> {
-        let mut result = Vec::new();
-        for mir_id in body {
+    fn fixup_function_body(&mut self, body: &mut Vec<MirId>) {
+        let prev_mir = std::mem::take(body);
+        for mir_id in prev_mir {
             let mir = &self.arena[mir_id.0];
             match mir {
                 Mir::Op(Op::Mov(src, dst, size)) => {
-                    self.mov_fixup(&mut result, *src, *dst, *size);
+                    self.mov_fixup(body, *src, *dst, *size);
                 }
                 Mir::Op(Op::Add(src, dst, size)) => {
-                    self.alu_fixup(&mut result, *src, *dst, *size, Op::Add);
+                    self.alu_fixup(body, *src, *dst, *size, Op::Add);
                 }
                 Mir::Op(Op::Sub(src, dst, size)) => {
-                    self.alu_fixup(&mut result, *src, *dst, *size, Op::Sub);
+                    self.alu_fixup(body, *src, *dst, *size, Op::Sub);
                 }
                 Mir::Op(Op::And(src, dst, size)) => {
-                    self.alu_fixup(&mut result, *src, *dst, *size, Op::And);
+                    self.alu_fixup(body, *src, *dst, *size, Op::And);
                 }
                 Mir::Op(Op::Or(src, dst, size)) => {
-                    self.alu_fixup(&mut result, *src, *dst, *size, Op::Or);
+                    self.alu_fixup(body, *src, *dst, *size, Op::Or);
                 }
                 Mir::Op(Op::Xor(src, dst, size)) => {
-                    self.alu_fixup(&mut result, *src, *dst, *size, Op::Xor);
+                    self.alu_fixup(body, *src, *dst, *size, Op::Xor);
                 }
-                Mir::Op(Op::SignedMul(src, dst, size)) => {
-                    self.imul_fixup(&mut result, *src, *dst, *size);
+                Mir::Op(Op::Imul(src, dst, size)) => {
+                    self.imul_fixup(body, *src, *dst, *size);
                 }
                 Mir::Op(Op::Cmp(src, dst, size)) => {
-                    self.alu_fixup(&mut result, *src, *dst, *size, Op::Cmp);
+                    self.alu_fixup(body, *src, *dst, *size, Op::Cmp);
                 }
-                Mir::Op(Op::LeftShift(src, dst, size)) => {
-                    self.shift_fixup(
-                        &mut result,
-                        *src,
-                        *dst,
-                        *size,
-                        Op::LeftShift,
-                    );
+                Mir::Op(Op::Shl(src, dst, size)) => {
+                    self.shift_fixup(body, *src, *dst, *size, Op::Shl);
                 }
-                Mir::Op(Op::RightShift(src, dst, size)) => {
-                    self.shift_fixup(
-                        &mut result,
-                        *src,
-                        *dst,
-                        *size,
-                        Op::RightShift,
-                    );
+                Mir::Op(Op::Shr(src, dst, size)) => {
+                    self.shift_fixup(body, *src, *dst, *size, Op::Shr);
                 }
-                Mir::Op(Op::ArithRightShift(src, dst, size)) => {
-                    self.shift_fixup(
-                        &mut result,
-                        *src,
-                        *dst,
-                        *size,
-                        Op::ArithRightShift,
-                    );
+                Mir::Op(Op::Sar(src, dst, size)) => {
+                    self.shift_fixup(body, *src, *dst, *size, Op::Sar);
                 }
                 _ => {
-                    result.push(mir_id);
+                    body.push(mir_id);
                 }
             }
         }
-        result
     }
 
     fn alloc(&mut self, mir: Mir) -> MirId {
@@ -2278,14 +2008,16 @@ impl AbstractMirGenerator for MirGenerator {
                 arena: vec![],
                 top_level: vec![],
             },
+            abi: SysvAbi,
         }
     }
 
     fn lower(&mut self, stage: AirStage) -> Self::Mir {
-        let top_level = stage.tac.top_level.clone();
-        self.tac_arena = stage.tac;
+        let mut tac = stage.tac;
+        let top_level = std::mem::take(&mut tac.top_level);
+        self.tac_arena = tac;
         for &tac_id in &top_level {
-            self.stmt_or_decl(tac_id);
+            self.lower_node(tac_id);
         }
 
         MirStage {
@@ -2298,12 +2030,12 @@ impl AbstractMirGenerator for MirGenerator {
 }
 
 fn is_immediate(mir: &Mir) -> bool {
-    matches!(mir, Mir::Operand(Operand::Imm { .. }))
+    matches!(mir, Mir::Operand(Operand::Imm(_), _))
 }
 
 fn is_large_immediate(mir: &Mir) -> bool {
     match mir {
-        Mir::Operand(Operand::Imm { val, size, .. }) => {
+        Mir::Operand(Operand::Imm(val), size) => {
             if *size > 4 {
                 return true;
             }
@@ -2321,12 +2053,12 @@ fn is_large_immediate(mir: &Mir) -> bool {
 fn is_memory(mir: &Mir) -> bool {
     matches!(
         mir,
-        Mir::Operand(Operand::Mem { .. })
-            | Mir::Operand(Operand::Data { .. })
-            | Mir::Operand(Operand::Indexed { .. })
+        Mir::Operand(Operand::Mem(_, _), _)
+            | Mir::Operand(Operand::Sym(_), _)
+            | Mir::Operand(Operand::Idx { .. }, _)
     )
 }
 
 fn is_register(mir: &Mir) -> bool {
-    matches!(mir, Mir::Operand(Operand::Reg { .. }))
+    matches!(mir, Mir::Operand(Operand::Reg(_), _))
 }

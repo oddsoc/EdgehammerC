@@ -26,27 +26,41 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
-use crate::air::AirGenerator;
-use crate::ast::*;
-use crate::lexing::*;
-use crate::mir::MirGenerator;
+use crate::errors::{report_error, report_errors};
 use crate::preprocessing::*;
-use crate::semantics::*;
-use crate::symtab::SymTab;
-use crate::types::*;
-use crate::x64::linux::asm;
-use crate::x64::linux::mir::MirGenerator as X64MirGenerator;
+use crate::tokenising::*;
+use crate::{
+    air::AirGenerator, air::tac::TacGenerator, asm::x86_64::linux::asm,
+    mir::MirGenerator, mir::abi::set_abi, mir::x86_64::sysv::SysvAbi,
+    mir::x86_64::sysv::mir::MirGenerator as Codegen,
+};
+use crate::{ast::*, parsing::Parser, semantics::*, symtab::SymTab, types::*};
 
-#[derive(Debug, PartialEq, Clone)]
-pub enum Argument {
-    Lex,
-    Parse,
-    Validate,
-    Codegen,
-    NoLink,
-    LinkTo(String),
-    OutputAsm,
-    OutputTo(PathBuf),
+#[derive(Debug, Default, Clone)]
+pub struct Config {
+    pub tokenise: bool,
+    pub parse: bool,
+    pub validate: bool,
+    pub codegen: bool,
+    pub no_link: bool,
+    pub output_asm: bool,
+    pub output_dir: Option<PathBuf>,
+    pub link_to: Vec<String>,
+}
+
+fn usage(program: &str) {
+    eprintln!("Usage: {} [options] <c-file> [<c-file> ...]", program);
+    eprintln!();
+    eprintln!("Options:");
+    eprintln!("  --lex              Only lex the input file(s)");
+    eprintln!("  --parse            Only parse the input file(s)");
+    eprintln!("  --validate         Parse and validate the input file(s)");
+    eprintln!("  --codegen          Generate code and print debug output");
+    eprintln!("  -S                 Produce assembly output (.s) files");
+    eprintln!("  -c                 Compile only; do not link");
+    eprintln!("  -o <output>        Write output to <output>");
+    eprintln!("  -l <library>       Link against <library>");
+    eprintln!("  --help             Show this help message and exit");
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -55,18 +69,6 @@ pub struct Translation {
     s_file: PathBuf,
 }
 
-/// Returns the `-o` output path if one was specified.
-fn output_path(args: &[Argument]) -> Option<&PathBuf> {
-    args.iter().find_map(|a| {
-        if let Argument::OutputTo(p) = a {
-            Some(p)
-        } else {
-            None
-        }
-    })
-}
-
-/// Parses an option that may be written as `-Xvalue` or `-X value`.
 fn parse_option_arg<'a>(
     args: &'a [String],
     i: &mut usize,
@@ -86,31 +88,36 @@ fn parse_option_arg<'a>(
     }
 }
 
-pub fn parse_args(args: &[String]) -> (Vec<Translation>, Vec<Argument>) {
-    let mut arguments: Vec<Argument> = Vec::new();
+pub fn parse_args(args: &[String]) -> (Vec<Translation>, Config) {
+    let mut config = Config::default();
     let mut files: Vec<PathBuf> = Vec::new();
     let mut i = 1;
 
     while i < args.len() {
         let arg = args[i].as_str();
         match arg {
-            "-S" => arguments.push(Argument::OutputAsm),
-            "-c" => arguments.push(Argument::NoLink),
-            "--lex" => arguments.push(Argument::Lex),
-            "--parse" => arguments.push(Argument::Parse),
-            "--validate" => arguments.push(Argument::Validate),
-            "--codegen" => arguments.push(Argument::Codegen),
+            "-S" => config.output_asm = true,
+            "-c" => config.no_link = true,
+            "--lex" => config.tokenise = true,
+            "--parse" => config.parse = true,
+            "--validate" => config.validate = true,
+            "--codegen" => config.codegen = true,
+            "--help" => {
+                let program = args.first().map_or("edgehammer", |s| s.as_str());
+                usage(program);
+                std::process::exit(0);
+            }
             _ if arg.starts_with("-o") => {
-                if output_path(&arguments).is_some() {
+                if config.output_dir.is_some() {
                     eprintln!("-o already specified");
                     std::process::exit(1);
                 }
                 let path = parse_option_arg(args, &mut i, "-o");
-                arguments.push(Argument::OutputTo(PathBuf::from(path)));
+                config.output_dir = Some(PathBuf::from(path));
             }
             _ if arg.starts_with("-l") => {
                 let lib = parse_option_arg(args, &mut i, "-l");
-                arguments.push(Argument::LinkTo(lib.to_string()));
+                config.link_to.push(lib.to_string());
             }
             _ if arg.starts_with('-') => {
                 eprintln!("unknown option: {}", arg);
@@ -126,13 +133,7 @@ pub fn parse_args(args: &[String]) -> (Vec<Translation>, Vec<Argument>) {
         std::process::exit(1);
     }
 
-    // Derive a default output path when none was given and we are not in a
-    // debug-only mode (--codegen / -S just dump intermediate output; no file
-    // needs to be produced).
-    if output_path(&arguments).is_none()
-        && !arguments.contains(&Argument::Codegen)
-        && !arguments.contains(&Argument::OutputAsm)
-    {
+    if config.output_dir.is_none() && !config.codegen && !config.output_asm {
         let default = if files.len() == 1 {
             let c_file = &files[0];
             let parent = c_file.parent().unwrap_or_else(|| {
@@ -143,7 +144,7 @@ pub fn parse_args(args: &[String]) -> (Vec<Translation>, Vec<Argument>) {
                 eprintln!("invalid C file path: {}", c_file.display());
                 std::process::exit(1);
             });
-            if arguments.contains(&Argument::NoLink) {
+            if config.no_link {
                 parent.join(format!("{}.o", stem.to_string_lossy()))
             } else {
                 parent.join(stem)
@@ -151,19 +152,16 @@ pub fn parse_args(args: &[String]) -> (Vec<Translation>, Vec<Argument>) {
         } else {
             PathBuf::from("a.out")
         };
-        arguments.push(Argument::OutputTo(default));
+        config.output_dir = Some(default);
     }
 
-    let translations = build_translations(&files, &arguments);
-    (translations, arguments)
+    let translations = build_translations(&files, &config);
+    (translations, config)
 }
 
-fn build_translations(
-    files: &[PathBuf],
-    args: &[Argument],
-) -> Vec<Translation> {
+fn build_translations(files: &[PathBuf], config: &Config) -> Vec<Translation> {
     let temp_dir = env::temp_dir();
-    let asm_in_cwd = args.contains(&Argument::OutputAsm);
+    let asm_in_cwd = config.output_asm;
 
     files
         .iter()
@@ -187,90 +185,112 @@ fn build_translations(
         .collect()
 }
 
-/// Reads and preprocesses a source file, returning the resulting text.
 fn load_source(c_file: &PathBuf) -> String {
     let bytes = fs::read(c_file).unwrap();
     preprocess(bytes).unwrap()
 }
 
-/// Reads, preprocesses, and parses a source file.
-fn parse_source(c_file: &PathBuf) -> AstStage {
+fn parse_source(c_file: &PathBuf) -> Option<AstStage> {
     let text = load_source(c_file);
     let mut symtab = SymTab::new();
-    let (mut arena, ast) = {
-        let mut parser =
-            crate::parsing::Parser::new(&text, &mut symtab).unwrap();
-        parser.parse().unwrap()
+    let (mut arena, ast) = match Parser::new(&text, &mut symtab) {
+        Ok(mut parser) => match parser.parse() {
+            Ok(result) => result,
+            Err(errors) => {
+                let filename = c_file.file_name().unwrap().to_str().unwrap();
+                report_errors(&errors, &text, filename);
+                std::process::exit(1);
+            }
+        },
+        Err(e) => {
+            let filename = c_file.file_name().unwrap().to_str().unwrap();
+            report_error(&e, &text, filename);
+            std::process::exit(1);
+        }
     };
     arena.source = text;
-    AstStage {
+    Some(AstStage {
         arena,
         root: ast,
         symtab,
-    }
+    })
 }
 
-fn verify(stage: &mut AstStage) {
+fn verify(stage: &mut AstStage, filename: &str) {
     let mut annotator = TypeAnnotator::new();
     if let Err(e) = annotator.run(stage) {
-        panic!("Type checking failed: {:?}", e);
+        report_error(&e, &stage.arena.source, filename);
+        std::process::exit(1);
     }
     let analyser = Analyser::new();
     if let Err(e) = analyser.run(stage) {
-        panic!("semantic analysis failed: {:?}", e);
+        report_error(&e, &stage.arena.source, filename);
+        std::process::exit(1);
     }
 }
 
-fn lex(translations: &[Translation], _arguments: &[Argument]) {
+fn tokenise(translations: &[Translation], _config: &Config) {
     for translation in translations {
         let text = load_source(&translation.c_file);
-        for tok in Tokeniser::new(&text) {
+        let mut tokeniser = Tokeniser::new(&text);
+        let mut nr_tokens: usize = 0;
+        for tok in &mut tokeniser {
             tok.unwrap();
+            nr_tokens += 1;
         }
+        println!("{} tokens", nr_tokens);
     }
 }
 
-fn parse(translations: &[Translation], arguments: &[Argument]) {
-    let validate = arguments.contains(&Argument::Validate);
+fn parse(translations: &[Translation], config: &Config) {
+    let validate = config.validate;
     for translation in translations {
-        let mut stage = parse_source(&translation.c_file);
-        if validate {
-            verify(&mut stage);
+        if let Some(mut stage) = parse_source(&translation.c_file)
+            && validate
+        {
+            let filename =
+                translation.c_file.file_name().unwrap().to_str().unwrap();
+            verify(&mut stage, filename);
         }
     }
 }
 
-fn codegen(translations: &[Translation], arguments: &[Argument]) {
-    let debug = arguments.contains(&Argument::Codegen);
-    let emit_asm = arguments.contains(&Argument::OutputAsm);
-    let emit = emit_asm || output_path(arguments).is_some();
+fn codegen(translations: &[Translation], config: &Config) {
+    let debug = config.codegen;
+    let emit_asm = config.output_asm;
+    let emit = emit_asm || config.output_dir.is_some();
     let mut s_files: Vec<String> = Vec::new();
 
     for translation in translations {
-        let mut stage = parse_source(&translation.c_file);
-        verify(&mut stage);
+        let Some(mut stage) = parse_source(&translation.c_file) else {
+            continue;
+        };
+        let filename =
+            translation.c_file.file_name().unwrap().to_str().unwrap();
+        verify(&mut stage, filename);
 
-        let mut irgen = crate::air::tac::TacGenerator::new();
+        let mut irgen = TacGenerator::new();
         let ir = irgen.lower(stage);
         if debug {
-            println!("Tac: {:#?}", &ir);
+            println!("Tac: {:#?}", ir);
         }
 
-        let mut x64gen = X64MirGenerator::new();
-        let asm = x64gen.lower(ir);
+        let mut codegen = Codegen::new();
+        let mir = codegen.lower(ir);
         if debug {
-            println!("ASM: {:#?}", asm);
+            println!("Mir: {:#?}", mir);
         }
 
         if emit {
-            asm::emit(translation.s_file.to_str().unwrap(), &asm);
+            asm::emit(translation.s_file.to_str().unwrap(), &mir);
         }
+
         s_files.push(translation.s_file.to_str().unwrap().to_string());
     }
 
-    if let Some(output) = output_path(arguments) {
-        let link = !arguments.contains(&Argument::NoLink);
-        assemble_cc(&s_files, output.to_str().unwrap(), link, arguments);
+    if let Some(ref output) = config.output_dir {
+        let link = !config.no_link;
+        assemble_cc(&s_files, output.to_str().unwrap(), link, config);
     }
 
     if !emit_asm {
@@ -289,15 +309,10 @@ fn preprocess_cc(c_file: &str, i_file: &str) {
         .arg("-o")
         .arg(i_file)
         .status()
-        .expect(&format!("failed to preprocess {}", c_file));
+        .unwrap_or_else(|_| panic!("failed to preprocess {}", c_file));
 }
 
-fn assemble_cc(
-    s_files: &[String],
-    output: &str,
-    link: bool,
-    args: &[Argument],
-) {
+fn assemble_cc(s_files: &[String], output: &str, link: bool, config: &Config) {
     let mut cmd = Command::new("cc");
 
     if !link {
@@ -306,29 +321,23 @@ fn assemble_cc(
 
     cmd.args(s_files).arg("-no-pie").arg("-o").arg(output);
 
-    for lib in args.iter().filter_map(|a| {
-        if let Argument::LinkTo(lib) = a {
-            Some(lib.as_str())
-        } else {
-            None
-        }
-    }) {
+    for lib in &config.link_to {
         cmd.arg(format!("-l{}", lib));
     }
 
     cmd.status().expect("failed to assemble");
 }
 
-pub fn run(translations: &[Translation], arguments: &[Argument]) {
-    if arguments.contains(&Argument::Codegen) {
-        codegen(translations, arguments);
-    } else if arguments.contains(&Argument::Validate)
-        || arguments.contains(&Argument::Parse)
-    {
-        parse(translations, arguments);
-    } else if arguments.contains(&Argument::Lex) {
-        lex(translations, arguments);
+pub fn run(translations: &[Translation], config: &Config) {
+    set_abi(&SysvAbi);
+
+    if config.codegen {
+        codegen(translations, config);
+    } else if config.validate || config.parse {
+        parse(translations, config);
+    } else if config.tokenise {
+        tokenise(translations, config);
     } else {
-        codegen(translations, arguments);
+        codegen(translations, config);
     }
 }

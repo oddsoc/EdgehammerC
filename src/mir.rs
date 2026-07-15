@@ -23,6 +23,9 @@
 
 use crate::air::tac::AirStage;
 
+pub mod abi;
+pub mod x86_64;
+
 pub trait MirGenerator {
     type Mir;
 

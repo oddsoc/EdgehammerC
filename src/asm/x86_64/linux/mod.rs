@@ -21,26 +21,4 @@
  *  DEALINGS IN THE SOFTWARE.
  */
 
-#[cfg(feature = "tracing")]
-use tracing_subscriber::prelude::*;
-#[cfg(feature = "tracing")]
-use tracing_tree::HierarchicalLayer;
-
-use std::env;
-
-use asjcc::driver;
-
-fn main() -> Result<(), ()> {
-    let args: Vec<String> = env::args().collect();
-
-    #[cfg(feature = "tracing")]
-    let subscriber =
-        tracing_subscriber::registry().with(HierarchicalLayer::new(2)); // 2 = indentation spaces
-    #[cfg(feature = "tracing")]
-    tracing::subscriber::set_global_default(subscriber).unwrap();
-
-    let (translations, config) = driver::parse_args(&args);
-    driver::run(&translations, &config);
-
-    Ok(())
-}
+pub mod asm;

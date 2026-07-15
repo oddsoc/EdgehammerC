@@ -23,16 +23,18 @@
 
 #![cfg_attr(feature = "simd", feature(portable_simd))]
 
-//mod ast;
-//mod mir;
-//mod driver;
-//mod expr;
-//mod air;
+pub mod abi;
+pub mod air;
+pub mod asm;
+pub mod ast;
+pub mod driver;
 pub mod errors;
-pub mod lexing;
+mod expr;
+pub mod mir;
+pub mod parsing;
 pub mod preprocessing;
-//pub mod parsing;
-//mod scope;
-//mod semantics;
-//mod types;
-//mod x64;
+pub mod semantics;
+pub mod symtab;
+pub mod token;
+pub mod tokenising;
+pub mod types;

@@ -24,7 +24,7 @@
 use std::collections::HashSet;
 
 use crate::ast::*;
-use crate::errors::{Error, ErrorClass::Semantic, SemanticError, error};
+use crate::errors::{Error, ErrorClass::Semantic, SemanticError};
 use crate::expr::*;
 use crate::symtab::*;
 
@@ -54,7 +54,7 @@ impl Analyser {
                     if let AstKind::Parameter { .. } = &arena[param].kind {
                         self.walk(arena, symtab, param)?;
                     } else if block.is_some() {
-                        return Err(error(Semantic(
+                        return Err(arena.node_error(id, Semantic(
                             SemanticError::UnnamedParameterInFunctionDefinition,
                         )));
                     } else {
@@ -86,14 +86,14 @@ impl Analyser {
                     check(arena, symtab, init_val)?;
                     let folded = fold(arena, init_val);
                     arena[init_val] = arena[folded].clone();
-                    if let Some(sym) = resolve(symtab, arena, &id) {
-                        if has_static_storage_duration(symtab, sym) {
-                            if !is_const_expr(arena, init_val) {
-                                return Err(error(Semantic(
-                                    SemanticError::NotAConstExpression,
-                                )));
-                            }
-                        }
+                    if let Some(sym) = resolve(symtab, arena, &id)
+                        && has_static_storage_duration(symtab, sym)
+                        && !is_const_expr(arena, init_val)
+                    {
+                        return Err(arena.node_error(
+                            id,
+                            Semantic(SemanticError::NotAConstExpression),
+                        ));
                     }
                 }
 
@@ -172,7 +172,10 @@ impl Analyser {
                 if symtab.upto(scope, ScopeKind::Loop).is_some() {
                     Ok(())
                 } else {
-                    Err(error(Semantic(SemanticError::ContinueNotInALoop)))
+                    Err(arena.node_error(
+                        id,
+                        Semantic(SemanticError::ContinueNotInALoop),
+                    ))
                 }
             }
 
@@ -184,7 +187,10 @@ impl Analyser {
                 {
                     Ok(())
                 } else {
-                    Err(error(Semantic(SemanticError::BreakNotInALoopOrSwitch)))
+                    Err(arena.node_error(
+                        id,
+                        Semantic(SemanticError::BreakNotInALoopOrSwitch),
+                    ))
                 }
             }
             AstKind::ExprStmt { expr } => {
@@ -199,9 +205,12 @@ impl Analyser {
                 if symtab.get_label(scope, arena.token_str(label)).is_some() {
                     Ok(())
                 } else {
-                    Err(error(Semantic(SemanticError::LabelNotFound(
-                        arena.token_str(label).to_string(),
-                    ))))
+                    Err(arena.node_error(
+                        id,
+                        Semantic(SemanticError::LabelNotFound(
+                            arena.token_str(label).to_string(),
+                        )),
+                    ))
                 }
             }
 
@@ -221,9 +230,10 @@ impl Analyser {
                     if !is_const_int_expr(arena, expr_val)
                         && !is_const_unsigned_int_expr(arena, expr_val)
                     {
-                        return Err(error(Semantic(
-                            SemanticError::NotAConstExpression,
-                        )));
+                        return Err(arena.node_error(
+                            id,
+                            Semantic(SemanticError::NotAConstExpression),
+                        ));
                     }
 
                     self.walk(arena, symtab, *stmt)?;
@@ -231,7 +241,10 @@ impl Analyser {
                     return Ok(());
                 }
 
-                Err(error(Semantic(SemanticError::CaseOutsideOfSwitch)))
+                Err(arena.node_error(
+                    id,
+                    Semantic(SemanticError::CaseOutsideOfSwitch),
+                ))
             }
 
             AstKind::Default { stmt } => {
@@ -241,7 +254,10 @@ impl Analyser {
                     return Ok(());
                 }
 
-                Err(error(Semantic(SemanticError::DefaultOutsideOfSwitch)))
+                Err(arena.node_error(
+                    id,
+                    Semantic(SemanticError::DefaultOutsideOfSwitch),
+                ))
             }
 
             AstKind::Switch { cond, body, cases } => {
@@ -260,7 +276,7 @@ impl Analyser {
                                 if !case_values.insert(
                                     const_unsigned_int_value(arena, *expr),
                                 ) {
-                                    return Err(error(Semantic(
+                                    return Err(arena.node_error(id, Semantic(
                                         SemanticError::DuplicateCaseExpression,
                                     )));
                                 }
@@ -268,23 +284,29 @@ impl Analyser {
                                 if !case_values
                                     .insert(const_int_value(arena, *expr) as u64)
                                 {
-                                    return Err(error(Semantic(
+                                    return Err(arena.node_error(id, Semantic(
                                         SemanticError::DuplicateCaseExpression,
                                     )));
                                 }
                             } else {
-                                return Err(error(Semantic(
-                                    SemanticError::NotAConstExpression,
-                                )));
+                                return Err(arena.node_error(
+                                    id,
+                                    Semantic(
+                                        SemanticError::NotAConstExpression,
+                                    ),
+                                ));
                             }
 
                             self.walk(arena, symtab, *stmt)?;
                         }
                         AstKind::Default { stmt } => {
                             if has_default {
-                                return Err(error(Semantic(
-                                    SemanticError::DuplicateDefaultCase,
-                                )));
+                                return Err(arena.node_error(
+                                    id,
+                                    Semantic(
+                                        SemanticError::DuplicateDefaultCase,
+                                    ),
+                                ));
                             }
                             has_default = true;
                             self.walk(arena, symtab, *stmt)?;
@@ -319,5 +341,11 @@ impl Analyser {
         }
 
         Ok(())
+    }
+}
+
+impl Default for Analyser {
+    fn default() -> Self {
+        Self::new()
     }
 }

@@ -21,19 +21,82 @@
  *  DEALINGS IN THE SOFTWARE.
  */
 
-use crate::lexing::Token;
 use std::fmt;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourceLoc {
+    pub start: usize,
+    pub end: usize,
+}
+
+impl SourceLoc {
+    pub fn line_and_col(&self, buf: &str) -> (usize, usize) {
+        let mut line = 1;
+        let mut col = 1;
+        let bytes = buf.as_bytes();
+
+        let mut chars = buf.char_indices();
+
+        while let Some((i, c)) = chars.next() {
+            if i >= self.start {
+                break;
+            }
+
+            if c == '#' && (i == 0 || bytes[i - 1] == b'\n') {
+                let after_hash = &buf[i + c.len_utf8()..];
+                let trimmed = after_hash.trim_start();
+
+                let after_keyword =
+                    if let Some(rest) = trimmed.strip_prefix("line") {
+                        rest.trim_start()
+                    } else {
+                        trimmed
+                    };
+
+                let num_str = after_keyword;
+                let num_len = num_str
+                    .bytes()
+                    .position(|b| !b.is_ascii_digit())
+                    .unwrap_or(num_str.len());
+
+                if num_len > 0 {
+                    let num: usize = num_str[..num_len].parse().unwrap();
+                    for (j, ch) in chars.by_ref() {
+                        if j >= self.start {
+                            break;
+                        }
+                        if ch == '\n' {
+                            break;
+                        }
+                    }
+                    line = num;
+                    col = 1;
+                    continue;
+                }
+            }
+
+            if c == '\n' {
+                line += 1;
+                col = 1;
+            } else {
+                col += 1;
+            }
+        }
+
+        (line, col)
+    }
+}
 
 #[derive(Debug, Clone)]
 #[allow(unused)]
 pub struct Error {
-    pub token: Option<Token>,
+    pub loc: Option<SourceLoc>,
     pub class: ErrorClass,
 }
 
 #[derive(Debug, Clone)]
 #[allow(unused)]
-pub enum LexingError {
+pub enum TokenisingError {
     InvalidDoubleLiteral,
     ExpectedOctalDigits,
     ExpectedHexadecimalDigits,
@@ -45,13 +108,14 @@ pub enum LexingError {
     InvalidIntegerLiteral,
     InvalidIdentifier(String),
     UnterminatedBlockComment,
+    InvalidCharLiteral,
 }
 
 #[derive(Debug, Clone)]
 #[allow(unused)]
 pub enum ParsingError {
-    ExpectedButGot { expected: String, got: String },
-    ExpectedButReachedEof(String),
+    ExpectedTokButGot(String),
+    UnexpectedEof,
     TypeNamesCannotHaveStorageClass,
     ArrayDimensionCannotBeNegative(i64),
     ArrayDimensionMustBeConstantIntegerExpression,
@@ -128,46 +192,49 @@ pub enum SymbolError {
 #[derive(Debug, Clone)]
 #[allow(unused)]
 pub enum ErrorClass {
-    Lexing(LexingError),
+    Tokenising(TokenisingError),
     Parsing(ParsingError),
     TypeChecking(TypeCheckingError),
     Semantic(SemanticError),
     Symbolic(SymbolError),
 }
 
-impl LexingError {
+impl TokenisingError {
     pub fn message(&self) -> String {
         match self {
-            LexingError::InvalidDoubleLiteral => {
+            TokenisingError::InvalidDoubleLiteral => {
                 "invalid double literal".to_string()
             }
-            LexingError::ExpectedOctalDigits => {
+            TokenisingError::ExpectedOctalDigits => {
                 "expected octal digits".to_string()
             }
-            LexingError::ExpectedHexadecimalDigits => {
+            TokenisingError::ExpectedHexadecimalDigits => {
                 "expected hexadecimal digits".to_string()
             }
-            LexingError::ExpectedDigits => "expected digits".to_string(),
-            LexingError::NotValidHexEscapeSequence => {
+            TokenisingError::ExpectedDigits => "expected digits".to_string(),
+            TokenisingError::NotValidHexEscapeSequence => {
                 "not a valid hex escape sequence".to_string()
             }
-            LexingError::NotValidUnicodeEscapeSequence => {
+            TokenisingError::NotValidUnicodeEscapeSequence => {
                 "not a valid unicode escape sequence".to_string()
             }
-            LexingError::NotValidOctalEscapeSequence => {
+            TokenisingError::NotValidOctalEscapeSequence => {
                 "not a valid octal escape sequence".to_string()
             }
-            LexingError::LeadingZeroInIntegerConstant => {
+            TokenisingError::LeadingZeroInIntegerConstant => {
                 "leading zero in integer constant".to_string()
             }
-            LexingError::InvalidIntegerLiteral => {
+            TokenisingError::InvalidIntegerLiteral => {
                 "invalid integer literal".to_string()
             }
-            LexingError::InvalidIdentifier(ident) => {
+            TokenisingError::InvalidIdentifier(ident) => {
                 format!("invalid identifier: {}", ident)
             }
-            LexingError::UnterminatedBlockComment => {
+            TokenisingError::UnterminatedBlockComment => {
                 "unterminated block comment".to_string()
+            }
+            TokenisingError::InvalidCharLiteral => {
+                "invalid character literal".to_string()
             }
         }
     }
@@ -176,12 +243,10 @@ impl LexingError {
 impl ParsingError {
     pub fn message(&self) -> String {
         match self {
-            ParsingError::ExpectedButGot { expected, got } => {
-                format!("expected {:?} but got {:?}", expected, got)
+            ParsingError::ExpectedTokButGot(got) => {
+                format!("unexpected token '{}'", got)
             }
-            ParsingError::ExpectedButReachedEof(expected) => {
-                format!("expected {:?} but reached end of file", expected)
-            }
+            ParsingError::UnexpectedEof => "unexpected end of file".to_string(),
             ParsingError::TypeNamesCannotHaveStorageClass => {
                 "type names cannot have a storage class".to_string()
             }
@@ -375,7 +440,7 @@ impl SymbolError {
 impl ErrorClass {
     pub fn message(&self) -> String {
         match self {
-            ErrorClass::Lexing(code) => code.message(),
+            ErrorClass::Tokenising(code) => code.message(),
             ErrorClass::Parsing(code) => code.message(),
             ErrorClass::TypeChecking(code) => code.message(),
             ErrorClass::Semantic(code) => code.message(),
@@ -390,15 +455,74 @@ impl fmt::Display for Error {
     }
 }
 
-/// Create an error from an error code, without a source token.
-pub fn error(class: ErrorClass) -> Error {
-    Error { token: None, class }
+const RED: &str = "\x1b[31m";
+const RESET: &str = "\x1b[0m";
+
+pub fn report_error(error: &Error, buf: &str, filename: &str) {
+    report_errors(std::slice::from_ref(error), buf, filename);
 }
 
-/// Create an error from an error code with a source token.
-pub fn error_at(token: Token, class: ErrorClass) -> Error {
+pub fn report_errors(errors: &[Error], buf: &str, filename: &str) {
+    let line_width = errors
+        .iter()
+        .filter_map(|e| e.loc.as_ref().map(|l| l.line_and_col(buf).0))
+        .max()
+        .map_or(1, |n| ((n as f64).log10().floor() as usize) + 1);
+
+    for error in errors {
+        if let Some(ref loc) = error.loc {
+            let (line, col) = loc.line_and_col(buf);
+            let source_line = buf.lines().nth(line - 1).unwrap_or("");
+            let token_len = buf[loc.start..loc.end].chars().count().max(1);
+
+            eprintln!(
+                "{}:{}:{}: error: {}",
+                filename,
+                line,
+                col,
+                error.class.message(),
+            );
+            for ctx in (1..=2).rev() {
+                if let Some(ctx_line) = line.checked_sub(ctx + 1)
+                    && let Some(src) = buf.lines().nth(ctx_line)
+                {
+                    eprintln!(
+                        " {:>width$} │  {}",
+                        ctx_line + 1,
+                        src,
+                        width = line_width
+                    );
+                }
+            }
+            eprintln!(
+                " {:>width$} │  {}",
+                line,
+                source_line,
+                width = line_width
+            );
+            let prefix = "~".repeat(token_len - 1);
+            eprintln!(
+                " {:>width$} │  {}{}{}^{}",
+                "",
+                " ".repeat(col - 1),
+                RED,
+                prefix,
+                RESET,
+                width = line_width,
+            );
+        } else {
+            eprintln!("{}: error: {}", filename, error.class.message());
+        }
+    }
+}
+
+pub fn error(class: ErrorClass) -> Error {
+    Error { loc: None, class }
+}
+
+pub fn error_at(loc: SourceLoc, class: ErrorClass) -> Error {
     Error {
-        token: Some(token),
+        loc: Some(loc),
         class,
     }
 }

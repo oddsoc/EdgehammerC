@@ -21,26 +21,37 @@
  *  DEALINGS IN THE SOFTWARE.
  */
 
-#[cfg(feature = "tracing")]
-use tracing_subscriber::prelude::*;
-#[cfg(feature = "tracing")]
-use tracing_tree::HierarchicalLayer;
+use std::sync::OnceLock;
 
-use std::env;
+pub trait Abi: Send + Sync {
+    fn pointer_size(&self) -> usize;
+    fn pointer_alignment(&self) -> usize;
+    fn int_size(&self) -> usize;
+    fn int_alignment(&self) -> usize;
+    fn long_size(&self) -> usize;
+    fn long_alignment(&self) -> usize;
+    fn long_long_size(&self) -> usize;
+    fn long_long_alignment(&self) -> usize;
+    fn double_size(&self) -> usize;
+    fn double_alignment(&self) -> usize;
+    fn long_double_size(&self) -> usize;
+    fn long_double_alignment(&self) -> usize;
+    fn void_size(&self) -> usize;
+    fn void_alignment(&self) -> usize;
+    fn function_size(&self) -> usize;
+    fn function_alignment(&self) -> usize;
+    fn stack_alignment(&self) -> usize;
+    fn max_gp_arg_regs(&self) -> usize;
+    fn max_fp_arg_regs(&self) -> usize;
+}
 
-use asjcc::driver;
+static ABI: OnceLock<&'static dyn Abi> = OnceLock::new();
 
-fn main() -> Result<(), ()> {
-    let args: Vec<String> = env::args().collect();
+pub fn set_abi(abi: &'static dyn Abi) {
+    ABI.set(abi).ok();
+}
 
-    #[cfg(feature = "tracing")]
-    let subscriber =
-        tracing_subscriber::registry().with(HierarchicalLayer::new(2)); // 2 = indentation spaces
-    #[cfg(feature = "tracing")]
-    tracing::subscriber::set_global_default(subscriber).unwrap();
-
-    let (translations, config) = driver::parse_args(&args);
-    driver::run(&translations, &config);
-
-    Ok(())
+pub fn abi() -> &'static dyn Abi {
+    *ABI.get()
+        .expect("ABI not initialized; call abi::set_abi() first")
 }

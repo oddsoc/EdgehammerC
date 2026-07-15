@@ -27,8 +27,9 @@ use crate::ast::*;
 use crate::errors::{
     Error,
     ErrorClass::{Parsing, Symbolic},
-    ParsingError, SymbolError, error,
+    ParsingError, SymbolError, error_at,
 };
+use crate::tokenising::Token;
 use crate::types::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,6 +43,17 @@ pub struct SymTab {
     pub arena: Vec<Symbol>,
     pub entries: HashMap<String, Vec<SymId>>,
     pub scopes: ScopeArena,
+}
+
+#[derive(Debug, Clone)]
+pub struct SymDecl<'a> {
+    pub id: ScopeId,
+    pub name: &'a str,
+    pub kind: SymKind,
+    pub storage_class: Option<StorageClass>,
+    pub definition: Option<Definition>,
+    pub node: Option<AstId>,
+    pub token: Token,
 }
 
 impl SymTab {
@@ -243,6 +255,7 @@ impl ScopeArena {
         id: ScopeId,
         name: &str,
         stmt: AstId,
+        token: Token,
     ) -> Result<(), Error> {
         assert!(self.kind_of(id) != ScopeKind::File);
 
@@ -251,9 +264,10 @@ impl ScopeArena {
             .expect("label must be inside a function scope");
 
         if self.arena[fn_scope.0].labels.contains_key(name) {
-            Err(error(Parsing(ParsingError::LabelAlreadyDefined(
-                name.to_string(),
-            ))))
+            Err(error_at(
+                token.loc,
+                Parsing(ParsingError::LabelAlreadyDefined(name.to_string())),
+            ))
         } else {
             self.arena[fn_scope.0].labels.insert(name.to_string(), stmt);
             Ok(())
@@ -318,8 +332,9 @@ impl SymTab {
         id: ScopeId,
         name: &str,
         stmt: AstId,
+        token: Token,
     ) -> Result<(), Error> {
-        self.scopes.add_label(id, name, stmt)
+        self.scopes.add_label(id, name, stmt, token)
     }
 
     pub fn get_label(&self, id: ScopeId, name: &str) -> Option<AstId> {
@@ -328,8 +343,8 @@ impl SymTab {
 
     fn current_scope_decl(&self, id: ScopeId, name: &str) -> Option<SymId> {
         let sc = &self.scopes.arena[id.0];
-        let unique = sc.name_map.get(name)?.clone();
-        self.decl(&unique)
+        let unique = sc.name_map.get(name)?;
+        self.decl(unique)
     }
 
     fn determine_linkage(
@@ -363,108 +378,102 @@ impl SymTab {
         }
     }
 
-    pub fn declare_sym(
-        &mut self,
-        id: ScopeId,
-        name: &str,
-        kind: SymKind,
-        storage_class: Option<StorageClass>,
-        definition: Option<Definition>,
-        node: Option<AstId>,
-    ) -> Result<SymId, Error> {
-        if matches!(storage_class, Some(StorageClass::Static))
-            && self.scopes.has_parent(id)
-            && matches!(kind, SymKind::Function)
+    pub fn declare_sym(&mut self, decl: SymDecl<'_>) -> Result<SymId, Error> {
+        if matches!(decl.storage_class, Some(StorageClass::Static))
+            && self.scopes.has_parent(decl.id)
+            && matches!(decl.kind, SymKind::Function)
         {
-            return Err(error(Symbolic(
-                SymbolError::InvalidStorageClassForFunction(name.to_string()),
-            )));
+            return Err(error_at(
+                decl.token.loc,
+                Symbolic(SymbolError::InvalidStorageClassForFunction(
+                    decl.name.to_string(),
+                )),
+            ));
         }
 
-        let linkage = self.determine_linkage(id, kind, &storage_class);
+        let linkage =
+            self.determine_linkage(decl.id, decl.kind, &decl.storage_class);
 
         match linkage {
-            Some(linkage) => self.add_linked_sym(
-                id,
-                name,
-                kind,
-                storage_class,
-                definition,
-                node,
-                linkage,
-            ),
-            None => self.add_local_sym(
-                id,
-                name,
-                kind,
-                storage_class,
-                definition,
-                node,
-            ),
+            Some(linkage) => self.add_linked_sym(decl, linkage),
+            None => self.add_local_sym(decl),
         }
     }
 
     fn add_linked_sym(
         &mut self,
-        id: ScopeId,
-        name: &str,
-        kind: SymKind,
-        storage_class: Option<StorageClass>,
-        definition: Option<Definition>,
-        node: Option<AstId>,
+        decl: SymDecl<'_>,
         linkage: Linkage,
     ) -> Result<SymId, Error> {
+        let SymDecl {
+            id,
+            name,
+            kind,
+            storage_class,
+            definition,
+            node,
+            token,
+        } = decl;
         {
             if let Some(Definition::Concrete) = definition {
                 if self.scopes.has_parent(id) {
-                    return Err(error(Symbolic(
-                        SymbolError::InvalidStorageClassForFunction(format!(
-                            "extern definition of {} not allowed here",
-                            name
+                    return Err(error_at(
+                        token.loc,
+                        Symbolic(SymbolError::InvalidStorageClassForFunction(
+                            format!(
+                                "extern definition of {} not allowed here",
+                                name
+                            ),
                         )),
-                    )));
+                    ));
                 }
                 if self.has_concrete_def(name) {
-                    return Err(error(Symbolic(
-                        SymbolError::MultipleDefinitions(name.to_string()),
-                    )));
+                    return Err(error_at(
+                        token.loc,
+                        Symbolic(SymbolError::MultipleDefinitions(
+                            name.to_string(),
+                        )),
+                    ));
                 }
-                if let Some(def) = self.def(name) {
-                    if let Some(StorageClass::Static) = self[def].storage_class
-                    {
-                        return Err(error(Symbolic(
-                            SymbolError::InvalidStorageClassForFunction(
-                                format!(
-                                    "non-static declaration of '{}' follows static declaration",
-                                    name
-                                ),
+                if let Some(def) = self.def(name)
+                    && let Some(StorageClass::Static) = self[def].storage_class
+                {
+                    return Err(error_at(
+                        token.loc,
+                        Symbolic(SymbolError::InvalidStorageClassForFunction(
+                            format!(
+                                "non-static declaration of '{}' follows static declaration",
+                                name
                             ),
-                        )));
-                    }
+                        )),
+                    ));
                 }
             }
 
-            if linkage == Linkage::Internal {
-                if let Some(existing) = self.decl(name) {
-                    if let Some(Linkage::External) = self[existing].linkage {
-                        return Err(error(Symbolic(
-                            SymbolError::InvalidStorageClassForFunction(
-                                format!(
-                                    "static declaration of '{}' follows non-static declaration",
-                                    name
-                                ),
-                            ),
-                        )));
-                    }
-                }
+            if linkage == Linkage::Internal
+                && let Some(existing) = self.decl(name)
+                && let Some(Linkage::External) = self[existing].linkage
+            {
+                return Err(error_at(
+                    token.loc,
+                    Symbolic(SymbolError::InvalidStorageClassForFunction(
+                        format!(
+                            "static declaration of '{}' follows non-static declaration",
+                            name
+                        ),
+                    )),
+                ));
             }
 
             if let Some(decl) = self.current_scope_decl(id, name) {
                 match self[decl].linkage {
-                    Some(Linkage::Internal) => {
-                        if storage_class.is_none() && kind != SymKind::Function
-                        {
-                            return Err(error(Symbolic(
+                    Some(Linkage::Internal)
+                        if storage_class.is_none()
+                            && kind != SymKind::Function =>
+                    {
+                        return Err(error_at(
+                            token.loc,
+                            Symbolic(
                                 SymbolError::InvalidStorageClassForFunction(
                                     format!(
                                         "extern declaration of {} follows declaration with \
@@ -472,19 +481,22 @@ impl SymTab {
                                         name
                                     ),
                                 ),
-                            )));
-                        }
+                            ),
+                        ));
                     }
                     None => {
-                        return Err(error(Symbolic(
-                            SymbolError::InvalidStorageClassForFunction(
-                                format!(
-                                    "extern declaration of {} follows declaration with no \
+                        return Err(error_at(
+                            token.loc,
+                            Symbolic(
+                                SymbolError::InvalidStorageClassForFunction(
+                                    format!(
+                                        "extern declaration of {} follows declaration with no \
                                  linkage",
-                                    name
+                                        name
+                                    ),
                                 ),
                             ),
-                        )));
+                        ));
                     }
                     _ => {}
                 }
@@ -517,29 +529,34 @@ impl SymTab {
         Ok(sym_id)
     }
 
-    fn add_local_sym(
-        &mut self,
-        id: ScopeId,
-        name: &str,
-        kind: SymKind,
-        storage_class: Option<StorageClass>,
-        definition: Option<Definition>,
-        node: Option<AstId>,
-    ) -> Result<SymId, Error> {
+    fn add_local_sym(&mut self, decl: SymDecl<'_>) -> Result<SymId, Error> {
+        let SymDecl {
+            id,
+            name,
+            kind,
+            storage_class,
+            definition,
+            node,
+            token,
+        } = decl;
         let scope_id = id;
 
         if self.scopes.arena[id.0].name_map.contains_key(name) {
-            return Err(error(Symbolic(SymbolError::MultipleDefinitions(
-                name.to_string(),
-            ))));
+            return Err(error_at(
+                token.loc,
+                Symbolic(SymbolError::MultipleDefinitions(name.to_string())),
+            ));
         }
 
         if let Some(sym) = self.get_sym(id, name) {
             let s = &self[sym];
             if s.linkage.is_some() && s.at_scope == scope_id {
-                return Err(error(Symbolic(
-                    SymbolError::RedeclarationWithNoLinkage(name.to_string()),
-                )));
+                return Err(error_at(
+                    token.loc,
+                    Symbolic(SymbolError::RedeclarationWithNoLinkage(
+                        name.to_string(),
+                    )),
+                ));
             }
         }
 
@@ -559,7 +576,7 @@ impl SymTab {
 
         self.scopes.arena[id.0]
             .name_map
-            .insert(name.to_string(), unique_name.clone());
+            .insert(name.to_string(), unique_name);
 
         Ok(sym_id)
     }
@@ -569,6 +586,7 @@ impl SymTab {
         id: ScopeId,
         sym: SymId,
         definition: Option<Definition>,
+        token: Token,
     ) -> Result<(), Error> {
         let (linkage, name) = { (self[sym].linkage, self[sym].name.clone()) };
 
@@ -576,25 +594,31 @@ impl SymTab {
             Some(Linkage::External) => {
                 if let Some(Definition::Concrete) = definition {
                     if self.scopes.has_parent(id) {
-                        return Err(error(Symbolic(
-                            SymbolError::InvalidStorageClassForFunction(
-                                format!(
-                                    "extern definition of {} not allowed here",
-                                    name
+                        return Err(error_at(
+                            token.loc,
+                            Symbolic(
+                                SymbolError::InvalidStorageClassForFunction(
+                                    format!(
+                                        "extern definition of {} not allowed here",
+                                        name
+                                    ),
                                 ),
                             ),
-                        )));
+                        ));
                     }
                     if self.has_concrete_def(&name) {
-                        return Err(error(Symbolic(
-                            SymbolError::MultipleDefinitions(name.clone()),
-                        )));
+                        return Err(error_at(
+                            token.loc,
+                            Symbolic(SymbolError::MultipleDefinitions(name)),
+                        ));
                     }
-                    if let Some(def) = self.def(&name) {
-                        if let Some(StorageClass::Static) =
+                    if let Some(def) = self.def(&name)
+                        && let Some(StorageClass::Static) =
                             self[def].storage_class
-                        {
-                            return Err(error(Symbolic(
+                    {
+                        return Err(error_at(
+                            token.loc,
+                            Symbolic(
                                 SymbolError::InvalidStorageClassForFunction(
                                     format!(
                                         "non-static declaration of '{}' follows static \
@@ -602,22 +626,23 @@ impl SymTab {
                                         name
                                     ),
                                 ),
-                            )));
-                        }
+                            ),
+                        ));
                     }
                 }
-                if let Some(decl) = self.current_scope_decl(id, &name) {
-                    if self[decl].linkage.is_none() {
-                        return Err(error(Symbolic(
-                            SymbolError::InvalidStorageClassForFunction(
-                                format!(
-                                    "extern declaration of {} follows declaration with \
+                if let Some(decl) = self.current_scope_decl(id, &name)
+                    && self[decl].linkage.is_none()
+                {
+                    return Err(error_at(
+                        token.loc,
+                        Symbolic(SymbolError::InvalidStorageClassForFunction(
+                            format!(
+                                "extern declaration of {} follows declaration with \
                                  no linkage",
-                                    name
-                                ),
+                                name
                             ),
-                        )));
-                    }
+                        )),
+                    ));
                 }
 
                 let (final_linkage, final_storage_class) =
@@ -634,25 +659,27 @@ impl SymTab {
             }
 
             Some(Linkage::Internal) => {
-                if let Some(existing) = self.decl(&name) {
-                    if let Some(Linkage::External) = self[existing].linkage {
-                        return Err(error(Symbolic(
-                            SymbolError::InvalidStorageClassForFunction(
-                                format!(
-                                    "static declaration of '{}' follows non-static \
+                if let Some(existing) = self.decl(&name)
+                    && let Some(Linkage::External) = self[existing].linkage
+                {
+                    return Err(error_at(
+                        token.loc,
+                        Symbolic(SymbolError::InvalidStorageClassForFunction(
+                            format!(
+                                "static declaration of '{}' follows non-static \
                                  declaration",
-                                    name
-                                ),
+                                name
                             ),
-                        )));
-                    }
+                        )),
+                    ));
                 }
-                if self.has_concrete_def(&name) {
-                    if let Some(Definition::Concrete) = definition {
-                        return Err(error(Symbolic(
-                            SymbolError::MultipleDefinitions(name.clone()),
-                        )));
-                    }
+                if self.has_concrete_def(&name)
+                    && let Some(Definition::Concrete) = definition
+                {
+                    return Err(error_at(
+                        token.loc,
+                        Symbolic(SymbolError::MultipleDefinitions(name)),
+                    ));
                 }
 
                 self[sym].linkage = Some(Linkage::Internal);
@@ -663,24 +690,25 @@ impl SymTab {
 
             None => {
                 if self.scopes.kind_of(id) == ScopeKind::File {
-                    if let Some(Definition::Concrete) = definition {
-                        if self.has_concrete_def(&name) {
-                            return Err(error(Symbolic(
-                                SymbolError::MultipleDefinitions(name.clone()),
-                            )));
-                        }
+                    if let Some(Definition::Concrete) = definition
+                        && self.has_concrete_def(&name)
+                    {
+                        return Err(error_at(
+                            token.loc,
+                            Symbolic(SymbolError::MultipleDefinitions(name)),
+                        ));
                     }
                 } else {
-                    if let Some(existing) = self.get_sym(id, &name) {
-                        if self[existing].linkage.is_some()
-                            && self[existing].at_scope == id
-                        {
-                            return Err(error(Symbolic(
-                                SymbolError::RedeclarationWithNoLinkage(
-                                    name.clone(),
-                                ),
-                            )));
-                        }
+                    if let Some(existing) = self.get_sym(id, &name)
+                        && self[existing].linkage.is_some()
+                        && self[existing].at_scope == id
+                    {
+                        return Err(error_at(
+                            token.loc,
+                            Symbolic(SymbolError::RedeclarationWithNoLinkage(
+                                name,
+                            )),
+                        ));
                     }
                 }
 
@@ -692,10 +720,8 @@ impl SymTab {
 
     pub fn get_sym(&self, mut id: ScopeId, name: &str) -> Option<SymId> {
         loop {
-            if let Some(unique) =
-                self.scopes.arena[id.0].name_map.get(name).cloned()
-            {
-                return self.decl(&unique);
+            if let Some(unique) = self.scopes.arena[id.0].name_map.get(name) {
+                return self.decl(unique);
             }
             if self.scopes.has_parent(id) {
                 id = self.scopes.parent_of(id);
@@ -713,10 +739,8 @@ impl SymTab {
         name: &str,
     ) -> Option<Vec<SymId>> {
         loop {
-            if let Some(unique) =
-                self.scopes.arena[id.0].name_map.get(name).cloned()
-            {
-                return self.decls(&unique).map(|v| v.clone());
+            if let Some(unique) = self.scopes.arena[id.0].name_map.get(name) {
+                return self.decls(unique).cloned();
             }
             if self.scopes.has_parent(id) {
                 id = self.scopes.parent_of(id);
@@ -726,21 +750,6 @@ impl SymTab {
         }
 
         None
-    }
-
-    pub fn has_def(&self, mut id: ScopeId, name: &str) -> bool {
-        loop {
-            if let Some(unique) =
-                self.scopes.arena[id.0].name_map.get(name).cloned()
-            {
-                return self.def(&unique).is_some();
-            }
-            if self.scopes.has_parent(id) {
-                id = self.scopes.parent_of(id);
-            } else {
-                return false;
-            }
-        }
     }
 }
 

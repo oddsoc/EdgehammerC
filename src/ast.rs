@@ -24,8 +24,9 @@
 use std::cell::Cell;
 use std::fmt;
 
-use crate::lexing::Token;
+use crate::errors::{Error, ErrorClass, error, error_at};
 use crate::symtab::*;
+use crate::tokenising::Token;
 use crate::types::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,7 +42,7 @@ pub struct Ast {
 impl fmt::Debug for Ast {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Ast")
-            .field("ty", &self.ty.borrow())
+            .field("ty", &self.ty)
             .field("kind", &self.kind)
             .finish()
     }
@@ -304,7 +305,7 @@ impl AstArena {
     }
 
     pub fn token_str(&self, token: &Token) -> &str {
-        &self.source[token.loc.clone()]
+        &self.source[token.loc.start..token.loc.end]
     }
 
     pub fn alloc(
@@ -340,5 +341,84 @@ impl std::ops::Index<AstId> for AstArena {
 impl std::ops::IndexMut<AstId> for AstArena {
     fn index_mut(&mut self, id: AstId) -> &mut Ast {
         &mut self.arena[id.0]
+    }
+}
+
+impl AstArena {
+    pub fn key_token(&self, id: AstId) -> Option<Token> {
+        let kind = &self[id].kind;
+        match kind {
+            AstKind::Function { name, .. } => *name,
+            AstKind::Variable { name, .. } => Some(*name),
+            AstKind::Parameter { name, .. } => Some(*name),
+            AstKind::Identifier { name, .. } => Some(*name),
+            AstKind::GoTo { label } => Some(*label),
+            AstKind::Label { name, .. } => Some(*name),
+            AstKind::Return { expr } => self.key_token(*expr),
+            AstKind::If { cond, .. } => self.key_token(*cond),
+            AstKind::While { cond, .. } => self.key_token(*cond),
+            AstKind::DoWhile { cond, .. } => self.key_token(*cond),
+            AstKind::For { init, cond, .. } => init
+                .and_then(|i| self.key_token(i))
+                .or_else(|| cond.and_then(|c| self.key_token(c))),
+            AstKind::Switch { cond, .. } => self.key_token(*cond),
+            AstKind::ExprStmt { expr } => self.key_token(*expr),
+            AstKind::Case { expr, .. } => self.key_token(*expr),
+            AstKind::Default { stmt } => self.key_token(*stmt),
+            AstKind::Block { body } => {
+                body.first().and_then(|&id| self.key_token(id))
+            }
+            AstKind::Ternary { left, .. } => self.key_token(*left),
+            AstKind::Assign { left, .. } => self.key_token(*left),
+            AstKind::CompoundAssign { left, .. } => self.key_token(*left),
+            AstKind::LogicAnd { left, .. } => self.key_token(*left),
+            AstKind::LogicOr { left, .. } => self.key_token(*left),
+            AstKind::Equal { left, .. } => self.key_token(*left),
+            AstKind::NotEq { left, .. } => self.key_token(*left),
+            AstKind::Less { left, .. } => self.key_token(*left),
+            AstKind::LessOrEq { left, .. } => self.key_token(*left),
+            AstKind::Greater { left, .. } => self.key_token(*left),
+            AstKind::GreaterOrEq { left, .. } => self.key_token(*left),
+            AstKind::Add { left, .. } => self.key_token(*left),
+            AstKind::Subtract { left, .. } => self.key_token(*left),
+            AstKind::Multiply { left, .. } => self.key_token(*left),
+            AstKind::Divide { left, .. } => self.key_token(*left),
+            AstKind::Modulo { left, .. } => self.key_token(*left),
+            AstKind::And { left, .. } => self.key_token(*left),
+            AstKind::Or { left, .. } => self.key_token(*left),
+            AstKind::Xor { left, .. } => self.key_token(*left),
+            AstKind::LeftShift { left, .. } => self.key_token(*left),
+            AstKind::RightShift { left, .. } => self.key_token(*left),
+            AstKind::Subscript { left, .. } => self.key_token(*left),
+            AstKind::Call { expr, .. } => self.key_token(*expr),
+            AstKind::Cast { expr, .. } => self.key_token(*expr),
+            AstKind::Complement { expr } => self.key_token(*expr),
+            AstKind::Negate { expr } => self.key_token(*expr),
+            AstKind::Not { expr } => self.key_token(*expr),
+            AstKind::AddrOf { expr } => self.key_token(*expr),
+            AstKind::Deref { expr } => self.key_token(*expr),
+            AstKind::PreIncr { expr } => self.key_token(*expr),
+            AstKind::PreDecr { expr } => self.key_token(*expr),
+            AstKind::PostIncr { expr } => self.key_token(*expr),
+            AstKind::PostDecr { expr } => self.key_token(*expr),
+            AstKind::Initialiser { value, .. } => {
+                value.and_then(|v| self.key_token(v))
+            }
+            AstKind::CompoundInitialiser(inner) => {
+                self.key_token(inner.type_spec)
+            }
+            AstKind::Array { type_spec, .. } => self.key_token(*type_spec),
+            AstKind::Pointer { base_type_spec, .. } => {
+                self.key_token(*base_type_spec)
+            }
+            _ => None,
+        }
+    }
+
+    pub fn node_error(&self, id: AstId, class: ErrorClass) -> Error {
+        match self.key_token(id) {
+            Some(token) => error_at(token.loc, class),
+            None => error(class),
+        }
     }
 }

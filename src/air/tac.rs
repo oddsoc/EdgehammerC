@@ -25,8 +25,8 @@ use std::collections::HashMap;
 
 use crate::air::AirGenerator;
 use crate::ast::*;
-use crate::lexing::Token;
 use crate::symtab::*;
+use crate::tokenising::Token;
 use crate::types::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,7 +51,6 @@ pub enum Op {
         dst: TacId,
     },
     IntToDouble {
-        ty: TypeRef,
         src: TacId,
         dst: TacId,
     },
@@ -71,7 +70,6 @@ pub enum Op {
         dst: TacId,
     },
     Inv {
-        ty: TypeRef,
         src: TacId,
         dst: TacId,
     },
@@ -110,7 +108,6 @@ pub enum Op {
         dst: TacId,
     },
     AddPtr {
-        ty: TypeRef,
         lhs: TacId,
         rhs: TacId,
         scale: usize,
@@ -123,7 +120,6 @@ pub enum Op {
         dst: TacId,
     },
     LeftShift {
-        ty: TypeRef,
         lhs: TacId,
         rhs: TacId,
         dst: TacId,
@@ -201,12 +197,10 @@ pub enum Op {
     },
     Jump(TacId),
     JumpOnZero {
-        ty: TypeRef,
         expr: TacId,
         label: TacId,
     },
     JumpOnNotZero {
-        ty: TypeRef,
         expr: TacId,
         label: TacId,
     },
@@ -233,11 +227,10 @@ pub enum Op {
 pub enum Operand {
     Integer { ty: TypeRef, value: u64 },
     Double(f64),
-    Var(TypeRef, String),
+    Pseudo(TypeRef, String),
     PlainOperand(TacId),
     DereferencedPtr(TacId),
-    FunctionRef(String, bool),
-    StaticVarRef(TypeRef, String),
+    Sym(TypeRef, String),
 }
 
 #[derive(Debug, Clone)]
@@ -248,10 +241,9 @@ pub enum Object {
         name: String,
         global: bool,
         params: Vec<TacId>,
-        code: Vec<TacId>,
+        tac: Vec<TacId>,
     },
-    RoData(TypeRef, String, u64),
-    StaticVar(TypeRef, String, bool, TacId),
+    Data(TypeRef, String, bool, bool, TacId),
 }
 
 #[derive(Debug, Clone)]
@@ -302,7 +294,6 @@ pub struct TacGenerator {
     fp_consts: HashMap<Fp64Bits, usize>,
     pub arena: Vec<Tac>,
     tac_code: Vec<TacId>,
-    lhs_as_lval: Option<TacId>,
     symtab: Option<SymTab>,
 }
 
@@ -317,7 +308,6 @@ impl AirGenerator for TacGenerator {
             fp_consts: HashMap::new(),
             arena: Vec::new(),
             tac_code: Vec::new(),
-            lhs_as_lval: None,
             symtab: None,
         }
     }
@@ -374,10 +364,7 @@ impl TacGenerator {
         }
 
         let name = format!(".L{idx}");
-        self.alloc(Tac::Operand(Operand::StaticVarRef(
-            double_type(),
-            name.clone(),
-        )))
+        self.alloc(Tac::Operand(Operand::Sym(double_type(), name)))
     }
 
     fn named_label(&mut self, name: &str) -> TacId {
@@ -418,7 +405,7 @@ impl TacGenerator {
     fn tmp_var(&mut self, ty: TypeRef) -> TacId {
         let name = format!(".tmp.{}", self.tmp_idx);
         self.tmp_idx += 1;
-        self.alloc(Tac::Operand(Operand::Var(ty.clone(), name)))
+        self.alloc(Tac::Operand(Operand::Pseudo(ty, name)))
     }
 
     fn pseudo_name(symtab: &SymTab, sym: SymId) -> String {
@@ -432,26 +419,9 @@ impl TacGenerator {
         lhs: AstId,
         rhs: AstId,
     ) -> (TacId, TacId, TacId) {
-        let lhs_ty = type_of(arena, lhs);
-        let mut v0: TacId;
-
-        let lhs_as_lval = if let AstKind::Cast { expr, .. } = &arena[lhs].kind {
-            let v1 = self.expr(arena, *expr);
-            let lval_ty = type_of(arena, *expr);
-            v0 = self.convert(v1, &lval_ty);
-            v0 = self.cast(&lval_ty, &lhs_ty, &v0);
-            v0 = self.alloc(Tac::Operand(Operand::PlainOperand(v0)));
-            Some(v1)
-        } else {
-            v0 = self.expr(arena, lhs);
-            Some(v0)
-        };
-
-        v0 = self.convert(v0, &lhs_ty);
+        let v0 = self.expr_and_convert(arena, lhs);
         let v1 = self.expr_and_convert(arena, rhs);
         let v2 = self.tmp_var(node.ty.clone());
-
-        self.lhs_as_lval = lhs_as_lval;
 
         (v0, v1, v2)
     }
@@ -481,7 +451,7 @@ impl TacGenerator {
         let delta = if is_double_type(ty) {
             self.const_double(1.0)
         } else if is_pointer_type(ty) {
-            let base_ty = base_type_v2(ty);
+            let base_ty = as_base_type(ty);
             self.alloc(Tac::Operand(Operand::Integer {
                 ty: long_type(false),
                 value: size_of(&base_ty) as u64,
@@ -558,7 +528,7 @@ impl TacGenerator {
         let delta = if is_double_type(ty) {
             self.const_double(1.0)
         } else if is_pointer_type(ty) {
-            let base_ty = base_type_v2(ty);
+            let base_ty = as_base_type(ty);
             self.alloc(Tac::Operand(Operand::Integer {
                 ty: long_type(false),
                 value: size_of(&base_ty) as u64,
@@ -626,14 +596,12 @@ impl TacGenerator {
         let end_label = self.label();
         let v0 = self.expr_and_convert(arena, lhs);
         let v1 = self.alloc(Tac::Op(Op::JumpOnZero {
-            ty: ty.clone(),
             expr: v0,
             label: false_label,
         }));
         self.emit(v1);
         let v2 = self.expr_and_convert(arena, rhs);
         let v3 = self.alloc(Tac::Op(Op::JumpOnZero {
-            ty: ty.clone(),
             expr: v2,
             label: false_label,
         }));
@@ -677,14 +645,12 @@ impl TacGenerator {
         let end_label = self.label();
         let v0 = self.expr_and_convert(arena, lhs);
         let v1 = self.alloc(Tac::Op(Op::JumpOnNotZero {
-            ty: ty.clone(),
             expr: v0,
             label: true_label,
         }));
         self.emit(v1);
         let v2 = self.expr_and_convert(arena, rhs);
         let v3 = self.alloc(Tac::Op(Op::JumpOnNotZero {
-            ty: ty.clone(),
             expr: v2,
             label: true_label,
         }));
@@ -754,39 +720,114 @@ impl TacGenerator {
         }
     }
 
-    fn compound_assign(
-        &mut self,
-        arena: &AstArena,
-        ty: &TypeRef,
-        rhs: AstId,
-    ) -> TacId {
-        let v0 = self.expr_and_convert(arena, rhs);
-        let v1 = self.lhs_as_lval.unwrap();
+    fn compound_assign(&mut self, arena: &AstArena, rhs: AstId) -> TacId {
+        let result_ty = arena[rhs].ty.clone();
 
-        let (is_plain, inner) = match &self.arena[v1.0] {
+        let binop_id = match &arena[rhs].kind {
+            AstKind::Cast { expr, .. } => *expr,
+            _ => rhs,
+        };
+
+        let inner = &arena[binop_id];
+        let op_ty = inner.ty.clone();
+
+        let (inner_lhs, inner_rhs) = match &inner.kind {
+            AstKind::Add { left, right } => (*left, *right),
+            AstKind::Subtract { left, right } => (*left, *right),
+            AstKind::Multiply { left, right } => (*left, *right),
+            AstKind::Divide { left, right } => (*left, *right),
+            AstKind::Modulo { left, right } => (*left, *right),
+            AstKind::LeftShift { left, right } => (*left, *right),
+            AstKind::RightShift { left, right } => (*left, *right),
+            AstKind::And { left, right } => (*left, *right),
+            AstKind::Or { left, right } => (*left, *right),
+            AstKind::Xor { left, right } => (*left, *right),
+            _ => unreachable!(),
+        };
+
+        let loc_val_ty = type_of(arena, inner_lhs);
+
+        let (v0, v1) =
+            if let AstKind::Cast { expr, .. } = &arena[inner_lhs].kind {
+                let inner_ty = type_of(arena, *expr);
+                let loc = self.expr(arena, *expr);
+                let val = self.convert(loc, &inner_ty);
+                let val = self.cast(&inner_ty, &loc_val_ty, &val);
+                (loc, val)
+            } else {
+                let loc = self.expr(arena, inner_lhs);
+                let val = self.convert(loc, &loc_val_ty);
+                (loc, val)
+            };
+
+        let v2 = self.expr_and_convert(arena, inner_rhs);
+
+        let v3 = self.tmp_var(op_ty.clone());
+
+        match &inner.kind {
+            AstKind::Add { .. } => {
+                self.emit_add(&op_ty, v1, v2, v3, &loc_val_ty);
+            }
+            AstKind::Subtract { .. } => {
+                self.emit_sub(&op_ty, v1, v2, v3, &loc_val_ty);
+            }
+            AstKind::Multiply { .. } => {
+                self.emit_mul(&op_ty, v1, v2, v3);
+            }
+            AstKind::Divide { .. } => {
+                self.emit_div(&op_ty, v1, v2, v3);
+            }
+            AstKind::Modulo { .. } => {
+                self.emit_mod(&op_ty, v1, v2, v3);
+            }
+            AstKind::LeftShift { .. } => {
+                self.emit_shl(v1, v2, v3);
+            }
+            AstKind::RightShift { .. } => {
+                self.emit_shr(&op_ty, v1, v2, v3);
+            }
+            AstKind::And { .. } => {
+                self.emit_and(&op_ty, v1, v2, v3);
+            }
+            AstKind::Or { .. } => {
+                self.emit_or(&op_ty, v1, v2, v3);
+            }
+            AstKind::Xor { .. } => {
+                self.emit_xor(&op_ty, v1, v2, v3);
+            }
+            _ => unreachable!(),
+        }
+
+        let v4 = if binop_id != rhs {
+            self.cast(&op_ty, &result_ty, &v3)
+        } else {
+            v3
+        };
+
+        let (is_plain, inner) = match &self.arena[v0.0] {
             Tac::Operand(Operand::PlainOperand(obj)) => (true, *obj),
             Tac::Operand(Operand::DereferencedPtr(ptr)) => (false, *ptr),
             _ => unreachable!(),
         };
 
         if is_plain {
-            let v2 = self.alloc(Tac::Op(Op::Copy {
-                ty: ty.clone(),
-                src: v0,
+            let v = self.alloc(Tac::Op(Op::Copy {
+                ty: result_ty.clone(),
+                src: v4,
                 dst: inner,
             }));
-            self.emit(v2);
+            self.emit(v);
 
-            v1
+            v0
         } else {
-            let v2 = self.alloc(Tac::Op(Op::Store {
-                ty: ty.clone(),
-                src: v0,
+            let v = self.alloc(Tac::Op(Op::Store {
+                ty: result_ty.clone(),
+                src: v4,
                 dst: inner,
             }));
-            self.emit(v2);
+            self.emit(v);
 
-            self.alloc(Tac::Operand(Operand::PlainOperand(v0)))
+            self.alloc(Tac::Operand(Operand::PlainOperand(v4)))
         }
     }
 
@@ -801,7 +842,6 @@ impl TacGenerator {
         let e2_label = self.label();
         let v0 = self.expr_and_convert(arena, lhs);
         let v1 = self.alloc(Tac::Op(Op::JumpOnZero {
-            ty: arena[lhs].ty.clone(),
             expr: v0,
             label: e2_label,
         }));
@@ -829,6 +869,215 @@ impl TacGenerator {
         v3
     }
 
+    fn emit_add(
+        &mut self,
+        ty: &TypeRef,
+        lhs: TacId,
+        rhs: TacId,
+        dst: TacId,
+        lhs_ty: &TypeRef,
+    ) -> TacId {
+        if is_pointer_type(lhs_ty) {
+            let base_ty = as_base_type(lhs_ty);
+            let elem_size = size_of(&base_ty);
+            let v = self.alloc(Tac::Op(Op::AddPtr {
+                lhs,
+                rhs,
+                scale: elem_size,
+                dst,
+            }));
+            self.emit(v);
+        } else {
+            let v = self.alloc(Tac::Op(Op::Add {
+                ty: ty.clone(),
+                lhs,
+                rhs,
+                dst,
+            }));
+            self.emit(v);
+        }
+        dst
+    }
+
+    fn emit_sub(
+        &mut self,
+        ty: &TypeRef,
+        lhs: TacId,
+        rhs: TacId,
+        dst: TacId,
+        lhs_ty: &TypeRef,
+    ) -> TacId {
+        if is_pointer_type(lhs_ty) {
+            let base_ty = as_base_type(lhs_ty);
+            let elem_size = size_of(&base_ty);
+            let byte_offset = if elem_size == 1 {
+                rhs
+            } else {
+                let scale = self.alloc(Tac::Operand(Operand::Integer {
+                    ty: long_type(false),
+                    value: elem_size as u64,
+                }));
+                let scaled = self.tmp_var(long_type(false));
+                let v = self.alloc(Tac::Op(Op::Mul {
+                    ty: long_type(false),
+                    lhs: rhs,
+                    rhs: scale,
+                    dst: scaled,
+                }));
+                self.emit(v);
+                scaled
+            };
+            let neg = self.tmp_var(long_type(false));
+            let v = self.alloc(Tac::Op(Op::Neg {
+                ty: long_type(false),
+                src: byte_offset,
+                dst: neg,
+            }));
+            self.emit(v);
+            let v = self.alloc(Tac::Op(Op::AddPtr {
+                lhs,
+                rhs: neg,
+                scale: 1,
+                dst,
+            }));
+            self.emit(v);
+        } else {
+            let v = self.alloc(Tac::Op(Op::Sub {
+                ty: ty.clone(),
+                lhs,
+                rhs,
+                dst,
+            }));
+            self.emit(v);
+        }
+        dst
+    }
+
+    fn emit_mul(
+        &mut self,
+        ty: &TypeRef,
+        lhs: TacId,
+        rhs: TacId,
+        dst: TacId,
+    ) -> TacId {
+        let v = self.alloc(Tac::Op(Op::Mul {
+            ty: ty.clone(),
+            lhs,
+            rhs,
+            dst,
+        }));
+        self.emit(v);
+        dst
+    }
+
+    fn emit_div(
+        &mut self,
+        ty: &TypeRef,
+        lhs: TacId,
+        rhs: TacId,
+        dst: TacId,
+    ) -> TacId {
+        let v = self.alloc(Tac::Op(Op::Div {
+            ty: ty.clone(),
+            lhs,
+            rhs,
+            dst,
+        }));
+        self.emit(v);
+        dst
+    }
+
+    fn emit_mod(
+        &mut self,
+        ty: &TypeRef,
+        lhs: TacId,
+        rhs: TacId,
+        dst: TacId,
+    ) -> TacId {
+        let v = self.alloc(Tac::Op(Op::Mod {
+            ty: ty.clone(),
+            lhs,
+            rhs,
+            dst,
+        }));
+        self.emit(v);
+        dst
+    }
+
+    fn emit_shl(&mut self, lhs: TacId, rhs: TacId, dst: TacId) -> TacId {
+        let v = self.alloc(Tac::Op(Op::LeftShift { lhs, rhs, dst }));
+        self.emit(v);
+        dst
+    }
+
+    fn emit_shr(
+        &mut self,
+        ty: &TypeRef,
+        lhs: TacId,
+        rhs: TacId,
+        dst: TacId,
+    ) -> TacId {
+        let v = self.alloc(Tac::Op(Op::RightShift {
+            ty: ty.clone(),
+            lhs,
+            rhs,
+            dst,
+        }));
+        self.emit(v);
+        dst
+    }
+
+    fn emit_and(
+        &mut self,
+        ty: &TypeRef,
+        lhs: TacId,
+        rhs: TacId,
+        dst: TacId,
+    ) -> TacId {
+        let v = self.alloc(Tac::Op(Op::And {
+            ty: ty.clone(),
+            lhs,
+            rhs,
+            dst,
+        }));
+        self.emit(v);
+        dst
+    }
+
+    fn emit_or(
+        &mut self,
+        ty: &TypeRef,
+        lhs: TacId,
+        rhs: TacId,
+        dst: TacId,
+    ) -> TacId {
+        let v = self.alloc(Tac::Op(Op::Or {
+            ty: ty.clone(),
+            lhs,
+            rhs,
+            dst,
+        }));
+        self.emit(v);
+        dst
+    }
+
+    fn emit_xor(
+        &mut self,
+        ty: &TypeRef,
+        lhs: TacId,
+        rhs: TacId,
+        dst: TacId,
+    ) -> TacId {
+        let v = self.alloc(Tac::Op(Op::Xor {
+            ty: ty.clone(),
+            lhs,
+            rhs,
+            dst,
+        }));
+        self.emit(v);
+        dst
+    }
+
     fn multiply(
         &mut self,
         arena: &AstArena,
@@ -837,16 +1086,7 @@ impl TacGenerator {
         rhs: AstId,
     ) -> TacId {
         let (v0, v1, v2) = self.binop(arena, node, lhs, rhs);
-
-        let v3 = self.alloc(Tac::Op(Op::Mul {
-            ty: node.ty.clone(),
-            lhs: v0,
-            rhs: v1,
-            dst: v2,
-        }));
-        self.emit(v3);
-
-        v2
+        self.emit_mul(&node.ty, v0, v1, v2)
     }
 
     fn divide(
@@ -857,16 +1097,7 @@ impl TacGenerator {
         rhs: AstId,
     ) -> TacId {
         let (v0, v1, v2) = self.binop(arena, node, lhs, rhs);
-
-        let v3 = self.alloc(Tac::Op(Op::Div {
-            ty: node.ty.clone(),
-            lhs: v0,
-            rhs: v1,
-            dst: v2,
-        }));
-        self.emit(v3);
-
-        v2
+        self.emit_div(&node.ty, v0, v1, v2)
     }
 
     fn modulo(
@@ -877,16 +1108,7 @@ impl TacGenerator {
         rhs: AstId,
     ) -> TacId {
         let (v0, v1, v2) = self.binop(arena, node, lhs, rhs);
-
-        let v3 = self.alloc(Tac::Op(Op::Mod {
-            ty: node.ty.clone(),
-            lhs: v0,
-            rhs: v1,
-            dst: v2,
-        }));
-        self.emit(v3);
-
-        v2
+        self.emit_mod(&node.ty, v0, v1, v2)
     }
 
     fn add(
@@ -898,30 +1120,7 @@ impl TacGenerator {
     ) -> TacId {
         let (v0, v1, v2) = self.binop(arena, node, lhs, rhs);
         let lhs_ty = type_of(arena, lhs);
-
-        if is_pointer_type(&lhs_ty) {
-            let base_ty = base_type_v2(&lhs_ty);
-            let elem_size = size_of(&base_ty);
-
-            let v3 = self.alloc(Tac::Op(Op::AddPtr {
-                ty: node.ty.clone(),
-                lhs: v0,
-                rhs: v1,
-                scale: elem_size,
-                dst: v2,
-            }));
-            self.emit(v3);
-        } else {
-            let v3 = self.alloc(Tac::Op(Op::Add {
-                ty: node.ty.clone(),
-                lhs: v0,
-                rhs: v1,
-                dst: v2,
-            }));
-            self.emit(v3);
-        }
-
-        v2
+        self.emit_add(&node.ty, v0, v1, v2, &lhs_ty)
     }
 
     fn subtract_ptrs(
@@ -934,7 +1133,7 @@ impl TacGenerator {
         let (v0, v1, v2) = self.binop(arena, node, lhs, rhs);
 
         let lhs_ty = type_of(arena, lhs);
-        let base_ty = base_type_v2(&lhs_ty);
+        let base_ty = as_base_type(&lhs_ty);
 
         let v3 = self.alloc(Tac::Operand(Operand::Integer {
             ty: long_type(true),
@@ -978,56 +1177,7 @@ impl TacGenerator {
         }
 
         let (v0, v1, v2) = self.binop(arena, node, lhs, rhs);
-
-        if is_pointer_type(&lhs_ty) {
-            let base_ty = base_type_v2(&lhs_ty);
-            let elem_size = size_of(&base_ty);
-
-            let byte_offset = if elem_size == 1 {
-                v1
-            } else {
-                let v3 = self.alloc(Tac::Operand(Operand::Integer {
-                    ty: long_type(false),
-                    value: elem_size as u64,
-                }));
-                let v4 = self.tmp_var(long_type(false));
-                let v5 = self.alloc(Tac::Op(Op::Mul {
-                    ty: long_type(false),
-                    lhs: v1,
-                    rhs: v3,
-                    dst: v4,
-                }));
-                self.emit(v5);
-                v4
-            };
-
-            let v3 = self.tmp_var(long_type(false));
-            let v4 = self.alloc(Tac::Op(Op::Neg {
-                ty: long_type(false),
-                src: byte_offset,
-                dst: v3,
-            }));
-            self.emit(v4);
-
-            let v5 = self.alloc(Tac::Op(Op::AddPtr {
-                ty: node.ty.clone(),
-                lhs: v0,
-                rhs: v3,
-                scale: 1,
-                dst: v2,
-            }));
-            self.emit(v5);
-        } else {
-            let v3 = self.alloc(Tac::Op(Op::Sub {
-                ty: node.ty.clone(),
-                lhs: v0,
-                rhs: v1,
-                dst: v2,
-            }));
-            self.emit(v3);
-        }
-
-        v2
+        self.emit_sub(&node.ty, v0, v1, v2, &lhs_ty)
     }
 
     fn shift_left(
@@ -1038,16 +1188,7 @@ impl TacGenerator {
         rhs: AstId,
     ) -> TacId {
         let (v0, v1, v2) = self.binop(arena, node, lhs, rhs);
-
-        let v3 = self.alloc(Tac::Op(Op::LeftShift {
-            ty: node.ty.clone(),
-            lhs: v0,
-            rhs: v1,
-            dst: v2,
-        }));
-        self.emit(v3);
-
-        v2
+        self.emit_shl(v0, v1, v2)
     }
 
     fn shift_right(
@@ -1058,16 +1199,7 @@ impl TacGenerator {
         rhs: AstId,
     ) -> TacId {
         let (v0, v1, v2) = self.binop(arena, node, lhs, rhs);
-
-        let v3 = self.alloc(Tac::Op(Op::RightShift {
-            ty: node.ty.clone(),
-            lhs: v0,
-            rhs: v1,
-            dst: v2,
-        }));
-        self.emit(v3);
-
-        v2
+        self.emit_shr(&node.ty, v0, v1, v2)
     }
 
     fn and(
@@ -1078,16 +1210,7 @@ impl TacGenerator {
         rhs: AstId,
     ) -> TacId {
         let (v0, v1, v2) = self.binop(arena, node, lhs, rhs);
-
-        let v3 = self.alloc(Tac::Op(Op::And {
-            ty: node.ty.clone(),
-            lhs: v0,
-            rhs: v1,
-            dst: v2,
-        }));
-        self.emit(v3);
-
-        v2
+        self.emit_and(&node.ty, v0, v1, v2)
     }
 
     fn or(
@@ -1098,16 +1221,7 @@ impl TacGenerator {
         rhs: AstId,
     ) -> TacId {
         let (v0, v1, v2) = self.binop(arena, node, lhs, rhs);
-
-        let v3 = self.alloc(Tac::Op(Op::Or {
-            ty: node.ty.clone(),
-            lhs: v0,
-            rhs: v1,
-            dst: v2,
-        }));
-        self.emit(v3);
-
-        v2
+        self.emit_or(&node.ty, v0, v1, v2)
     }
 
     fn xor(
@@ -1118,16 +1232,7 @@ impl TacGenerator {
         rhs: AstId,
     ) -> TacId {
         let (v0, v1, v2) = self.binop(arena, node, lhs, rhs);
-
-        let v3 = self.alloc(Tac::Op(Op::Xor {
-            ty: node.ty.clone(),
-            lhs: v0,
-            rhs: v1,
-            dst: v2,
-        }));
-        self.emit(v3);
-
-        v2
+        self.emit_xor(&node.ty, v0, v1, v2)
     }
 
     fn equal(
@@ -1141,7 +1246,7 @@ impl TacGenerator {
         let (v0, v1, v2) = self.binop(arena, node, lhs, rhs);
 
         let v3 = self.alloc(Tac::Op(Op::Equal {
-            ty: cmp_ty.clone(),
+            ty: cmp_ty,
             lhs: v0,
             rhs: v1,
             dst: v2,
@@ -1162,7 +1267,7 @@ impl TacGenerator {
         let (v0, v1, v2) = self.binop(arena, node, lhs, rhs);
 
         let v3 = self.alloc(Tac::Op(Op::NotEq {
-            ty: cmp_ty.clone(),
+            ty: cmp_ty,
             lhs: v0,
             rhs: v1,
             dst: v2,
@@ -1183,7 +1288,7 @@ impl TacGenerator {
         let (v0, v1, v2) = self.binop(arena, node, lhs, rhs);
 
         let v3 = self.alloc(Tac::Op(Op::Less {
-            ty: cmp_ty.clone(),
+            ty: cmp_ty,
             lhs: v0,
             rhs: v1,
             dst: v2,
@@ -1204,7 +1309,7 @@ impl TacGenerator {
 
         let cmp_ty = type_of(arena, lhs);
         let v3 = self.alloc(Tac::Op(Op::LessOrEq {
-            ty: cmp_ty.clone(),
+            ty: cmp_ty,
             lhs: v0,
             rhs: v1,
             dst: v2,
@@ -1225,7 +1330,7 @@ impl TacGenerator {
         let (v0, v1, v2) = self.binop(arena, node, lhs, rhs);
 
         let v3 = self.alloc(Tac::Op(Op::Greater {
-            ty: cmp_ty.clone(),
+            ty: cmp_ty,
             lhs: v0,
             rhs: v1,
             dst: v2,
@@ -1246,7 +1351,7 @@ impl TacGenerator {
 
         let cmp_ty = type_of(arena, lhs);
         let v3 = self.alloc(Tac::Op(Op::GreaterOrEq {
-            ty: cmp_ty.clone(),
+            ty: cmp_ty,
             lhs: v0,
             rhs: v1,
             dst: v2,
@@ -1266,34 +1371,33 @@ impl TacGenerator {
         let symtab = self.scopes();
         let sym = resolve(symtab, arena, &expr_id).unwrap();
         let name_str = arena.token_str(name);
-        let is_defined = symtab.has_def(node.scope, name_str);
         let sym_node = sym_as_node(symtab, sym).unwrap();
         let sym_type = arena[sym_node].ty.clone();
 
         match &arena[sym_node].kind {
             AstKind::Function { name, .. } => {
-                self.alloc(Tac::Operand(Operand::FunctionRef(
+                self.alloc(Tac::Operand(Operand::Sym(
+                    sym_type,
                     arena.token_str(name.as_ref().unwrap()).to_string(),
-                    is_defined,
                 )))
             }
             _ => {
                 if has_static_storage_duration(symtab, sym) {
                     if has_linkage(symtab, sym) {
-                        self.alloc(Tac::Operand(Operand::StaticVarRef(
+                        self.alloc(Tac::Operand(Operand::Sym(
                             sym_type,
                             name_str.to_string(),
                         )))
                     } else {
                         let at_scope = symtab[sym].at_scope.0;
                         let mangled_name = format!("{}.{}", name_str, at_scope);
-                        self.alloc(Tac::Operand(Operand::StaticVarRef(
+                        self.alloc(Tac::Operand(Operand::Sym(
                             sym_type,
-                            mangled_name.clone(),
+                            mangled_name,
                         )))
                     }
                 } else {
-                    self.alloc(Tac::Operand(Operand::Var(
+                    self.alloc(Tac::Operand(Operand::Pseudo(
                         node.ty.clone(),
                         Self::pseudo_name(symtab, sym),
                     )))
@@ -1337,14 +1441,13 @@ impl TacGenerator {
         let v0 = self.tmp_var(ty.clone());
         let v1 = self.alloc(Tac::Op(Op::GreaterOrEq {
             ty: ty.clone(),
-            lhs: lhs,
+            lhs,
             rhs: upper_bound,
             dst: v0,
         }));
         self.emit(v1);
 
         let v2 = self.alloc(Tac::Op(Op::JumpOnNotZero {
-            ty: ty.clone(),
             expr: v0,
             label: out_of_range,
         }));
@@ -1353,7 +1456,7 @@ impl TacGenerator {
         let v3 = self.alloc(Tac::Op(Op::DoubleToUlong {
             ty: ty.clone(),
             src: lhs,
-            dst: dst,
+            dst,
         }));
         self.emit(v3);
         let v4 = self.alloc(Tac::Op(Op::Jump(end)));
@@ -1363,7 +1466,7 @@ impl TacGenerator {
         let v5 = self.tmp_var(ty.clone());
         let v6 = self.alloc(Tac::Op(Op::Sub {
             ty: ty.clone(),
-            lhs: lhs,
+            lhs,
             rhs: upper_bound,
             dst: v5,
         }));
@@ -1390,7 +1493,7 @@ impl TacGenerator {
         let v12 = self.alloc(Tac::Op(Op::Copy {
             ty: ty.clone(),
             src: v9,
-            dst: dst,
+            dst,
         }));
         self.emit(v12);
         self.emit(end);
@@ -1407,24 +1510,19 @@ impl TacGenerator {
         let v1 = self.tmp_var(int_type(true));
         let v2 = self.alloc(Tac::Op(Op::Less {
             ty: long_type(true),
-            lhs: lhs,
+            lhs,
             rhs: v0,
             dst: v1,
         }));
         self.emit(v2);
 
         let v3 = self.alloc(Tac::Op(Op::JumpOnNotZero {
-            ty: long_type(true),
             expr: v1,
             label: out_of_range,
         }));
         self.emit(v3);
 
-        let v4 = self.alloc(Tac::Op(Op::IntToDouble {
-            ty: ty.clone(),
-            src: lhs,
-            dst: dst,
-        }));
+        let v4 = self.alloc(Tac::Op(Op::IntToDouble { src: lhs, dst }));
         self.emit(v4);
         let v5 = self.alloc(Tac::Op(Op::Jump(end)));
         self.emit(v5);
@@ -1483,11 +1581,7 @@ impl TacGenerator {
         self.emit(v17);
 
         let v18 = self.tmp_var(ty.clone());
-        let v19 = self.alloc(Tac::Op(Op::IntToDouble {
-            ty: ty.clone(),
-            src: v16,
-            dst: v18,
-        }));
+        let v19 = self.alloc(Tac::Op(Op::IntToDouble { src: v16, dst: v18 }));
         self.emit(v19);
 
         let v20 = self.tmp_var(ty.clone());
@@ -1502,7 +1596,7 @@ impl TacGenerator {
         let v22 = self.alloc(Tac::Op(Op::Copy {
             ty: ty.clone(),
             src: v20,
-            dst: dst,
+            dst,
         }));
         self.emit(v22);
 
@@ -1520,7 +1614,7 @@ impl TacGenerator {
         let v2 = self.alloc(Tac::Op(Op::Truncate {
             ty: ty.clone(),
             src: v0,
-            dst: dst,
+            dst,
         }));
         self.emit(v2);
     }
@@ -1539,7 +1633,7 @@ impl TacGenerator {
 
         let name = format!(".tmp.{}", self.tmp_idx);
         self.tmp_idx += 1;
-        let v1 = self.alloc(Tac::Operand(Operand::Var(to_ty.clone(), name)));
+        let v1 = self.alloc(Tac::Operand(Operand::Pseudo(to_ty.clone(), name)));
 
         let src_is_double = is_double_type(from_ty);
         let dst_is_double = is_double_type(to_ty);
@@ -1563,11 +1657,8 @@ impl TacGenerator {
             }
         } else if src_is_int && dst_is_double {
             if is_signed(from_ty) {
-                let v2 = self.alloc(Tac::Op(Op::IntToDouble {
-                    ty: to_ty.clone(),
-                    src: v0,
-                    dst: v1,
-                }));
+                let v2 =
+                    self.alloc(Tac::Op(Op::IntToDouble { src: v0, dst: v1 }));
                 self.emit(v2);
             } else {
                 if size_of(from_ty) == 8 {
@@ -1580,11 +1671,8 @@ impl TacGenerator {
                         dst: v2,
                     }));
                     self.emit(v3);
-                    let v4 = self.alloc(Tac::Op(Op::IntToDouble {
-                        ty: to_ty.clone(),
-                        src: v2,
-                        dst: v1,
-                    }));
+                    let v4 = self
+                        .alloc(Tac::Op(Op::IntToDouble { src: v2, dst: v1 }));
                     self.emit(v4);
                 }
             }
@@ -1629,11 +1717,7 @@ impl TacGenerator {
     ) -> TacId {
         let (v0, v1) = self.unop(arena, &node.ty, lhs);
 
-        let v2 = self.alloc(Tac::Op(Op::Inv {
-            ty: node.ty.clone(),
-            src: v0,
-            dst: v1,
-        }));
+        let v2 = self.alloc(Tac::Op(Op::Inv { src: v0, dst: v1 }));
         self.emit(v2);
 
         v1
@@ -1740,15 +1824,14 @@ impl TacGenerator {
 
     fn subscript(&mut self, arena: &AstArena, lhs: AstId, rhs: AstId) -> TacId {
         let ptr_ty = type_of(arena, lhs);
-        let base_ty = base_type_v2(&ptr_ty);
+        let base_ty = as_base_type(&ptr_ty);
         let elem_size = size_of(&base_ty);
 
         let v0 = self.expr_and_convert(arena, lhs);
         let v1 = self.expr_and_convert(arena, rhs);
 
-        let v2 = self.tmp_var(ptr_ty.clone());
+        let v2 = self.tmp_var(ptr_ty);
         let v3 = self.alloc(Tac::Op(Op::AddPtr {
-            ty: ptr_ty.clone(),
             lhs: v0,
             rhs: v1,
             scale: elem_size,
@@ -1792,7 +1875,7 @@ impl TacGenerator {
             AstKind::ConstUnsignedLong(val) => {
                 v0 = self.alloc(Tac::Operand(Operand::Integer {
                     ty: type_of(arena, expr_id),
-                    value: *val as u64,
+                    value: *val,
                 }));
             }
             AstKind::ConstDouble(val) => {
@@ -1937,7 +2020,7 @@ impl TacGenerator {
                 left: _,
                 right: rhs,
             } => {
-                return self.compound_assign(arena, &node.ty, *rhs);
+                return self.compound_assign(arena, *rhs);
             }
             AstKind::Ternary {
                 left: lhs,
@@ -1959,19 +2042,14 @@ impl TacGenerator {
             } => {
                 let v1 = self.expr_and_convert(arena, *lhs);
                 let from_ty = type_of(arena, *lhs);
-                let to_ty = node.ty.clone();
-                v0 = self.cast(&from_ty, &to_ty, &v1);
+                v0 = self.cast(&from_ty, &node.ty, &v1);
             }
 
             AstKind::Initialiser {
                 type_spec: _,
-                value,
+                value: Some(lhs),
             } => {
-                if let Some(lhs) = value {
-                    v0 = self.expr_and_convert(arena, *lhs);
-                } else {
-                    unreachable!()
-                }
+                v0 = self.expr_and_convert(arena, *lhs);
             }
 
             AstKind::Deref { expr: lhs } => {
@@ -2021,8 +2099,8 @@ impl TacGenerator {
                     let symtab = self.scopes();
                     let sym = resolve(symtab, arena, &param).unwrap();
                     let ty = arena[param].ty.clone();
-                    let v0 = self.alloc(Tac::Operand(Operand::Var(
-                        ty.clone(),
+                    let v0 = self.alloc(Tac::Operand(Operand::Pseudo(
+                        ty,
                         Self::pseudo_name(symtab, sym),
                     )));
                     tac_params.push(v0);
@@ -2042,7 +2120,7 @@ impl TacGenerator {
             let v1 = self.alloc(Tac::Op(Op::Return(int_type(true), v0)));
             self.emit(v1);
 
-            let body_code: Vec<TacId> =
+            let body_tac: Vec<TacId> =
                 self.tac_code.drain(body_start..).collect();
 
             self.label_map = saved_label_map;
@@ -2056,9 +2134,9 @@ impl TacGenerator {
 
             let v2 = self.alloc(Tac::Object(Object::Function {
                 name: arena.token_str(name).to_string(),
-                global: global,
+                global,
                 params: tac_params,
-                code: body_code,
+                tac: body_tac,
             }));
 
             self.emit(v2);
@@ -2074,7 +2152,6 @@ impl TacGenerator {
     fn if_stmt(
         &mut self,
         arena: &AstArena,
-        node: &Ast,
         cond: AstId,
         then: AstId,
         otherwise: &Option<AstId>,
@@ -2087,10 +2164,9 @@ impl TacGenerator {
         let end_label = self.label();
         let v0 = self.expr_and_convert(arena, cond);
         let v1 = self.alloc(Tac::Op(Op::JumpOnZero {
-            ty: node.ty.clone(),
             expr: v0,
-            label: if else_label.is_some() {
-                else_label.unwrap()
+            label: if let Some(l) = else_label {
+                l
             } else {
                 end_label
             },
@@ -2140,7 +2216,6 @@ impl TacGenerator {
                 self.emit(v5);
                 let case_label = self.case_label(arena[c].scope, c.0);
                 let v6 = self.alloc(Tac::Op(Op::JumpOnNotZero {
-                    ty: node.ty.clone(),
                     expr: v4,
                     label: case_label,
                 }));
@@ -2167,13 +2242,7 @@ impl TacGenerator {
         self.emit(break_label);
     }
 
-    fn do_while_stmt(
-        &mut self,
-        arena: &AstArena,
-        node: &Ast,
-        cond: AstId,
-        body: AstId,
-    ) {
+    fn do_while_stmt(&mut self, arena: &AstArena, cond: AstId, body: AstId) {
         let start_label = self.label();
         self.emit(start_label);
         self.stmt_or_decl(arena, body);
@@ -2181,7 +2250,6 @@ impl TacGenerator {
         self.emit(continue_label);
         let v0 = self.expr_and_convert(arena, cond);
         let v1 = self.alloc(Tac::Op(Op::JumpOnNotZero {
-            ty: node.ty.clone(),
             expr: v0,
             label: start_label,
         }));
@@ -2190,19 +2258,12 @@ impl TacGenerator {
         self.emit(break_label);
     }
 
-    fn while_stmt(
-        &mut self,
-        arena: &AstArena,
-        node: &Ast,
-        cond: AstId,
-        body: AstId,
-    ) {
+    fn while_stmt(&mut self, arena: &AstArena, cond: AstId, body: AstId) {
         let continue_label = self.continue_label(arena[body].scope);
         self.emit(continue_label);
         let v0 = self.expr_and_convert(arena, cond);
         let break_label = self.break_label(arena[body].scope);
         let v1 = self.alloc(Tac::Op(Op::JumpOnZero {
-            ty: node.ty.clone(),
             expr: v0,
             label: break_label,
         }));
@@ -2216,7 +2277,6 @@ impl TacGenerator {
     fn for_stmt(
         &mut self,
         arena: &AstArena,
-        node: &Ast,
         init: &Option<AstId>,
         cond: &Option<AstId>,
         post: &Option<AstId>,
@@ -2231,7 +2291,6 @@ impl TacGenerator {
         if let Some(cond_id) = cond {
             let v0 = self.expr_and_convert(arena, *cond_id);
             let v1 = self.alloc(Tac::Op(Op::JumpOnZero {
-                ty: node.ty.clone(),
                 expr: v0,
                 label: break_label,
             }));
@@ -2319,12 +2378,12 @@ impl TacGenerator {
             let initialisers = if let AstKind::CompoundInitialiser(ci) =
                 &arena[init_ref].kind
             {
-                ci.initialisers.clone()
+                &ci.initialisers
             } else {
                 unreachable!()
             };
 
-            for &initialiser in &initialisers {
+            for &initialiser in initialisers {
                 self.compound_elem(arena, initialiser, dst, offset);
             }
 
@@ -2386,19 +2445,19 @@ impl TacGenerator {
                 if is_compound {
                     let symtab = self.scopes();
                     let sym_resolved = resolve(symtab, arena, &ast).unwrap();
-                    let v0 = self.alloc(Tac::Operand(Operand::Var(
+                    let v0 = self.alloc(Tac::Operand(Operand::Pseudo(
                         node.ty.clone(),
                         Self::pseudo_name(symtab, sym_resolved),
                     )));
                     let initialisers = if let AstKind::CompoundInitialiser(ci) =
                         &arena[init_ref].kind
                     {
-                        ci.initialisers.clone()
+                        &ci.initialisers
                     } else {
                         unreachable!()
                     };
                     let mut offset = 0usize;
-                    for &initialiser in &initialisers {
+                    for &initialiser in initialisers {
                         self.compound_elem(
                             arena,
                             initialiser,
@@ -2437,7 +2496,7 @@ impl TacGenerator {
                         Self::pseudo_name(symtab, sym)
                     };
                     let v0 = self.expr_and_convert(arena, init_ref);
-                    let v1 = self.alloc(Tac::Operand(Operand::Var(
+                    let v1 = self.alloc(Tac::Operand(Operand::Pseudo(
                         node.ty.clone(),
                         name,
                     )));
@@ -2472,22 +2531,22 @@ impl TacGenerator {
                 cond,
                 then,
                 otherwise,
-            } => self.if_stmt(arena, node, *cond, *then, otherwise),
+            } => self.if_stmt(arena, *cond, *then, otherwise),
             AstKind::Switch { cond, body, cases } => {
                 self.switch_stmt(arena, node, *cond, *body, cases)
             }
             AstKind::DoWhile { cond, body } => {
-                self.do_while_stmt(arena, node, *cond, *body)
+                self.do_while_stmt(arena, *cond, *body)
             }
             AstKind::While { cond, body } => {
-                self.while_stmt(arena, node, *cond, *body)
+                self.while_stmt(arena, *cond, *body)
             }
             AstKind::For {
                 init,
                 cond,
                 post,
                 body,
-            } => self.for_stmt(arena, node, init, cond, post, *body),
+            } => self.for_stmt(arena, init, cond, post, *body),
             AstKind::Return { expr, .. } => {
                 self.return_stmt(arena, &node.ty, *expr)
             }
@@ -2537,11 +2596,10 @@ impl TacGenerator {
     ) -> Option<TacId> {
         let s = &symtab[sym];
         let kind = s.kind;
-        let definition = s.definition.clone();
         let storage_class = s.storage_class;
 
         if let SymKind::Variable = &kind {
-            if let Some(Definition::Concrete) = definition {
+            if s.definition == Some(Definition::Concrete) {
                 if let Some(node) = sym_as_node(symtab, sym) {
                     let ty = arena[node].ty.clone();
                     if let AstKind::Variable { init, .. } = &arena[node].kind {
@@ -2551,14 +2609,13 @@ impl TacGenerator {
                             Some(StorageClass::Static)
                         );
 
-                        return Some(self.alloc(Tac::Object(
-                            Object::StaticVar(
-                                ty.clone(),
-                                name.to_string(),
-                                global,
-                                v0,
-                            ),
-                        )));
+                        return Some(self.alloc(Tac::Object(Object::Data(
+                            ty.clone(),
+                            name.to_string(),
+                            global,
+                            false,
+                            v0,
+                        ))));
                     }
                 }
             } else if let Some(node) = sym_as_node(symtab, sym) {
@@ -2575,18 +2632,18 @@ impl TacGenerator {
                     let v1 = self
                         .alloc(Tac::Object(Object::StaticInit(ty.clone(), v0)));
 
-                    let mut init_list: Vec<TacId> = Vec::new();
-                    init_list.push(v1);
+                    let init_list: Vec<TacId> = vec![v1];
                     let scalar_ty = innermost_base_type(&ty);
 
                     let v2 = self.alloc(Tac::Object(Object::StaticInitList(
                         init_list,
                         size_of(&scalar_ty),
                     )));
-                    let v3 = self.alloc(Tac::Object(Object::StaticVar(
-                        ty.clone(),
+                    let v3 = self.alloc(Tac::Object(Object::Data(
+                        ty,
                         name.to_string(),
                         global,
+                        false,
                         v2,
                     )));
 
@@ -2598,8 +2655,29 @@ impl TacGenerator {
         None
     }
 
-    fn rodata(&mut self, ty: TypeRef, name: &str, bits: u64) -> TacId {
-        self.alloc(Tac::Object(Object::RoData(ty, name.to_string(), bits)))
+    fn emit_fp_consts(&mut self) -> Vec<TacId> {
+        let fp_consts: Vec<_> = self
+            .fp_consts
+            .iter()
+            .map(|(bits, idx)| (bits.0, *idx))
+            .collect();
+        fp_consts
+            .iter()
+            .map(|(bits, idx)| {
+                let name = format!(".L{}", idx);
+                let ty = double_type();
+                let v0 = self.alloc(Tac::Operand(Operand::Double(
+                    f64::from_bits(*bits),
+                )));
+                let v1 =
+                    self.alloc(Tac::Object(Object::StaticInit(ty.clone(), v0)));
+                let v2 = self.alloc(Tac::Object(Object::StaticInitList(
+                    vec![v1],
+                    size_of(&ty),
+                )));
+                self.alloc(Tac::Object(Object::Data(ty, name, false, true, v2)))
+            })
+            .collect()
     }
 
     fn symbols(
@@ -2621,15 +2699,7 @@ impl TacGenerator {
             }
         }
 
-        let fp_consts: Vec<_> = self
-            .fp_consts
-            .iter()
-            .map(|(bits, idx)| (bits.0, *idx))
-            .collect();
-        for (bits, idx) in &fp_consts {
-            let name = format!(".L{}", idx);
-            v0.push(self.rodata(double_type(), &name, *bits));
-        }
+        v0.extend(self.emit_fp_consts());
 
         v0
     }
@@ -2648,20 +2718,20 @@ impl TacGenerator {
                 let initialisers = if let AstKind::CompoundInitialiser(ci) =
                     &arena[init].kind
                 {
-                    ci.initialisers.clone()
+                    &ci.initialisers
                 } else {
                     unreachable!()
                 };
 
                 let mut list: Vec<TacId> = Vec::new();
 
-                let elem_ty = base_type_v2(ty);
+                let elem_ty = as_base_type(ty);
                 let elem_size = size_of(&elem_ty);
 
                 let scalar_ty = innermost_base_type(&elem_ty);
                 let scalar_size = size_of(&scalar_ty);
 
-                for &initialiser in &initialisers {
+                for &initialiser in initialisers {
                     let before = list.len();
                     let v0 = self.static_init(arena, &elem_ty, initialiser);
                     if let Tac::Object(Object::StaticInitList(
@@ -2669,7 +2739,7 @@ impl TacGenerator {
                         _alignment,
                     )) = &self.arena[v0.0]
                     {
-                        list.extend(items.clone());
+                        list.extend(items.iter().copied());
                     } else {
                         list.push(v0);
                     }
@@ -2706,48 +2776,44 @@ impl TacGenerator {
             }
             AstKind::Initialiser {
                 type_spec: _,
-                value,
+                value: Some(expr),
             } => {
-                if let Some(expr) = value {
-                    return self.static_init(arena, ty, *expr);
-                } else {
-                    unreachable!()
-                }
+                return self.static_init(arena, ty, *expr);
             }
             AstKind::Cast { expr, .. } => {
                 return self.static_init(arena, ty, *expr);
             }
             AstKind::ConstInt(v) => {
                 if is_double_type(ty) {
-                    value = ((*v as u64) as f64).to_bits() as u64;
+                    value = ((*v as u64) as f64).to_bits();
                 } else {
                     value = *v as u64;
                 }
             }
             AstKind::ConstLong(v) => {
                 if is_double_type(ty) {
-                    value = ((*v as u64) as f64).to_bits() as u64;
+                    value = ((*v as u64) as f64).to_bits();
                 } else {
                     value = *v as u64;
                 }
             }
             AstKind::ConstUnsignedInt(v) => {
                 if is_double_type(ty) {
-                    value = ((*v as u64) as f64).to_bits() as u64;
+                    value = ((*v as u64) as f64).to_bits();
                 } else {
                     value = *v as u64;
                 }
             }
             AstKind::ConstUnsignedLong(v) => {
                 if is_double_type(ty) {
-                    value = ((*v as u64) as f64).to_bits() as u64;
+                    value = (*v as f64).to_bits();
                 } else {
-                    value = *v as u64;
+                    value = *v;
                 }
             }
             AstKind::ConstDouble(v) => {
                 if is_double_type(ty) {
-                    value = v.to_bits() as u64;
+                    value = v.to_bits();
                 } else if is_signed(ty) {
                     if size_of(ty) == 8 {
                         value = *v as i64 as u64;
@@ -2770,13 +2836,13 @@ impl TacGenerator {
         } else {
             self.alloc(Tac::Operand(Operand::Integer {
                 ty: ty.clone(),
-                value: value,
+                value,
             }))
         };
         let v1 = self.alloc(Tac::Object(Object::StaticInit(ty.clone(), v0)));
 
         init_list.push(v1);
 
-        self.alloc(Tac::Object(Object::StaticInitList(init_list, size_of(&ty))))
+        self.alloc(Tac::Object(Object::StaticInitList(init_list, size_of(ty))))
     }
 }

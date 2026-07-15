@@ -60,6 +60,7 @@ fn decode_and_strip_continuations(
     }
 
     buf.truncate(o);
+    buf.extend_from_slice(&[0u8; 4]);
     String::from_utf8(buf)
 }
 
@@ -72,11 +73,11 @@ fn decode_and_strip_continuations_simd(
     let len = buf.len();
 
     while i < len {
-        let chunk_len = (len - i).min(32);
+        let chunk_len = (len - i).min(64);
 
-        let mask = if chunk_len == 32 {
-            let chunk = u8x32::from_slice(&buf[i..i + 32]);
-            chunk.simd_eq(u8x32::splat(b'\\')).to_bitmask()
+        let mask = if chunk_len == 64 {
+            let chunk = u8x64::from_slice(&buf[i..i + 64]);
+            chunk.simd_eq(u8x64::splat(b'\\')).to_bitmask()
         } else {
             1
         };
@@ -109,12 +110,13 @@ fn decode_and_strip_continuations_simd(
                 i += chunk_len;
             }
         } else {
-            buf.copy_within(i..i + 32, o);
-            i += 32;
-            o += 32;
+            buf.copy_within(i..i + 64, o);
+            i += 64;
+            o += 64;
         }
     }
 
     buf.truncate(o);
+    buf.extend_from_slice(&[0u8; 4]);
     String::from_utf8(buf)
 }
