@@ -30,8 +30,11 @@ use crate::errors::{report_error, report_errors};
 use crate::preprocessing::*;
 use crate::tokenising::*;
 use crate::{
-    air::AirGenerator, air::tac::TacGenerator, asm::x86_64::linux::asm,
-    mir::MirGenerator, mir::abi::set_abi, mir::x86_64::sysv::SysvAbi,
+    air::AirGenerator, air::tac::TacGenerator,
+    asm::rv64::linux::asm as rv64_asm, asm::x86_64::linux::asm,
+    mir::MirGenerator, mir::abi::set_abi, mir::rv64::lp64d::Lp64dAbi,
+    mir::rv64::lp64d::mir::MirGenerator as Rv64Codegen,
+    mir::x86_64::sysv::SysvAbi,
     mir::x86_64::sysv::mir::MirGenerator as Codegen,
 };
 use crate::{ast::*, parsing::Parser, semantics::*, symtab::SymTab, types::*};
@@ -46,6 +49,7 @@ pub struct Config {
     pub output_asm: bool,
     pub output_dir: Option<PathBuf>,
     pub link_to: Vec<String>,
+    pub target: String,
 }
 
 fn usage(program: &str) {
@@ -60,6 +64,9 @@ fn usage(program: &str) {
     eprintln!("  -c                 Compile only; do not link");
     eprintln!("  -o <output>        Write output to <output>");
     eprintln!("  -l <library>       Link against <library>");
+    eprintln!(
+        "  --target <arch>    Target architecture: x86_64 (default) or rv64"
+    );
     eprintln!("  --help             Show this help message and exit");
 }
 
@@ -90,6 +97,7 @@ fn parse_option_arg<'a>(
 
 pub fn parse_args(args: &[String]) -> (Vec<Translation>, Config) {
     let mut config = Config::default();
+    config.target = "x86_64".to_string();
     let mut files: Vec<PathBuf> = Vec::new();
     let mut i = 1;
 
@@ -118,6 +126,22 @@ pub fn parse_args(args: &[String]) -> (Vec<Translation>, Config) {
             _ if arg.starts_with("-l") => {
                 let lib = parse_option_arg(args, &mut i, "-l");
                 config.link_to.push(lib.to_string());
+            }
+            _ if arg == "--target" => {
+                let target = parse_option_arg(args, &mut i, "--target");
+                if target != "x86_64" && target != "rv64" {
+                    eprintln!("unsupported target: {}", target);
+                    std::process::exit(1);
+                }
+                config.target = target.to_string();
+            }
+            _ if arg.starts_with("--target=") => {
+                let target = &arg["--target=".len()..];
+                if target != "x86_64" && target != "rv64" {
+                    eprintln!("unsupported target: {}", target);
+                    std::process::exit(1);
+                }
+                config.target = target.to_string();
             }
             _ if arg.starts_with('-') => {
                 eprintln!("unknown option: {}", arg);
@@ -275,14 +299,28 @@ fn codegen(translations: &[Translation], config: &Config) {
             println!("Tac: {:#?}", ir);
         }
 
-        let mut codegen = Codegen::new();
-        let mir = codegen.lower(ir);
-        if debug {
-            println!("Mir: {:#?}", mir);
-        }
+        let emit_rv64 = config.target == "rv64";
 
-        if emit {
-            asm::emit(translation.s_file.to_str().unwrap(), &mir);
+        if emit_rv64 {
+            let mut codegen = Rv64Codegen::new();
+            let mir = codegen.lower(ir);
+            if debug {
+                println!("Mir: {:#?}", mir);
+            }
+
+            if emit {
+                rv64_asm::emit(translation.s_file.to_str().unwrap(), &mir);
+            }
+        } else {
+            let mut codegen = Codegen::new();
+            let mir = codegen.lower(ir);
+            if debug {
+                println!("Mir: {:#?}", mir);
+            }
+
+            if emit {
+                asm::emit(translation.s_file.to_str().unwrap(), &mir);
+            }
         }
 
         s_files.push(translation.s_file.to_str().unwrap().to_string());
@@ -329,7 +367,10 @@ fn assemble_cc(s_files: &[String], output: &str, link: bool, config: &Config) {
 }
 
 pub fn run(translations: &[Translation], config: &Config) {
-    set_abi(&SysvAbi);
+    match config.target.as_str() {
+        "rv64" => set_abi(&Lp64dAbi),
+        _ => set_abi(&SysvAbi),
+    }
 
     if config.codegen {
         codegen(translations, config);

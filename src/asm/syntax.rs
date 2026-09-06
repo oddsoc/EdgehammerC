@@ -21,6 +21,22 @@
  *  DEALINGS IN THE SOFTWARE.
  */
 
-pub mod rv64;
-pub(crate) mod syntax;
-pub mod x86_64;
+pub const OPERAND_COL: usize = 8;
+
+pub fn pad_inst(s: &str) -> String {
+    let rest = s.strip_prefix('\t').unwrap_or(s);
+    let mut out = String::with_capacity(s.len() + 12);
+    out.push('\t');
+    match rest.find([' ', '\t']) {
+        Some(i) if i > 0 => {
+            out.push_str(&rest[..i]);
+            let pad = OPERAND_COL.saturating_sub(i).max(1);
+            for _ in 0..pad {
+                out.push(' ');
+            }
+            out.push_str(&rest[i..].trim_start_matches([' ', '\t']));
+        }
+        _ => out.push_str(rest),
+    }
+    out
+}

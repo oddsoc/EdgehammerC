@@ -21,6 +21,66 @@
  *  DEALINGS IN THE SOFTWARE.
  */
 
-pub mod rv64;
-pub(crate) mod syntax;
-pub mod x86_64;
+use crate::mir::abi::Abi;
+
+pub struct Lp64dAbi;
+
+impl Abi for Lp64dAbi {
+    fn pointer_size(&self) -> usize {
+        8
+    }
+    fn pointer_alignment(&self) -> usize {
+        8
+    }
+    fn int_size(&self) -> usize {
+        4
+    }
+    fn int_alignment(&self) -> usize {
+        4
+    }
+    fn long_size(&self) -> usize {
+        8
+    }
+    fn long_alignment(&self) -> usize {
+        8
+    }
+    fn long_long_size(&self) -> usize {
+        8
+    }
+    fn long_long_alignment(&self) -> usize {
+        8
+    }
+    fn double_size(&self) -> usize {
+        8
+    }
+    fn double_alignment(&self) -> usize {
+        8
+    }
+    fn long_double_size(&self) -> usize {
+        16
+    }
+    fn long_double_alignment(&self) -> usize {
+        16
+    }
+    fn void_size(&self) -> usize {
+        1
+    }
+    fn void_alignment(&self) -> usize {
+        1
+    }
+    fn function_size(&self) -> usize {
+        1
+    }
+    fn function_alignment(&self) -> usize {
+        8
+    }
+    fn stack_alignment(&self) -> usize {
+        16
+    }
+    fn max_gp_arg_regs(&self) -> usize {
+        8
+    }
+    fn max_fp_arg_regs(&self) -> usize {
+        8
+    }
+}

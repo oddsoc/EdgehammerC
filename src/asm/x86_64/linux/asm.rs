@@ -22,12 +22,23 @@
  */
 
 use std::fmt::Display;
+use std::fmt::Write as FmtWrite;
 use std::io::Write;
 use std::path::Path;
 
+use crate::asm::syntax::pad_inst;
 use crate::mir::x86_64::sysv::mir::{
     Mir, MirArena, MirId, MirStage, Object, Op, Operand,
 };
+
+fn fmt_inst(
+    f: &mut std::fmt::Formatter<'_>,
+    args: std::fmt::Arguments<'_>,
+) -> std::fmt::Result {
+    let mut s = String::new();
+    s.write_fmt(args)?;
+    write!(f, "{}", pad_inst(&s))
+}
 
 struct SizeSuffix(usize);
 
@@ -228,9 +239,9 @@ impl<'a> AsmMir<'a> {
             }
             Op::Cqo(size) => {
                 if *size == 8 {
-                    write!(f, "\tcqo")
+                    fmt_inst(f, format_args!("\tcqo"))
                 } else {
-                    write!(f, "\tcdq")
+                    fmt_inst(f, format_args!("\tcdq"))
                 }
             }
 
@@ -241,29 +252,35 @@ impl<'a> AsmMir<'a> {
             Op::Ucomisd(src, dst) => {
                 fmt_binary(f, arena, "ucomisd", *src, *dst)
             }
-            Op::Test(src, dst) => write!(
+            Op::Test(src, dst) => fmt_inst(
                 f,
-                "\ttest\t{}, {}",
-                AsmMir { arena, id: *src },
-                AsmMir { arena, id: *dst }
+                format_args!(
+                    "\ttest\t{}, {}",
+                    AsmMir { arena, id: *src },
+                    AsmMir { arena, id: *dst }
+                ),
             ),
 
             // Control flow
-            Op::Jmp(label) => {
-                write!(f, "\tjmp\t{}", AsmMir { arena, id: *label })
-            }
-            Op::Jnz(label) => {
-                write!(f, "\tjnz\t{}", AsmMir { arena, id: *label })
-            }
-            Op::Jcc { cond, label } => {
-                write!(f, "\tj{} \t{}", cond, AsmMir { arena, id: *label })
-            }
-            Op::Setcc { cond, dst } => {
-                write!(f, "\tset{}\t{}", cond, AsmMir { arena, id: *dst })
-            }
+            Op::Jmp(label) => fmt_inst(
+                f,
+                format_args!("\tjmp\t{}", AsmMir { arena, id: *label }),
+            ),
+            Op::Jnz(label) => fmt_inst(
+                f,
+                format_args!("\tjnz\t{}", AsmMir { arena, id: *label }),
+            ),
+            Op::Jcc { cond, label } => fmt_inst(
+                f,
+                format_args!("\tj{} \t{}", cond, AsmMir { arena, id: *label }),
+            ),
+            Op::Setcc { cond, dst } => fmt_inst(
+                f,
+                format_args!("\tset{}\t{}", cond, AsmMir { arena, id: *dst }),
+            ),
             Op::Label(idx) => write!(f, ".L{}:", idx),
             Op::Call(func) => {
-                write!(f, "\tcall\t")?;
+                fmt_inst(f, format_args!("\tcall\t"))?;
                 match &arena[*func] {
                     Mir::Operand(Operand::Sym(name), _) => {
                         write!(f, "{}", name)
@@ -276,14 +293,20 @@ impl<'a> AsmMir<'a> {
             Op::Push(val, size) => {
                 fmt_unary_size(f, arena, "push", *size, *val)
             }
-            Op::PushBytes(n) => write!(f, "\tsubq\t${}, %rsp", n),
-            Op::PopBytes(n) => write!(f, "\taddq\t${}, %rsp", n),
+            Op::PushBytes(n) => {
+                fmt_inst(f, format_args!("\tsubq\t${}, %rsp", n))
+            }
+            Op::PopBytes(n) => {
+                fmt_inst(f, format_args!("\taddq\t${}, %rsp", n))
+            }
 
             // Return
             Op::Ret => {
-                writeln!(f, "\tmovq\t%rbp, %rsp")?;
-                writeln!(f, "\tpopq\t%rbp")?;
-                write!(f, "\tret")
+                fmt_inst(f, format_args!("\tmovq\t%rbp, %rsp"))?;
+                f.write_char('\n')?;
+                fmt_inst(f, format_args!("\tpopq\t%rbp"))?;
+                f.write_char('\n')?;
+                fmt_inst(f, format_args!("\tret"))
             }
         }
     }
@@ -297,13 +320,15 @@ fn fmt_binary_size(
     src: MirId,
     dst: MirId,
 ) -> std::fmt::Result {
-    write!(
+    fmt_inst(
         f,
-        "\t{}{}\t{}, {}",
-        mnemonic,
-        SizeSuffix(size),
-        AsmMir { arena, id: src },
-        AsmMir { arena, id: dst }
+        format_args!(
+            "\t{}{}\t{}, {}",
+            mnemonic,
+            SizeSuffix(size),
+            AsmMir { arena, id: src },
+            AsmMir { arena, id: dst }
+        ),
     )
 }
 
@@ -314,12 +339,14 @@ fn fmt_binary(
     src: MirId,
     dst: MirId,
 ) -> std::fmt::Result {
-    write!(
+    fmt_inst(
         f,
-        "\t{}\t{}, {}",
-        mnemonic,
-        AsmMir { arena, id: src },
-        AsmMir { arena, id: dst }
+        format_args!(
+            "\t{}\t{}, {}",
+            mnemonic,
+            AsmMir { arena, id: src },
+            AsmMir { arena, id: dst }
+        ),
     )
 }
 
@@ -330,12 +357,14 @@ fn fmt_unary_size(
     size: usize,
     op: MirId,
 ) -> std::fmt::Result {
-    write!(
+    fmt_inst(
         f,
-        "\t{}{}\t{}",
-        mnemonic,
-        SizeSuffix(size),
-        AsmMir { arena, id: op }
+        format_args!(
+            "\t{}{}\t{}",
+            mnemonic,
+            SizeSuffix(size),
+            AsmMir { arena, id: op }
+        ),
     )
 }
 
@@ -353,13 +382,15 @@ fn fmt_movsx(
         4 => "l",
         _ => unreachable!(),
     };
-    write!(
+    fmt_inst(
         f,
-        "\tmovs{}{}\t{}, {}",
-        src_suffix,
-        SizeSuffix(dst_size),
-        AsmMir { arena, id: src },
-        AsmMir { arena, id: dst }
+        format_args!(
+            "\tmovs{}{}\t{}, {}",
+            src_suffix,
+            SizeSuffix(dst_size),
+            AsmMir { arena, id: src },
+            AsmMir { arena, id: dst }
+        ),
     )
 }
 
@@ -437,9 +468,14 @@ pub fn emit(filepath: &str, stage: &MirStage) {
                 writeln!(file, "\t.type {}, @function", name).unwrap();
                 writeln!(file, "{}:", name).unwrap();
 
-                writeln!(file, "\tpushq\t%rbp").unwrap();
-                writeln!(file, "\tmovq\t%rsp, %rbp").unwrap();
-                writeln!(file, "\tsubq\t${}, %rsp", stack).unwrap();
+                writeln!(file, "{}", pad_inst("\tpushq\t%rbp")).unwrap();
+                writeln!(file, "{}", pad_inst("\tmovq\t%rsp, %rbp")).unwrap();
+                writeln!(
+                    file,
+                    "{}",
+                    pad_inst(&format!("\tsubq\t${}, %rsp", stack))
+                )
+                .unwrap();
 
                 for instr in mir {
                     emit_op(&mut file, &stage.mir, *instr);

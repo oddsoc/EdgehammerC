@@ -21,6 +21,4 @@
  *  DEALINGS IN THE SOFTWARE.
  */
 
-pub mod rv64;
-pub(crate) mod syntax;
-pub mod x86_64;
+pub mod lp64d;
