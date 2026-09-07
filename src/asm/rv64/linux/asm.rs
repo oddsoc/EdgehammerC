@@ -29,7 +29,7 @@ use crate::mir::rv64::lp64d::mir::{
     Mir, MirArena, MirId, MirStage, Object, Op, Operand, Register,
 };
 
-const GP_SCRATCH: [Register; 7] = [
+const GP_SCRATCH: [Register; 18] = [
     Register::T0,
     Register::T1,
     Register::T2,
@@ -37,9 +37,20 @@ const GP_SCRATCH: [Register; 7] = [
     Register::T4,
     Register::T5,
     Register::T6,
+    Register::S1,
+    Register::S2,
+    Register::S3,
+    Register::S4,
+    Register::S5,
+    Register::S6,
+    Register::S7,
+    Register::S8,
+    Register::S9,
+    Register::S10,
+    Register::S11,
 ];
 
-const FP_SCRATCH: [Register; 12] = [
+const FP_SCRATCH: [Register; 8] = [
     Register::FT0,
     Register::FT1,
     Register::FT2,
@@ -48,10 +59,6 @@ const FP_SCRATCH: [Register; 12] = [
     Register::FT9,
     Register::FT10,
     Register::FT11,
-    Register::FS0,
-    Register::FS1,
-    Register::FA1,
-    Register::FA2,
 ];
 
 fn operand_size(arena: &MirArena, id: MirId) -> usize {
@@ -105,7 +112,6 @@ struct Emitter<'a> {
     arena: &'a MirArena,
     gp: Vec<Register>,
     fp: Vec<Register>,
-    frame: usize,
 }
 
 impl<'a> Emitter<'a> {
@@ -115,7 +121,6 @@ impl<'a> Emitter<'a> {
             arena,
             gp: Vec::new(),
             fp: Vec::new(),
-            frame: 0,
         }
     }
 
@@ -241,6 +246,18 @@ impl<'a> Emitter<'a> {
 
     fn op_load(&mut self, reg: Register, size: usize, id: MirId) {
         let m = match size {
+            1 => "lb",
+            2 => "lh",
+            4 => "lw",
+            8 => "ld",
+            _ => unreachable!("unsupported load size {}", size),
+        };
+        let mr = self.mem_ref(id);
+        self.line_fmt(format_args!("{} {}, {}", m, reg, mr));
+    }
+
+    fn op_load_zero(&mut self, reg: Register, size: usize, id: MirId) {
+        let m = match size {
             1 => "lbu",
             2 => "lhu",
             4 => "lwu",
@@ -333,13 +350,13 @@ impl<'a> Emitter<'a> {
     fn load(&mut self, dst: Register, size: usize, base: Register) {
         match size {
             1 => {
-                self.line_fmt(format_args!("lbu {}, 0({})", dst, base));
+                self.line_fmt(format_args!("lb {}, 0({})", dst, base));
             }
             2 => {
-                self.line_fmt(format_args!("lhu {}, 0({})", dst, base));
+                self.line_fmt(format_args!("lh {}, 0({})", dst, base));
             }
             4 => {
-                self.line_fmt(format_args!("lwu {}, 0({})", dst, base));
+                self.line_fmt(format_args!("lw {}, 0({})", dst, base));
             }
             8 => {
                 self.line_fmt(format_args!("ld {}, 0({})", dst, base));
@@ -506,7 +523,7 @@ impl<'a> Emitter<'a> {
             }
             Mir::Operand(Operand::Mem(_, _), _)
             | Mir::Operand(Operand::Sym(_), _) => {
-                self.op_load(d, src_size, src);
+                self.op_load_zero(d, src_size, src);
             }
             _ => unreachable!(),
         }
@@ -680,15 +697,20 @@ impl<'a> Emitter<'a> {
         let v = self.gp(lhs);
         let d = self.dst_reg(dst);
 
-        let (imm_m, reg_m) = match kind {
-            ShiftKind::Shl => ("slli", "sllw"),
-            ShiftKind::Shr => ("srli", "srlw"),
-            ShiftKind::Sar => ("srai", "sraw"),
+        let imm_m64 = match kind {
+            ShiftKind::Shl => "slli",
+            ShiftKind::Shr => "srli",
+            ShiftKind::Sar => "srai",
         };
-        let full_m = match kind {
-            ShiftKind::Shl => "sll",
-            ShiftKind::Shr => "srl",
-            ShiftKind::Sar => "sra",
+        let imm_m32 = match kind {
+            ShiftKind::Shl => "slliw",
+            ShiftKind::Shr => "srliw",
+            ShiftKind::Sar => "sraiw",
+        };
+        let reg_m = match kind {
+            ShiftKind::Shl => ("sllw", "sll"),
+            ShiftKind::Shr => ("srlw", "srl"),
+            ShiftKind::Sar => ("sraw", "sra"),
         };
 
         let value = if size < 4 {
@@ -703,31 +725,22 @@ impl<'a> Emitter<'a> {
             v
         };
 
-        match &self.arena[rhs] {
-            Mir::Operand(Operand::Imm(amt), _) => {
-                if size == 4 {
+        {
+            let m = if size == 4 { imm_m32 } else { imm_m64 };
+            let (reg_m32, reg_m64) = reg_m;
+            match &self.arena[rhs] {
+                Mir::Operand(Operand::Imm(amt), _) => {
                     self.line_fmt(format_args!(
                         "{} {}, {}, {}",
-                        imm_m, d, value, *amt
-                    ));
-                } else {
-                    self.line_fmt(format_args!(
-                        "{} {}, {}, {}",
-                        imm_m, d, value, *amt
+                        m, d, value, *amt
                     ));
                 }
-            }
-            _ => {
-                let a = self.gp(rhs);
-                if size == 4 {
+                _ => {
+                    let a = self.gp(rhs);
+                    let m = if size == 4 { reg_m32 } else { reg_m64 };
                     self.line_fmt(format_args!(
                         "{} {}, {}, {}",
-                        reg_m, d, value, a
-                    ));
-                } else {
-                    self.line_fmt(format_args!(
-                        "{} {}, {}, {}",
-                        full_m, d, value, a
+                        m, d, value, a
                     ));
                 }
             }
@@ -839,10 +852,20 @@ impl<'a> Emitter<'a> {
     }
 
     fn ret(&mut self) {
-        let frame = self.frame;
+        self.line("ld s11, -104(s0)");
+        self.line("ld s10, -96(s0)");
+        self.line("ld s9, -88(s0)");
+        self.line("ld s8, -80(s0)");
+        self.line("ld s7, -72(s0)");
+        self.line("ld s6, -64(s0)");
+        self.line("ld s5, -56(s0)");
+        self.line("ld s4, -48(s0)");
+        self.line("ld s3, -40(s0)");
+        self.line("ld s2, -32(s0)");
+        self.line("ld s1, -24(s0)");
         self.line("ld ra, -8(s0)");
-        self.line("ld s0, -16(s0)");
-        self.line_fmt(format_args!("addi sp, s0, -{}", frame));
+        self.line("addi sp, s0, 0");
+        self.line("ld s0, -16(sp)");
         self.line("ret");
     }
 
@@ -916,6 +939,16 @@ impl<'a> Emitter<'a> {
                 self.begin(pinned);
                 self.movf(*src, *dst);
             }
+            Op::MovFToGp(src, dst) => {
+                let pinned = collect_pinned(self.arena, &[*src]);
+                self.begin(pinned);
+                let f = self.fp(*src);
+                let gp = match &self.arena[*dst] {
+                    Mir::Operand(Operand::Reg(reg), _) => *reg,
+                    _ => unreachable!(),
+                };
+                self.line_fmt(format_args!("fmv.x.d {}, {}", gp, f));
+            }
             Op::Load(src, dst, size) => {
                 let pinned = collect_pinned(self.arena, &[*src, *dst]);
                 self.begin(pinned);
@@ -961,7 +994,7 @@ impl<'a> Emitter<'a> {
                     (_, _) if *signed => "fcvt.w.d",
                     _ => "fcvt.wu.d",
                 };
-                self.line_fmt(format_args!("{} {}, {}", m, d, v));
+                self.line_fmt(format_args!("{} {}, {}, rtz", m, d, v));
                 self.store_result(d, *dst);
             }
             Op::Neg(src, dst, size) => {
@@ -1365,17 +1398,55 @@ pub fn emit(filepath: &str, stage: &MirStage) {
                 out.push_str(&format!("\t.type {}, @function\n", name));
                 out.push_str(&format!("{}:\n", name));
 
-                out.push_str(&pad_inst(&format!("addi sp, sp, -{}", stack)));
-                out.push('\n');
-                out.push_str(&pad_inst(&format!("addi s0, sp, {}", stack)));
-                out.push('\n');
-                out.push_str(&pad_inst("ld ra, -8(s0)"));
-                out.push('\n');
-                out.push_str(&pad_inst("ld s0, -16(s0)"));
-                out.push('\n');
+                if *stack <= 2047 {
+                    out.push_str(&pad_inst(&format!("addi sp, sp, -{}", stack)));
+                    out.push('\n');
+                } else {
+                    out.push_str(&pad_inst(&format!("li t0, {}", stack)));
+                    out.push('\n');
+                    out.push_str("                \tsub sp, sp, t0\n");
+                    out.push('\n');
+                }
 
-                let mut emitter = Emitter::new(&stage.mir);
-                emitter.frame = *stack;
+                for (reg, off) in [
+                    ("ra", stack - 8),
+                    ("s0", stack - 16),
+                    ("s1", stack - 24),
+                    ("s2", stack - 32),
+                    ("s3", stack - 40),
+                    ("s4", stack - 48),
+                    ("s5", stack - 56),
+                    ("s6", stack - 64),
+                    ("s7", stack - 72),
+                    ("s8", stack - 80),
+                    ("s9", stack - 88),
+                    ("s10", stack - 96),
+                    ("s11", stack - 104),
+                ] {
+                    if (off as i64) >= -2048 && off <= 2047 {
+                        out.push_str(&pad_inst(&format!("sd {}, {}(sp)", reg, off)));
+                        out.push('\n');
+                    } else {
+                        out.push_str(&pad_inst(&format!("li t0, {}", off)));
+                        out.push('\n');
+                        out.push_str("                \tadd t0, sp, t0\n");
+                        out.push('\n');
+                        out.push_str(&pad_inst(&format!("sd {}, 0(t0)", reg)));
+                        out.push('\n');
+                    }
+                }
+
+                if *stack <= 2047 {
+                    out.push_str(&pad_inst(&format!("addi s0, sp, {}", stack)));
+                    out.push('\n');
+                } else {
+                    out.push_str(&pad_inst(&format!("li t0, {}", stack)));
+                    out.push('\n');
+                    out.push_str("                \tadd s0, sp, t0\n");
+                    out.push('\n');
+                }
+
+                                let mut emitter = Emitter::new(&stage.mir);
                 for instr in mir {
                     match &stage.mir[*instr] {
                         Mir::Op(op) => emitter.emit_op(op),

@@ -188,6 +188,7 @@ pub enum Op {
     Movs(MirId, MirId),
     Movz(MirId, MirId),
     MovF(MirId, MirId),
+    MovFToGp(MirId, MirId),
     Load(MirId, MirId, usize),
     Store(MirId, MirId, usize),
     Cvtsi2sd {
@@ -547,7 +548,7 @@ impl MirGenerator {
         if double {
             self.alloc(Mir::Op(Op::FeqD(v0, v1, v2)))
         } else {
-            let size = self.operand_size(v2);
+            let size = self.operand_size(v0);
             self.alloc(Mir::Op(Op::CmpEq(v0, v1, v2, size)))
         }
     }
@@ -567,7 +568,7 @@ impl MirGenerator {
         if double {
             self.alloc(Mir::Op(Op::FneD(v0, v1, v2)))
         } else {
-            let size = self.operand_size(v2);
+            let size = self.operand_size(v0);
             self.alloc(Mir::Op(Op::CmpNe(v0, v1, v2, size)))
         }
     }
@@ -587,7 +588,7 @@ impl MirGenerator {
         if double {
             self.alloc(Mir::Op(Op::FltD(v0, v1, v2)))
         } else {
-            let size = self.operand_size(v2);
+            let size = self.operand_size(v0);
             let signed = is_signed(ty);
             self.alloc(Mir::Op(Op::CmpLt(v0, v1, v2, size, signed)))
         }
@@ -608,7 +609,7 @@ impl MirGenerator {
         if double {
             self.alloc(Mir::Op(Op::FleD(v0, v1, v2)))
         } else {
-            let size = self.operand_size(v2);
+            let size = self.operand_size(v0);
             let signed = is_signed(ty);
             self.alloc(Mir::Op(Op::CmpLe(v0, v1, v2, size, signed)))
         }
@@ -629,7 +630,7 @@ impl MirGenerator {
         if double {
             self.alloc(Mir::Op(Op::FgtD(v0, v1, v2)))
         } else {
-            let size = self.operand_size(v2);
+            let size = self.operand_size(v0);
             let signed = is_signed(ty);
             self.alloc(Mir::Op(Op::CmpGt(v0, v1, v2, size, signed)))
         }
@@ -650,7 +651,7 @@ impl MirGenerator {
         if double {
             self.alloc(Mir::Op(Op::FgeD(v0, v1, v2)))
         } else {
-            let size = self.operand_size(v2);
+            let size = self.operand_size(v0);
             let signed = is_signed(ty);
             self.alloc(Mir::Op(Op::CmpGe(v0, v1, v2, size, signed)))
         }
@@ -795,28 +796,39 @@ impl MirGenerator {
     fn classify_args(
         &self,
         args: &[TacId],
-    ) -> (Vec<TacId>, Vec<TacId>, Vec<TacId>) {
-        let mut gp_reg_args: Vec<TacId> = Vec::new();
-        let mut fp_reg_args: Vec<TacId> = Vec::new();
+    ) -> (
+        Vec<(TacId, usize)>,
+        Vec<(TacId, usize)>,
+        Vec<(TacId, usize)>,
+        Vec<TacId>,
+    ) {
+        let mut gp_reg_args: Vec<(TacId, usize)> = Vec::new();
+        let mut fp_reg_args: Vec<(TacId, usize)> = Vec::new();
+        let mut gp_double_args: Vec<(TacId, usize)> = Vec::new();
         let mut stack_args: Vec<TacId> = Vec::new();
+        let mut gp_idx = 0usize;
+        let mut fp_idx = 0usize;
 
         for arg in args {
             if self.is_double(*arg) {
-                if fp_reg_args.len() < self.abi.max_fp_arg_regs() {
-                    fp_reg_args.push(*arg);
+                if fp_idx < self.abi.max_fp_arg_regs() {
+                    fp_reg_args.push((*arg, fp_idx));
+                    fp_idx += 1;
+                } else if gp_idx < self.abi.max_gp_arg_regs() {
+                    gp_double_args.push((*arg, gp_idx));
+                    gp_idx += 1;
                 } else {
                     stack_args.push(*arg);
                 }
+            } else if gp_idx < self.abi.max_gp_arg_regs() {
+                gp_reg_args.push((*arg, gp_idx));
+                gp_idx += 1;
             } else {
-                if gp_reg_args.len() < self.abi.max_gp_arg_regs() {
-                    gp_reg_args.push(*arg);
-                } else {
-                    stack_args.push(*arg);
-                }
+                stack_args.push(*arg);
             }
         }
 
-        (gp_reg_args, fp_reg_args, stack_args)
+        (gp_reg_args, fp_reg_args, gp_double_args, stack_args)
     }
 
     fn call(
@@ -847,7 +859,8 @@ impl MirGenerator {
             Register::FA7,
         ];
 
-        let (gp_reg_args, fp_reg_args, stack_args) = self.classify_args(args);
+        let (gp_reg_args, fp_reg_args, gp_double_args, stack_args) =
+            self.classify_args(args);
 
         let stack_align = self.abi.stack_alignment();
         let stack_padding =
@@ -858,18 +871,25 @@ impl MirGenerator {
             self.emit(v0);
         }
 
-        for (i, arg) in gp_reg_args.iter().enumerate() {
+        for (arg, idx) in gp_reg_args.iter() {
             let v1 = self.expr(*arg);
-            let v2 = self.reg_for(arg_regs[i], v1);
+            let v2 = self.reg_for(arg_regs[*idx], v1);
             let op_size = self.operand_size(v2);
             let v3 = self.alloc(Mir::Op(Op::Mov(v1, v2, op_size)));
             self.emit(v3);
         }
 
-        for (i, arg) in fp_reg_args.iter().enumerate() {
+        for (arg, idx) in fp_reg_args.iter() {
             let v1 = self.expr(*arg);
-            let v2 = self.reg_for(fp_arg_regs[i], v1);
+            let v2 = self.reg_for(fp_arg_regs[*idx], v1);
             let v3 = self.alloc(Mir::Op(Op::MovF(v1, v2)));
+            self.emit(v3);
+        }
+
+        for (arg, idx) in gp_double_args.iter() {
+            let v1 = self.expr(*arg);
+            let v2 = self.reg_for(arg_regs[*idx], v1);
+            let v3 = self.alloc(Mir::Op(Op::MovFToGp(v1, v2)));
             self.emit(v3);
         }
 
@@ -977,7 +997,7 @@ impl MirGenerator {
             Tac::Op(tac::Op::Not { ty: _, src, dst }) => {
                 let v0 = self.expr(*src);
                 let v1 = self.expr(*dst);
-                let size = self.operand_size(v1);
+                let size = self.operand_size(v0);
                 let zero = self.alloc(Mir::Operand(Operand::Imm(0), size));
                 self.alloc(Mir::Op(Op::CmpEq(v0, zero, v1, size)))
             }
@@ -1077,7 +1097,11 @@ impl MirGenerator {
                 self.double_to_ulong(ty, *src, *dst)
             }
             Tac::Op(tac::Op::IntToDouble { src, dst }) => {
-                let signed = matches!(&self.tac_arena[*src], Tac::Operand(tac::Operand::Pseudo(ty, _)) if is_signed(ty));
+                let signed = match &self.tac_arena[*src] {
+                    Tac::Operand(tac::Operand::Pseudo(ty, _)) => is_signed(ty),
+                    Tac::Operand(tac::Operand::Integer { ty, .. }) => is_signed(ty),
+                    _ => true,
+                };
                 self.int_to_double(signed, *src, *dst)
             }
             Tac::Op(tac::Op::Jump(label)) => self.jump(*label),
@@ -1124,7 +1148,7 @@ impl MirGenerator {
         let saved_stack_top = self.stack_top;
         let saved_mir_len = self.mir_ids.len();
 
-        self.stack_top = -16;
+        self.stack_top = -112;
 
         let arg_regs = [
             Register::A0,
@@ -1147,21 +1171,29 @@ impl MirGenerator {
             Register::FA7,
         ];
 
-        let (gp_reg_params, fp_reg_params, stack_params) =
+        let (gp_reg_params, fp_reg_params, gp_double_params, stack_params) =
             self.classify_args(params);
 
-        for (i, param) in gp_reg_params.iter().enumerate() {
+        for (param, idx) in gp_reg_params.iter() {
             let v0 = self.expr(*param);
-            let v1 = self.reg_for(arg_regs[i], v0);
+            let v1 = self.reg_for(arg_regs[*idx], v0);
             let op_size = self.operand_size(v0);
             let v2 = self.alloc(Mir::Op(Op::Mov(v1, v0, op_size)));
             self.emit(v2);
         }
 
-        for (i, param) in fp_reg_params.iter().enumerate() {
+        for (param, idx) in fp_reg_params.iter() {
             let v0 = self.expr(*param);
-            let v1 = self.reg_for(fp_arg_regs[i], v0);
+            let v1 = self.reg_for(fp_arg_regs[*idx], v0);
             let v2 = self.alloc(Mir::Op(Op::MovF(v1, v0)));
+            self.emit(v2);
+        }
+
+        for (param, idx) in gp_double_params.iter() {
+            let v0 = self.expr(*param);
+            let v1 = self.reg_for(arg_regs[*idx], v0);
+            let op_size = self.operand_size(v0);
+            let v2 = self.alloc(Mir::Op(Op::Mov(v1, v0, op_size)));
             self.emit(v2);
         }
 

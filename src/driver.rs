@@ -97,7 +97,7 @@ fn parse_option_arg<'a>(
 
 pub fn parse_args(args: &[String]) -> (Vec<Translation>, Config) {
     let mut config = Config::default();
-    config.target = "x86_64".to_string();
+    config.target = "rv64".to_string();
     let mut files: Vec<PathBuf> = Vec::new();
     let mut i = 1;
 
